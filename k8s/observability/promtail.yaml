@@ -62,16 +62,25 @@ data:
               namespace: 'llmmllab'
               app: 'llmmllab-runner'
         pipeline_stages:
+          # 1. Strip the CRI log prefix, capture clean message
+          - regex:
+              expression: '^[0-9T:.+-]+Z\s+(stdout|stderr)\s+[FP]\s+(?P<msg>.*)$'
+          # 2. Parse the cleaned JSON log line for structured fields
           - json:
+              source: "msg"
               expressions:
                 level: level
                 component: component
                 request_id: request_id
                 event: event
+          # 3. Promote to labels
           - labels:
               level:
               component:
               request_id:
+          # 4. Replace the line sent to Loki with the clean message
+          - output:
+              source: "msg"
 ---
 apiVersion: apps/v1
 kind: DaemonSet

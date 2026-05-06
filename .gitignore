@@ -59,3 +59,4 @@ htmlcov/
 *.ldif
 Thumbs.db
 .playwright*
+.copilot*

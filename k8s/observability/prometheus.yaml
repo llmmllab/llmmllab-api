@@ -32,6 +32,10 @@ subjects:
     name: prometheus
     namespace: llmmllab
 ---
+# Secret `prometheus-metrics-api-key` (key: `api-key`) must be created out-of-band:
+#   kubectl create secret generic prometheus-metrics-api-key \
+#     --from-literal=api-key=<YOUR_API_KEY> -n llmmllab
+# Not declared here so `kubectl apply` can't overwrite the operator-set value.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -46,9 +50,13 @@ data:
     scrape_configs:
       - job_name: "llmmllab-api"
         metrics_path: /metrics
+        authorization:
+          type: Bearer
+          credentials_file: /etc/prometheus/secrets/api-key
         static_configs:
           - targets: ["llmmllab.llmmllab.svc.cluster.local:9999"]
 
+      # Runner has no auth middleware; /metrics is open within the cluster.
       - job_name: "llmmllab-runner"
         metrics_path: /metrics
         static_configs:
@@ -100,12 +108,19 @@ spec:
           volumeMounts:
             - name: config
               mountPath: /etc/prometheus
+              readOnly: true
+            - name: secrets
+              mountPath: /etc/prometheus/secrets
+              readOnly: true
             - name: data
               mountPath: /prometheus
       volumes:
         - name: config
           configMap:
             name: prometheus-config
+        - name: secrets
+          secret:
+            secretName: prometheus-metrics-api-key
         - name: data
           emptyDir: {}
 ---

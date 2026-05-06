@@ -663,9 +663,10 @@ async def createMessage(
             server_tool_names=prepared.server_tool_names or None,
         )
 
-        if result.chat_response is None:
+        if result.chat_response is None or (not result.has_content and not result.has_tool_calls):
             raise HTTPException(
-                status_code=500, detail="Workflow did not produce a response"
+                status_code=503,
+                detail="Model returned empty response after all retries. Context may be too large."
             )
 
         stop_reason_map: dict[str | None, str] = {
