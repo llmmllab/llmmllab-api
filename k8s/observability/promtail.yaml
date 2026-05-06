@@ -64,7 +64,7 @@ data:
         pipeline_stages:
           # 1. Strip the CRI log prefix, capture clean message
           - regex:
-              expression: '^[0-9T:.+-]+Z\s+(stdout|stderr)\s+F\s+(?P<msg>.*)$'
+              expression: '^[0-9T:.+-]+Z\s+(stdout|stderr)\s+[FP]\s+(?P<msg>.*)$'
           # 2. Parse the cleaned JSON log line for structured fields
           - json:
               source: "msg"

@@ -69,20 +69,29 @@ _TRUNCATION_CONTINUATION_PROMPT = (
     "If you were in the middle of text, continue the text."
 )
 
-_SENTENCE_TERMINATORS = frozenset(".!?)\n`]}")
-_TRUNCATION_MAX_LEN = 2000
+_SENTENCE_TERMINATORS = frozenset(".!?)\n`]}\"'>,:")
+_TRUNCATION_MIN_LEN = 40
 
 
-def _is_truncated(
-    text: str, finish_reason: str, truncation_max_len: int = _TRUNCATION_MAX_LEN
-) -> bool:
-    """Heuristic: response is truncated if it ends mid-word."""
-    if finish_reason not in ("length", "stop"):
-        return False
-    if len(text) > truncation_max_len:
+def _is_truncated(text: str, finish_reason: str) -> bool:
+    """Detect a response that should be continued.
+
+    `finish_reason="length"` means the model hit the token limit — always
+    truncated by definition, regardless of trailing punctuation.
+
+    `finish_reason="stop"` means the model emitted EOS. This is usually
+    intentional, but llama.cpp occasionally emits EOS mid-sentence (a
+    "premature stop"). We apply a heuristic: if the response is non-trivial
+    in length and ends without a sentence terminator, treat it as truncated.
+    Short replies are excluded — single-word answers ("OK", "42", a URL)
+    legitimately end without punctuation.
+    """
+    if finish_reason == "length":
+        return bool(text and text.strip())
+    if finish_reason != "stop":
         return False
     stripped = text.rstrip()
-    if not stripped:
+    if len(stripped) < _TRUNCATION_MIN_LEN:
         return False
     return stripped[-1] not in _SENTENCE_TERMINATORS
 
@@ -368,6 +377,11 @@ class CompletionService:
                             acc.final_content = accumulated_text + "".join(parts)
                         if event.eval_count:
                             acc.output_tokens += int(event.eval_count)
+                        # Reflect the continuation's terminal state — without
+                        # this the client would see the original "length" and
+                        # think the response is still truncated.
+                        if event.finish_reason:
+                            acc.finish_reason = event.finish_reason
                         continue
 
                     # Live delta from truncation continuation
@@ -643,6 +657,36 @@ class CompletionService:
                     if isinstance(event, ServerToolEvent):
                         continue
                     if event.done and event.message:
+                        # Merge continuation onto the original text. Without this,
+                        # `result.chat_response = event` would replace the truncated
+                        # original with only the continuation fragment.
+                        cont_text = "".join(
+                            c.text
+                            for c in (event.message.content or [])
+                            if c.type == MessageContentType.TEXT and c.text
+                        )
+                        merged = accumulated_text + cont_text
+                        if event.message.content:
+                            event.message.content = [
+                                MessageContent(
+                                    type=MessageContentType.TEXT, text=merged
+                                ),
+                                *[
+                                    c
+                                    for c in event.message.content
+                                    if c.type != MessageContentType.TEXT
+                                ],
+                            ]
+                        else:
+                            event.message.content = [
+                                MessageContent(
+                                    type=MessageContentType.TEXT, text=merged
+                                )
+                            ]
+                        if event.eval_count and result.chat_response:
+                            event.eval_count = (
+                                result.chat_response.eval_count or 0
+                            ) + int(event.eval_count)
                         result.chat_response = event
 
         # ---------- continuation check ----------

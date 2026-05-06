@@ -62,7 +62,7 @@ async def composer_chat_completion(
                     "text_preview": text[:100] if text else "",
                 },
             )
-        if event.finish_reason in ("complete", "length") and event.message:
+        if event.finish_reason in ("complete", "stop", "length") and event.message:
             message_id = await message_service.add_message(event.message)
             logger.info(
                 f"Workflow execution complete for request {request_id}, final message stored with ID {message_id}"

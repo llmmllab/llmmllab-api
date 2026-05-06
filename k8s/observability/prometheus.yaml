@@ -32,19 +32,10 @@ subjects:
     name: prometheus
     namespace: llmmllab
 ---
-# Secret containing the API key used by Prometheus to scrape /metrics
-# Set the value to a real API key from the database:
+# Secret `prometheus-metrics-api-key` (key: `api-key`) must be created out-of-band:
 #   kubectl create secret generic prometheus-metrics-api-key \
 #     --from-literal=api-key=<YOUR_API_KEY> -n llmmllab
-apiVersion: v1
-kind: Secret
-metadata:
-  name: prometheus-metrics-api-key
-  namespace: llmmllab
-type: Opaque
-stringData:
-  api-key: "CHANGE-ME-SET-REAL-API-KEY"
----
+# Not declared here so `kubectl apply` can't overwrite the operator-set value.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -59,22 +50,20 @@ data:
     scrape_configs:
       - job_name: "llmmllab-api"
         metrics_path: /metrics
-        headers:
-          X-API-Key: $(/etc/prometheus/secrets/api-key)
+        authorization:
+          type: Bearer
+          credentials_file: /etc/prometheus/secrets/api-key
         static_configs:
           - targets: ["llmmllab.llmmllab.svc.cluster.local:9999"]
 
+      # Runner has no auth middleware; /metrics is open within the cluster.
       - job_name: "llmmllab-runner"
         metrics_path: /metrics
-        headers:
-          X-API-Key: $(/etc/prometheus/secrets/api-key)
         static_configs:
           - targets: ["llmmllab-runner.llmmllab.svc.cluster.local:8000"]
 
       - job_name: "llmmllab-runner-small"
         metrics_path: /metrics
-        headers:
-          X-API-Key: $(/etc/prometheus/secrets/api-key)
         static_configs:
           - targets: ["llmmllab-runner-small.llmmllab.svc.cluster.local:8000"]
 ---
