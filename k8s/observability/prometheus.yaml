@@ -32,6 +32,19 @@ subjects:
     name: prometheus
     namespace: llmmllab
 ---
+# Secret containing the API key used by Prometheus to scrape /metrics
+# Set the value to a real API key from the database:
+#   kubectl create secret generic prometheus-metrics-api-key \
+#     --from-literal=api-key=<YOUR_API_KEY> -n llmmllab
+apiVersion: v1
+kind: Secret
+metadata:
+  name: prometheus-metrics-api-key
+  namespace: llmmllab
+type: Opaque
+stringData:
+  api-key: "CHANGE-ME-SET-REAL-API-KEY"
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -46,16 +59,22 @@ data:
     scrape_configs:
       - job_name: "llmmllab-api"
         metrics_path: /metrics
+        headers:
+          X-API-Key: $(/etc/prometheus/secrets/api-key)
         static_configs:
           - targets: ["llmmllab.llmmllab.svc.cluster.local:9999"]
 
       - job_name: "llmmllab-runner"
         metrics_path: /metrics
+        headers:
+          X-API-Key: $(/etc/prometheus/secrets/api-key)
         static_configs:
           - targets: ["llmmllab-runner.llmmllab.svc.cluster.local:8000"]
 
       - job_name: "llmmllab-runner-small"
         metrics_path: /metrics
+        headers:
+          X-API-Key: $(/etc/prometheus/secrets/api-key)
         static_configs:
           - targets: ["llmmllab-runner-small.llmmllab.svc.cluster.local:8000"]
 ---
@@ -100,12 +119,19 @@ spec:
           volumeMounts:
             - name: config
               mountPath: /etc/prometheus
+              readOnly: true
+            - name: secrets
+              mountPath: /etc/prometheus/secrets
+              readOnly: true
             - name: data
               mountPath: /prometheus
       volumes:
         - name: config
           configMap:
             name: prometheus-config
+        - name: secrets
+          secret:
+            secretName: prometheus-metrics-api-key
         - name: data
           emptyDir: {}
 ---

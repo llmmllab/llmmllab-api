@@ -276,7 +276,6 @@ async def auth_middleware_handler(request: Request, call_next):
     # Skip auth for public endpoints
     public_paths = [
         "/health",
-        "/metrics",
         "/docs",
         "/redoc",
         "/openapi.json",

@@ -63,6 +63,29 @@ _EMPTY_RESPONSE_NUDGE = (
     "and nothing else."
 )
 
+_TRUNCATION_CONTINUATION_PROMPT = (
+    "Your response was cut off. Continue from where you left off. "
+    "If you were in the middle of a tool call, complete the tool call. "
+    "If you were in the middle of text, continue the text."
+)
+
+_SENTENCE_TERMINATORS = frozenset(".!?)\n`]}")
+_TRUNCATION_MAX_LEN = 2000
+
+
+def _is_truncated(
+    text: str, finish_reason: str, truncation_max_len: int = _TRUNCATION_MAX_LEN
+) -> bool:
+    """Heuristic: response is truncated if it ends mid-word."""
+    if finish_reason not in ("length", "stop"):
+        return False
+    if len(text) > truncation_max_len:
+        return False
+    stripped = text.rstrip()
+    if not stripped:
+        return False
+    return stripped[-1] not in _SENTENCE_TERMINATORS
+
 
 # ---------------------------------------------------------------------------
 # Result containers
@@ -287,6 +310,73 @@ class CompletionService:
                 ]
                 acc.has_tool_calls = bool(acc.final_tool_calls)
 
+            # ---------- truncation continuation ----------
+            if (
+                _is_truncated(acc.final_content or "", acc.finish_reason)
+                and not acc.has_tool_calls
+            ):
+                accumulated_text = acc.final_content or ""
+                logger.info(
+                    "Model response appears truncated — sending continuation prompt",
+                    extra={
+                        "content_len": len(accumulated_text),
+                        "finish_reason": acc.finish_reason,
+                        "content_preview": accumulated_text[-200:],
+                    },
+                )
+                truncation_messages = list(messages) + [
+                    Message(
+                        role=MessageRole.ASSISTANT,
+                        content=[
+                            MessageContent(
+                                type=MessageContentType.TEXT, text=accumulated_text
+                            )
+                        ],
+                    ),
+                    Message(
+                        role=MessageRole.USER,
+                        content=[
+                            MessageContent(
+                                type=MessageContentType.TEXT,
+                                text=_TRUNCATION_CONTINUATION_PROMPT,
+                            )
+                        ],
+                    ),
+                ]
+                async for event in CompletionService._build_and_run(
+                    user_id,
+                    truncation_messages,
+                    model_name,
+                    workflow_type,
+                    conversation_id,
+                    client_tools,
+                    "auto",
+                    server_tool_names,
+                ):
+                    if isinstance(event, ServerToolEvent):
+                        continue
+                    if event.done:
+                        if event.message and event.message.tool_calls:
+                            acc.final_tool_calls = event.message.tool_calls
+                            acc.has_tool_calls = True
+                        if event.message and event.message.content:
+                            parts = [
+                                c.text
+                                for c in event.message.content
+                                if c.type == MessageContentType.TEXT and c.text
+                            ]
+                            acc.final_content = accumulated_text + "".join(parts)
+                        if event.eval_count:
+                            acc.output_tokens += int(event.eval_count)
+                        continue
+
+                    # Live delta from truncation continuation
+                    if event.message and event.message.content:
+                        for part in event.message.content:
+                            if part.type == MessageContentType.TEXT and part.text:
+                                acc.has_content = True
+                    yield event, acc
+
             # ---------- continuation check ----------
             # Skip when the model naturally stopped (finish_reason="stop") —
             # it intentionally chose not to call a tool and forcing one
@@ -503,6 +593,57 @@ class CompletionService:
                 for tc in result.chat_response.message.tool_calls
                 if tc.name not in server_tool_names
             ]
+
+        # ---------- truncation continuation ----------
+        if result.has_content and not result.has_tool_calls:
+            accumulated_text = "".join(
+                c.text
+                for c in result.chat_response.message.content  # type: ignore
+                if c.type == MessageContentType.TEXT and c.text
+            )
+            if _is_truncated(
+                accumulated_text, result.chat_response.finish_reason or ""
+            ):
+                logger.info(
+                    "Non-streaming: model response appears truncated — sending continuation prompt",
+                    extra={
+                        "content_len": len(accumulated_text),
+                        "finish_reason": result.chat_response.finish_reason,
+                    },
+                )
+                truncation_messages = list(messages) + [
+                    Message(
+                        role=MessageRole.ASSISTANT,
+                        content=[
+                            MessageContent(
+                                type=MessageContentType.TEXT, text=accumulated_text
+                            )
+                        ],
+                    ),
+                    Message(
+                        role=MessageRole.USER,
+                        content=[
+                            MessageContent(
+                                type=MessageContentType.TEXT,
+                                text=_TRUNCATION_CONTINUATION_PROMPT,
+                            )
+                        ],
+                    ),
+                ]
+                async for event in CompletionService._build_and_run(
+                    user_id,
+                    truncation_messages,
+                    model_name,
+                    workflow_type,
+                    conversation_id,
+                    client_tools,
+                    "auto",
+                    server_tool_names,
+                ):
+                    if isinstance(event, ServerToolEvent):
+                        continue
+                    if event.done and event.message:
+                        result.chat_response = event
 
         # ---------- continuation check ----------
         # Skip when the model naturally stopped or was cut off by token

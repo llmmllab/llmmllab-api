@@ -447,6 +447,27 @@ async def stream_chat_completion(
         )
         yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
 
+    # All retries produced nothing — send error message
+    if not has_content and not has_tool_calls and not final_content:
+        logger.warning("All retries produced empty response", extra={"model": model_name})
+        error_text = "[Model returned empty response after all retries. The context may be too large or the model may need to be reloaded.]"
+        error_chunk = CreateChatCompletionStreamResponse(
+            id=chunk_id,
+            object="chat.completion.chunk",
+            created=created,
+            model=model_name,
+            choices=[
+                StreamChoicesItem.model_construct(
+                    index=0,
+                    delta=ChatCompletionStreamResponseDelta(content=error_text),
+                    finish_reason=None,
+                )
+            ],
+        )
+        yield f"data: {error_chunk.model_dump_json(exclude_none=True)}\n\n"
+        final_content = error_text
+        has_content = True
+
     # Stream tool calls from the final accumulated event
     if final_tool_calls:
         tool_call_chunks = []
@@ -480,7 +501,12 @@ async def stream_chat_completion(
         yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
 
     # Final chunk with finish_reason
-    finish_reason: OAIFinishReason = "tool_calls" if has_tool_calls else "stop"
+    if has_tool_calls:
+        finish_reason: OAIFinishReason = "tool_calls"
+    elif acc.finish_reason == "length":
+        finish_reason = "length"
+    else:
+        finish_reason = "stop"
     final_chunk = CreateChatCompletionStreamResponse(
         id=chunk_id,
         object="chat.completion.chunk",
@@ -577,9 +603,10 @@ async def createChatCompletion(
         client_tools=client_tools,
         tool_choice=tool_choice,
     )
-    if result.chat_response is None:
+    if result.chat_response is None or (not result.has_content and not result.has_tool_calls):
         raise HTTPException(
-            status_code=500, detail="Workflow did not produce a response"
+            status_code=503,
+            detail="Model returned empty response after all retries. Context may be too large."
         )
     return openai_response_from_chat_response(result.chat_response, model=body.model)
 
