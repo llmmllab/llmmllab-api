@@ -140,10 +140,9 @@ class DatabaseMaintenanceService:
         )
         try:
             async with self.session_factory() as session:
-                db_name_row = await session.execute(
-                    text("SELECT current_database() as db_name")
-                )
-                db_name = db_name_row.mappings()["db_name"]  # type: ignore[index]
+                db_name = (await session.execute(
+                    text("SELECT current_database()")
+                )).scalar()
 
                 await session.execute(
                     text(f"REINDEX (VERBOSE, CONCURRENTLY) DATABASE {db_name}")
