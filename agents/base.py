@@ -5,6 +5,7 @@ Provides node metadata injection, logging setup, and common error handling patte
 
 import datetime
 import logging
+import re
 from typing import (
     Optional,
     Self,
@@ -253,6 +254,10 @@ class BaseAgent:
         """
         self._log_operation_error(operation, error, **context)
 
+    _SYSTEM_PROMPT_STRIP_RE = re.compile(
+        r"^[^*\n]*Co-Authored-By:.*$\n?", re.MULTILINE
+    )
+
     def _separate_system_prompt(
         self, messages: MessageInput
     ) -> tuple[str, List[Message]]:
@@ -279,6 +284,9 @@ class BaseAgent:
         current_date = datetime.datetime.now().strftime("%Y-%m-%d")
         system_prompt += f"""
 The current date is {current_date}."""
+
+        # Strip injected commit trailers (Co-Authored-By) from system prompt
+        system_prompt = self._SYSTEM_PROMPT_STRIP_RE.sub("", system_prompt).rstrip()
 
         return system_prompt, convo
 
