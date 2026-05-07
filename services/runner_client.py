@@ -64,6 +64,12 @@ class RunnerClient:
         self._client: Optional[httpx.AsyncClient] = None
         self._model_map: Dict[str, List[str]] = {}
         self._refresh_task: Optional[asyncio.Task] = None
+        self._unhealthy_since: Dict[str, float] = {}
+        self._acquire_failures: Dict[str, int] = {}
+        # Circuit breaker: skip a runner if it has >= this many consecutive
+        # acquire failures within the last UNHEALTHY_WINDOW seconds.
+        self._MAX_ACQUIRE_FAILURES = 3
+        self._UNHEALTHY_WINDOW = 60.0
 
     def _get_client(self) -> httpx.AsyncClient:
         """Lazily create a shared ``httpx.AsyncClient``."""
@@ -212,8 +218,42 @@ class RunnerClient:
     # Health
     # ------------------------------------------------------------------
 
+    def _is_circuit_open(self, endpoint: str) -> bool:
+        """Check if the circuit breaker is open for this runner."""
+        now = time.monotonic()
+        # Reset if outside the unhealthy window
+        if endpoint in self._unhealthy_since:
+            if now - self._unhealthy_since[endpoint] > self._UNHEALTHY_WINDOW:
+                self._unhealthy_since.pop(endpoint, None)
+                self._acquire_failures.pop(endpoint, None)
+                return False
+        failures = self._acquire_failures.get(endpoint, 0)
+        return failures >= self._MAX_ACQUIRE_FAILURES
+
+    def _record_acquire_failure(self, endpoint: str) -> None:
+        """Record an acquire failure and potentially open the circuit."""
+        self._acquire_failures[endpoint] = self._acquire_failures.get(endpoint, 0) + 1
+        self._unhealthy_since[endpoint] = time.monotonic()
+        if endpoint in self._healthy:
+            self._healthy.remove(endpoint)
+
+    def _record_acquire_success(self, endpoint: str) -> None:
+        """Reset failure count on success."""
+        self._acquire_failures.pop(endpoint, None)
+        self._unhealthy_since.pop(endpoint, None)
+
+    def _is_connection_error(self, exc: Exception) -> bool:
+        """Check if the exception is a connection-level error (disconnect, timeout, etc.)."""
+        return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout,
+                                httpx.ReadTimeout, httpx.RemoteProtocolError,
+                                ConnectionError))
+
     async def _health(self, endpoint: str) -> Optional[dict]:
         """Check health of a single runner. Returns health dict or None."""
+        # Skip runners with open circuit breaker
+        if self._is_circuit_open(endpoint):
+            logger.debug(f"Skipping health check for {endpoint}: circuit breaker open")
+            return None
         try:
             client = self._get_client()
             resp = await client.get(f"{endpoint}/health", timeout=_HEALTH_TIMEOUT)
@@ -295,36 +335,60 @@ class RunnerClient:
 
         last_error = None
         for endpoint in ordered:
-            try:
-                client = self._get_client()
-                resp = await client.post(
-                    f"{endpoint}/v1/server/create",
-                    json=payload,
-                    timeout=_ACQUIRE_TIMEOUT,
+            # Skip runners with open circuit breaker
+            if self._is_circuit_open(endpoint):
+                logger.warning(
+                    f"Skipping {endpoint}: circuit breaker open "
+                    f"({self._acquire_failures.get(endpoint, 0)} failures)"
                 )
-
-                if resp.status_code == 507:
-                    logger.warning(
-                        f"Runner {endpoint} returned 507, trying next runner"
-                    )
-                    last_error = "Insufficient capacity"
-                    continue
-
-                resp.raise_for_status()
-                data = resp.json()
-                handle = ServerHandle(
-                    base_url=f"{endpoint}/v1/server/{data['server_id']}",
-                    server_id=data["server_id"],
-                    runner_host=endpoint,
-                )
-                logger.info(f"Acquired server {handle.server_id} from {endpoint}")
-                self._schedule_refresh()
-                return handle
-
-            except Exception as e:
-                logger.warning(f"Failed to acquire from {endpoint}: {e}")
-                last_error = str(e)
                 continue
+
+            # Retry connection-level errors up to 2 times per endpoint
+            max_retries = 2
+            for attempt in range(max_retries + 1):
+                try:
+                    client = self._get_client()
+                    resp = await client.post(
+                        f"{endpoint}/v1/server/create",
+                        json=payload,
+                        timeout=_ACQUIRE_TIMEOUT,
+                    )
+
+                    if resp.status_code == 507:
+                        logger.warning(
+                            f"Runner {endpoint} returned 507, trying next runner"
+                        )
+                        last_error = "Insufficient capacity"
+                        break  # no point retrying 507
+
+                    resp.raise_for_status()
+                    data = resp.json()
+                    handle = ServerHandle(
+                        base_url=f"{endpoint}/v1/server/{data['server_id']}",
+                        server_id=data["server_id"],
+                        runner_host=endpoint,
+                    )
+                    logger.info(f"Acquired server {handle.server_id} from {endpoint}")
+                    self._record_acquire_success(endpoint)
+                    self._schedule_refresh()
+                    return handle
+
+                except Exception as e:
+                    last_error = str(e)
+                    is_conn_err = self._is_connection_error(e)
+
+                    if is_conn_err and attempt < max_retries:
+                        backoff = 2 ** attempt
+                        logger.warning(
+                            f"Connection error from {endpoint} (attempt {attempt + 1}/{max_retries + 1}), "
+                            f"retrying in {backoff}s: {e}"
+                        )
+                        await asyncio.sleep(backoff)
+                        continue
+
+                    logger.warning(f"Failed to acquire from {endpoint}: {e}")
+                    self._record_acquire_failure(endpoint)
+                    break  # move to next endpoint
 
         raise RuntimeError(
             f"No healthy runner available for model {model_id}. "
