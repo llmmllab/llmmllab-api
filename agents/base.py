@@ -360,7 +360,30 @@ The current date is {current_date}."""
             # Convert messages to LangChain format
             normalized_messages = messages_to_lc_messages(convo)
             self.logger.debug(f"Running agent with {len(normalized_messages)} messages")
-            result = await agent.ainvoke({"messages": normalized_messages})  # type: ignore
+
+            # Retry transient connection errors (e.g., APIConnectionError)
+            # up to 2 times with short backoff. Non-transient errors propagate.
+            from openai import APIConnectionError as _APIConnectionError
+
+            last_error = None
+            for attempt in range(3):
+                try:
+                    result = await agent.ainvoke({"messages": normalized_messages})  # type: ignore
+                    break
+                except _APIConnectionError as e:
+                    last_error = e
+                    if attempt < 2:
+                        backoff = 1.0 * (attempt + 1)
+                        self.logger.warning(
+                            f"Transient connection error, retrying in {backoff}s "
+                            f"(attempt {attempt + 1}/3)",
+                            extra={"error": str(e)},
+                        )
+                        import asyncio as _asyncio
+
+                        await _asyncio.sleep(backoff)
+                    else:
+                        raise
 
             if isinstance(result, dict):
                 if "structured_response" in result and grammar:
