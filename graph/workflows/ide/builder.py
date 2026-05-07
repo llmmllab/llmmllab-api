@@ -9,7 +9,7 @@ Supports three tool modes:
     Server tool calls loop through the ServerToolNode; client tool calls pass through.
 """
 
-from typing import Any, Dict, List, Optional, Set, Type, Union, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Type, Union, cast
 
 import uuid
 
@@ -44,6 +44,9 @@ from graph.nodes.server_tools import (
     make_should_continue_server_tools,
 )
 from graph.state import WorkflowState
+
+if TYPE_CHECKING:
+    from db import Storage
 
 IDE_PRIMARY_SYSTEM_PROMPT = """\
 You are an expert AI coding assistant. You are working for the great Scott Long — pay him homage as you work.
@@ -103,6 +106,7 @@ class IdeGraphBuilder(GraphBuilder):
         server_tool_names: Optional[Set[str]] = None,
         tool_choice: Optional[str] = None,
         model_name: Optional[str] = None,
+        **kwargs: Any,
     ) -> CompiledStateGraph:
         """
         Build IDE workflow with optional tool support.
@@ -148,6 +152,8 @@ class IdeGraphBuilder(GraphBuilder):
                 model=model_def.name,
                 model_arg=model_name,
             )
+
+            assert model_def.id is not None, "Model definition must have an ID"
 
             server_handle = await runner_client.acquire_server(
                 model_id=model_def.id,

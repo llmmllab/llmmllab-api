@@ -81,23 +81,25 @@ class ComposerService:
 
             # 2. Use per-user cache if enabled
             user_cache = None
+
+            # Build cache key that incorporates model without tools
+            # to avoid creating multiple instances of the same server
+            cache_key = f"workflow_{user_id}"
+            if model_name:
+                cache_key += f"_{model_name}"
+
             if user_config.workflow.enable_workflow_caching:
                 if user_id not in self.workflow_caches:
                     self.workflow_caches[user_id] = WorkflowCache()
                 user_cache = self.workflow_caches[user_id]
 
-                # Build cache key that incorporates model + tool definitions
-                cache_key = f"workflow_{user_id}"
-                if model_name:
-                    cache_key += f"_{model_name}"
+                # client_tools = build_kwargs.get("client_tools")
+                # if client_tools:
+                #     cache_key += f"_{_tools_cache_key(client_tools)}"
 
-                client_tools = build_kwargs.get("client_tools")
-                if client_tools:
-                    cache_key += f"_{_tools_cache_key(client_tools)}"
-
-                server_tool_names = build_kwargs.get("server_tool_names")
-                if server_tool_names:
-                    cache_key += f"_st{hashlib.md5(','.join(sorted(server_tool_names)).encode()).hexdigest()[:8]}"
+                # server_tool_names = build_kwargs.get("server_tool_names")
+                # if server_tool_names:
+                #     cache_key += f"_st{hashlib.md5(','.join(sorted(server_tool_names)).encode()).hexdigest()[:8]}"
 
                 cached_workflow = await user_cache.get(cache_key)
                 if cached_workflow:
