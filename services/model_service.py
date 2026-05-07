@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from models import Model
 from utils.logging import llmmllogger
 
 logger = llmmllogger.bind(component="model_service")
@@ -28,6 +29,7 @@ class ModelService:
 
     def __init__(self):
         self._cached_model_ids: Optional[set[str]] = None
+        self._cached_models: Optional[dict[str, Model]] = None
         self._user_config_service = None
 
     def _get_user_config_service(self):
@@ -103,16 +105,35 @@ class ModelService:
         if self._cached_model_ids is not None:
             return self._cached_model_ids
 
+        models = await self._list_models()
+        self._cached_model_ids = {m.id for m in models if m.id}
+        return self._cached_model_ids
+
+    async def _list_models(self) -> list[Model]:
+        """Fetch the full model list from runners (cached)."""
+        if self._cached_models is not None:
+            return list(self._cached_models.values())
+
         from services.runner_client import runner_client
 
         try:
             models = await runner_client.list_models()
-            self._cached_model_ids = {m.id for m in models if m.id}
+            self._cached_models = {m.id: m for m in models if m.id}
         except Exception as e:
             logger.warning(f"Failed to list models from runners: {e}")
-            self._cached_model_ids = set()
+            self._cached_models = {}
 
-        return self._cached_model_ids
+        return list(self._cached_models.values())
+
+    async def get_model_by_id(self, model_id: str) -> Optional[Model]:
+        """Look up a model by its ID from the runner cache.
+
+        Returns the ``Model`` object if found, or ``None`` if the model
+        is not available or the cache has not been populated yet.
+        """
+        if self._cached_models is None:
+            await self._list_models()
+        return self._cached_models.get(model_id) if self._cached_models else None
 
     async def _user_default_model(self, user_id: str) -> Optional[str]:
         """Look up the user's configured default_model."""
@@ -130,6 +151,7 @@ class ModelService:
     def invalidate_cache(self) -> None:
         """Clear the cached model list (call when models change)."""
         self._cached_model_ids = None
+        self._cached_models = None
 
 
 # Singleton instance

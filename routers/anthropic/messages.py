@@ -486,11 +486,20 @@ async def stream_message(
             },
         )
 
+    # Determine stop_reason for the message_delta event.
+    stop_reason: str | None = None
+
     # Final fallback: all retries produced nothing
     if not acc.has_content and not acc.has_tool_calls and not acc.final_content:
         logger.warning(
-            "All retries produced empty response", extra={"model": model_name}
+            "All retries produced empty response",
+            extra={
+                "model": model_name,
+                "input_tokens": input_tokens,
+                "finish_reason": acc.finish_reason,
+            },
         )
+        stop_reason = "max_tokens"
         if not text_block_started:
             text_block_index = next_block_index
             next_block_index += 1
@@ -557,12 +566,13 @@ async def stream_message(
             {"type": "content_block_stop", "index": block_index},
         )
 
-    if acc.has_tool_calls:
-        stop_reason = "tool_use"
-    elif acc.finish_reason == "length":
-        stop_reason = "max_tokens"
-    else:
-        stop_reason = "end_turn"
+    if stop_reason is None:
+        if acc.has_tool_calls:
+            stop_reason = "tool_use"
+        elif acc.finish_reason == "length":
+            stop_reason = "max_tokens"
+        else:
+            stop_reason = "end_turn"
     logger.debug(
         "Stream complete",
         extra={
