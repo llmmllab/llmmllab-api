@@ -63,6 +63,11 @@ _EMPTY_RESPONSE_NUDGE = (
     "and nothing else."
 )
 
+# Threshold (in tokens) above which we consider the prompt "large".
+# When a large prompt produces an empty response, retrying is futile —
+# the context is likely exceeding the model's window.
+_CONTEXT_OVERFLOW_THRESHOLD = 100_000
+
 _TRUNCATION_CONTINUATION_PROMPT = (
     "Your response was cut off. Continue from where you left off. "
     "If you were in the middle of a tool call, complete the tool call. "
@@ -71,6 +76,25 @@ _TRUNCATION_CONTINUATION_PROMPT = (
 
 _SENTENCE_TERMINATORS = frozenset(".!?)\n`]}\"'>,:")
 _TRUNCATION_MIN_LEN = 40
+
+
+def _is_context_overflow(prompt_tokens: int, finish_reason: str, output_tokens: int) -> bool:
+    """Detect whether the model likely hit its context window limit.
+
+    Returns True when:
+    - The prompt consumed a lot of tokens (above threshold), AND
+    - The model produced no output (empty response), OR
+    - The model was cut off immediately (finish_reason == 'length' with zero output).
+
+    In these cases, retrying with the same (or larger) context is futile.
+    """
+    if prompt_tokens < _CONTEXT_OVERFLOW_THRESHOLD:
+        return False
+    if output_tokens > 0:
+        return False
+    # Empty response with a large prompt — almost certainly context overflow.
+    # Also catches finish_reason == 'length' with zero output.
+    return True
 
 
 def _is_truncated(text: str, finish_reason: str) -> bool:
@@ -458,74 +482,33 @@ class CompletionService:
                 and not acc.final_content
                 and not acc.is_error
             ):
-                logger.warning(
-                    "Model produced empty response — retrying with same messages",
-                    extra={"model": model_name},
-                )
-                empty_response_retries_total.inc()
-                async for event in CompletionService._build_and_run(
-                    user_id,
-                    messages,
-                    model_name,
-                    workflow_type,
-                    conversation_id,
-                    client_tools,
-                    tool_choice,
-                    server_tool_names,
-                ):
-                    if isinstance(event, ServerToolEvent):
-                        continue
-                    if event.done:
-                        if event.message and event.message.tool_calls:
-                            acc.final_tool_calls = event.message.tool_calls
-                            acc.has_tool_calls = True
-                        if event.message and event.message.content:
-                            parts = [
-                                c.text
-                                for c in event.message.content
-                                if c.type == MessageContentType.TEXT and c.text
-                            ]
-                            acc.final_content = "".join(parts)
-                        if event.eval_count:
-                            acc.output_tokens += int(event.eval_count)
-                        continue
-
-                    # Live delta from retry
-                    if event.message and event.message.content:
-                        for part in event.message.content:
-                            if part.type == MessageContentType.TEXT and part.text:
-                                acc.has_content = True
-                    yield event, acc
-
-                # ---------- nudge if retry also empty ----------
-                if (
-                    not acc.has_content
-                    and not acc.has_tool_calls
-                    and not acc.final_content
+                # Skip retry if context is likely too large — retrying the
+                # same oversized messages (or adding a nudge) is futile.
+                if _is_context_overflow(
+                    acc.input_tokens, acc.finish_reason, acc.output_tokens
                 ):
                     logger.warning(
-                        "Retry also produced empty response — sending nudge prompt",
+                        "Skipping retry — context likely exceeds model window",
+                        extra={
+                            "model": model_name,
+                            "input_tokens": acc.input_tokens,
+                            "finish_reason": acc.finish_reason,
+                        },
+                    )
+                else:
+                    logger.warning(
+                        "Model produced empty response — retrying with same messages",
                         extra={"model": model_name},
                     )
-                    nudge_messages = list(messages) + [
-                        Message(
-                            role=MessageRole.USER,
-                            content=[
-                                MessageContent(
-                                    type=MessageContentType.TEXT,
-                                    text=_EMPTY_RESPONSE_NUDGE,
-                                )
-                            ],
-                        ),
-                    ]
+                    empty_response_retries_total.inc()
                     async for event in CompletionService._build_and_run(
                         user_id,
-                        nudge_messages,
+                        messages,
                         model_name,
                         workflow_type,
                         conversation_id,
                         client_tools,
-                        "auto",
+                        tool_choice,
                         server_tool_names,
                     ):
                         if isinstance(event, ServerToolEvent):
@@ -545,11 +528,66 @@ class CompletionService:
                                 acc.output_tokens += int(event.eval_count)
                             continue
 
+                        # Live delta from retry
                         if event.message and event.message.content:
                             for part in event.message.content:
                                 if part.type == MessageContentType.TEXT and part.text:
                                     acc.has_content = True
                         yield event, acc
+
+                    # ---------- nudge if retry also empty ----------
+                    if (
+                        not acc.has_content
+                        and not acc.has_tool_calls
+                        and not acc.final_content
+                    ):
+                        logger.warning(
+                            "Retry also produced empty response — sending nudge prompt",
+                            extra={"model": model_name},
+                        )
+                        nudge_messages = list(messages) + [
+                            Message(
+                                role=MessageRole.USER,
+                                content=[
+                                    MessageContent(
+                                        type=MessageContentType.TEXT,
+                                        text=_EMPTY_RESPONSE_NUDGE,
+                                    )
+                                ],
+                            ),
+                        ]
+                        async for event in CompletionService._build_and_run(
+                            user_id,
+                            nudge_messages,
+                            model_name,
+                            workflow_type,
+                            conversation_id,
+                            client_tools,
+                            "auto",
+                            server_tool_names,
+                        ):
+                            if isinstance(event, ServerToolEvent):
+                                continue
+                            if event.done:
+                                if event.message and event.message.tool_calls:
+                                    acc.final_tool_calls = event.message.tool_calls
+                                    acc.has_tool_calls = True
+                                if event.message and event.message.content:
+                                    parts = [
+                                        c.text
+                                        for c in event.message.content
+                                        if c.type == MessageContentType.TEXT and c.text
+                                    ]
+                                    acc.final_content = "".join(parts)
+                                if event.eval_count:
+                                    acc.output_tokens += int(event.eval_count)
+                                continue
+
+                            if event.message and event.message.content:
+                                for part in event.message.content:
+                                    if part.type == MessageContentType.TEXT and part.text:
+                                        acc.has_content = True
+                            yield event, acc
 
         except asyncio.CancelledError:
             logger.warning("Stream cancelled (client disconnect) — stopping retries")
@@ -752,55 +790,83 @@ class CompletionService:
 
         # ---------- empty-response retry ----------
         if not result.has_content and not result.has_tool_calls and not result.is_error:
-            logger.warning(
-                "Non-streaming: model produced empty response — retrying",
-                extra={"model": model_name},
-            )
-            empty_response_retries_total.inc()
-            async for event in CompletionService._build_and_run(
-                user_id,
-                messages,
-                model_name,
-                workflow_type,
-                conversation_id,
-                client_tools,
-                tool_choice,
-                server_tool_names,
-            ):
-                if isinstance(event, ServerToolEvent):
-                    continue
-                if event.done and event.message:
-                    result.chat_response = event
+            # Gather token info from the primary response for overflow detection.
+            _primary_prompt_tokens = 0
+            _primary_output_tokens = 0
+            _primary_finish_reason = ""
+            if result.chat_response:
+                _primary_prompt_tokens = int(
+                    result.chat_response.prompt_eval_count or 0
+                )
+                _primary_output_tokens = int(result.chat_response.eval_count or 0)
+                _primary_finish_reason = (
+                    result.chat_response.finish_reason or ""
+                )
 
-            # ---------- nudge ----------
-            if not result.has_content and not result.has_tool_calls:
+            # Skip retry if context is likely too large — retrying the
+            # same oversized messages (or adding a nudge) is futile.
+            if _is_context_overflow(
+                _primary_prompt_tokens, _primary_finish_reason, _primary_output_tokens
+            ):
                 logger.warning(
-                    "Non-streaming: retry also empty — sending nudge prompt",
+                    "Non-streaming: skipping retry — context likely exceeds model window",
+                    extra={
+                        "model": model_name,
+                        "input_tokens": _primary_prompt_tokens,
+                        "finish_reason": _primary_finish_reason,
+                    },
+                )
+            else:
+                logger.warning(
+                    "Non-streaming: model produced empty response — retrying",
                     extra={"model": model_name},
                 )
-                nudge_messages = list(messages) + [
-                    Message(
-                        role=MessageRole.USER,
-                        content=[
-                            MessageContent(
-                                type=MessageContentType.TEXT, text=_EMPTY_RESPONSE_NUDGE
-                            )
-                        ],
-                    ),
-                ]
+                empty_response_retries_total.inc()
                 async for event in CompletionService._build_and_run(
                     user_id,
-                    nudge_messages,
+                    messages,
                     model_name,
                     workflow_type,
                     conversation_id,
                     client_tools,
-                    "auto",
+                    tool_choice,
                     server_tool_names,
                 ):
                     if isinstance(event, ServerToolEvent):
                         continue
                     if event.done and event.message:
                         result.chat_response = event
+
+                # ---------- nudge ----------
+                if not result.has_content and not result.has_tool_calls:
+                    logger.warning(
+                        "Non-streaming: retry also empty — sending nudge prompt",
+                        extra={"model": model_name},
+                    )
+                    nudge_messages = list(messages) + [
+                        Message(
+                            role=MessageRole.USER,
+                            content=[
+                                MessageContent(
+                                    type=MessageContentType.TEXT,
+                                    text=_EMPTY_RESPONSE_NUDGE,
+                                )
+                            ],
+                        ),
+                    ]
+                    async for event in CompletionService._build_and_run(
+                        user_id,
+                        nudge_messages,
+                        model_name,
+                        workflow_type,
+                        conversation_id,
+                        client_tools,
+                        "auto",
+                        server_tool_names,
+                    ):
+                        if isinstance(event, ServerToolEvent):
+                            continue
+                        if event.done and event.message:
+                            result.chat_response = event
 
         return result

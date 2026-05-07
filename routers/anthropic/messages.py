@@ -489,7 +489,12 @@ async def stream_message(
     # Final fallback: all retries produced nothing
     if not acc.has_content and not acc.has_tool_calls and not acc.final_content:
         logger.warning(
-            "All retries produced empty response", extra={"model": model_name}
+            "All retries produced empty response",
+            extra={
+                "model": model_name,
+                "input_tokens": input_tokens,
+                "finish_reason": acc.finish_reason,
+            },
         )
         if not text_block_started:
             text_block_index = next_block_index
@@ -560,6 +565,9 @@ async def stream_message(
     if acc.has_tool_calls:
         stop_reason = "tool_use"
     elif acc.finish_reason == "length":
+        stop_reason = "max_tokens"
+    elif not acc.has_content and not acc.has_tool_calls and not acc.final_content:
+        # All retries produced nothing — likely context overflow.
         stop_reason = "max_tokens"
     else:
         stop_reason = "end_turn"
