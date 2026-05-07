@@ -36,6 +36,12 @@ jobs:
           docker push ${REGISTRY}/${IMAGE}:${SHA}-amd64
           docker push ${REGISTRY}/${IMAGE}:${SHA}-arm64
 
+          # Tag and push latest
+          docker tag ${REGISTRY}/${IMAGE}:${SHA}-amd64 ${REGISTRY}/${IMAGE}:latest-amd64
+          docker tag ${REGISTRY}/${IMAGE}:${SHA}-arm64 ${REGISTRY}/${IMAGE}:latest-arm64
+          docker push ${REGISTRY}/${IMAGE}:latest-amd64
+          docker push ${REGISTRY}/${IMAGE}:latest-arm64
+
           # wait a sec to make sure there's no race condition
           sleep 5
 
