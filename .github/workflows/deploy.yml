@@ -2,7 +2,7 @@ name: Deploy API
 
 on:
   push:
-    branches: [main]
+    branches: [ main ]
 
 jobs:
   deploy:
@@ -35,6 +35,9 @@ jobs:
           echo "Pushing images..."
           docker push ${REGISTRY}/${IMAGE}:${SHA}-amd64
           docker push ${REGISTRY}/${IMAGE}:${SHA}-arm64
+
+          # wait a sec to make sure there's no race condition
+          sleep 5
 
           # Create multi-arch manifest using the project's script
           echo "Creating multi-arch manifest..."
