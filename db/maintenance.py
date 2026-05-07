@@ -89,7 +89,9 @@ class DatabaseMaintenanceService:
         """Run VACUUM ANALYZE on a raw connection (no transaction)."""
         logger.info("Running VACUUM ANALYZE...")
         try:
-            async with self.engine.connect() as conn:
+            async with self.engine.connect().execution_options(
+                isolation_level="AUTOCOMMIT"
+            ) as conn:
                 await conn.execute(text("VACUUM ANALYZE"))
             logger.info("VACUUM ANALYZE completed successfully")
         except Exception as e:
