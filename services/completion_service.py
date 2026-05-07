@@ -78,18 +78,38 @@ _SENTENCE_TERMINATORS = frozenset(".!?)\n`]}\"'>,:")
 _TRUNCATION_MIN_LEN = 40
 
 
-def _is_context_overflow(prompt_tokens: int, finish_reason: str, output_tokens: int) -> bool:
+def _is_context_overflow(
+    prompt_tokens: int,
+    finish_reason: str,
+    output_tokens: int,
+    model_num_ctx: int | None = None,
+) -> bool:
     """Detect whether the model likely hit its context window limit.
 
+    When *model_num_ctx* is provided, the total token budget
+    (prompt tokens + output tokens) is compared against the model's
+    context window to determine overflow.  When it is not provided,
+    a fixed threshold is used as a fallback.
+
     Returns True when:
+    - The total tokens exceed the model's context window (if known), OR
     - The prompt consumed a lot of tokens (above threshold), AND
     - The model produced no output (empty response), OR
     - The model was cut off immediately (finish_reason == 'length' with zero output).
 
     In these cases, retrying with the same (or larger) context is futile.
     """
-    if prompt_tokens < _CONTEXT_OVERFLOW_THRESHOLD:
-        return False
+    # Prefer a model-aware check when num_ctx is available.
+    if model_num_ctx is not None:
+        total_tokens = prompt_tokens + output_tokens
+        if total_tokens >= model_num_ctx:
+            return True
+        # If we're well below the context window, no overflow.
+        if total_tokens < _CONTEXT_OVERFLOW_THRESHOLD:
+            return False
+    else:
+        if prompt_tokens < _CONTEXT_OVERFLOW_THRESHOLD:
+            return False
     if output_tokens > 0:
         return False
     # Empty response with a large prompt — almost certainly context overflow.
@@ -485,13 +505,14 @@ class CompletionService:
                 # Skip retry if context is likely too large — retrying the
                 # same oversized messages (or adding a nudge) is futile.
                 if _is_context_overflow(
-                    acc.input_tokens, acc.finish_reason, acc.output_tokens
+                    acc.input_tokens, acc.finish_reason, acc.output_tokens,
                 ):
                     logger.warning(
                         "Skipping retry — context likely exceeds model window",
                         extra={
                             "model": model_name,
                             "input_tokens": acc.input_tokens,
+                            "output_tokens": acc.output_tokens,
                             "finish_reason": acc.finish_reason,
                         },
                     )
@@ -806,13 +827,14 @@ class CompletionService:
             # Skip retry if context is likely too large — retrying the
             # same oversized messages (or adding a nudge) is futile.
             if _is_context_overflow(
-                _primary_prompt_tokens, _primary_finish_reason, _primary_output_tokens
+                _primary_prompt_tokens, _primary_finish_reason, _primary_output_tokens,
             ):
                 logger.warning(
                     "Non-streaming: skipping retry — context likely exceeds model window",
                     extra={
                         "model": model_name,
                         "input_tokens": _primary_prompt_tokens,
+                        "output_tokens": _primary_output_tokens,
                         "finish_reason": _primary_finish_reason,
                     },
                 )
