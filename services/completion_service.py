@@ -209,6 +209,22 @@ class CompletionService:
     # ------------------------------------------------------------------
 
     @staticmethod
+    async def _get_model_num_ctx(model_name: str) -> int | None:
+        """Look up the model's context window (num_ctx) from the runner cache.
+
+        Returns the ``original_ctx`` value from the model details, or ``None``
+        if the model is not found or the value is unavailable.
+        """
+        try:
+            from services import model_service  # noqa: F811
+            model = await model_service.get_model_by_id(model_name)
+            if model and model.details and model.details.original_ctx:
+                return model.details.original_ctx
+        except Exception as e:
+            logger.debug(f"Failed to look up model num_ctx for {model_name}: {e}")
+        return None
+
+    @staticmethod
     async def build_workflow(
         user_id: str,
         model_name: str,
@@ -502,10 +518,14 @@ class CompletionService:
                 and not acc.final_content
                 and not acc.is_error
             ):
+                # Look up the model's context window for an accurate overflow check.
+                _model_num_ctx = await CompletionService._get_model_num_ctx(model_name)
+
                 # Skip retry if context is likely too large — retrying the
                 # same oversized messages (or adding a nudge) is futile.
                 if _is_context_overflow(
                     acc.input_tokens, acc.finish_reason, acc.output_tokens,
+                    model_num_ctx=_model_num_ctx,
                 ):
                     logger.warning(
                         "Skipping retry — context likely exceeds model window",
@@ -824,10 +844,14 @@ class CompletionService:
                     result.chat_response.finish_reason or ""
                 )
 
+            # Look up the model's context window for an accurate overflow check.
+            _model_num_ctx = await CompletionService._get_model_num_ctx(model_name)
+
             # Skip retry if context is likely too large — retrying the
             # same oversized messages (or adding a nudge) is futile.
             if _is_context_overflow(
                 _primary_prompt_tokens, _primary_finish_reason, _primary_output_tokens,
+                model_num_ctx=_model_num_ctx,
             ):
                 logger.warning(
                     "Non-streaming: skipping retry — context likely exceeds model window",
