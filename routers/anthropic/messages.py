@@ -599,9 +599,6 @@ async def createMessage(
         req_body = _strip_server_tool_blocks(req_body)
         body = CreateMessageRequest.model_validate(req_body)
         internal_messages = messages_from_anthropic(body.messages, system=body.system)
-        claude_regex = regex.compile(r"claude|haiku|sonnet|opus", regex.IGNORECASE)
-        if claude_regex.search(body.model):
-            body.model = "Qwen3_6_27B"
 
         # Resolve model: fall back to user's default_model if unavailable
         resolved_model = await model_service.resolve_default_model(body.model, user_id)
@@ -663,10 +660,12 @@ async def createMessage(
             server_tool_names=prepared.server_tool_names or None,
         )
 
-        if result.chat_response is None or (not result.has_content and not result.has_tool_calls):
+        if result.chat_response is None or (
+            not result.has_content and not result.has_tool_calls
+        ):
             raise HTTPException(
                 status_code=503,
-                detail="Model returned empty response after all retries. Context may be too large."
+                detail="Model returned empty response after all retries. Context may be too large.",
             )
 
         stop_reason_map: dict[str | None, str] = {
