@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from langchain.agents.structured_output import ProviderStrategy
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
-from langchain.chat_models import BaseChatModel
+from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.tools import BaseTool
 from langchain_core.messages import BaseMessage, AIMessage
 

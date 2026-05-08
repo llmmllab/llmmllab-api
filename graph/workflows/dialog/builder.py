@@ -9,8 +9,8 @@ import uuid
 
 from langgraph.graph.state import CompiledStateGraph, StateGraph, END, START
 from langgraph.prebuilt import ToolNode
-from langchain.chat_models import BaseChatModel
-from langchain.embeddings import Embeddings
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.embeddings import Embeddings
 from pydantic import BaseModel
 
 import config
