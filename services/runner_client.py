@@ -195,6 +195,38 @@ class RunnerClient:
 
         return last_response
 
+    @staticmethod
+    def _is_stale_server_error(response: httpx.Response) -> bool:
+        """Check if a 404 response indicates a stale server handle.
+
+        Returns ``True`` when the response is 404 and the body mentions
+        a server not being found, meaning the llama.cpp server was
+        evicted from the runner.
+        """
+        if response.status_code != 404:
+            return False
+        try:
+            body = response.text.lower()
+            return "server" in body and "not found" in body
+        except Exception:
+            return False
+
+    async def validate_server_handle(self, handle: ServerHandle) -> bool:
+        """Check if a server handle is still valid by hitting the server's /health.
+
+        Returns ``True`` if the llama.cpp server behind the handle responds
+        with HTTP 200, ``False`` otherwise.
+        """
+        try:
+            client = self._get_client()
+            resp = await client.get(
+                f"{handle.base_url}/health",
+                timeout=httpx.Timeout(3.0),
+            )
+            return resp.status_code == 200
+        except Exception:
+            return False
+
     async def aclose(self) -> None:
         """Close the shared HTTP client.  Call during app shutdown."""
         if self._refresh_task is not None:
@@ -225,12 +257,26 @@ class RunnerClient:
             else:
                 if endpoint in self._healthy:
                     self._healthy.remove(endpoint)
+                self._invalidate_model_map_for_endpoint(endpoint)
                 return None
         except Exception as e:
             logger.warning(f"Runner {endpoint} health check failed: {e}")
             if endpoint in self._healthy:
                 self._healthy.remove(endpoint)
+            self._invalidate_model_map_for_endpoint(endpoint)
             return None
+
+    def _invalidate_model_map_for_endpoint(self, endpoint: str) -> None:
+        """Remove an endpoint from the model map when it becomes unhealthy.
+
+        Prevents ``acquire_server()`` from routing to a dead runner.
+        """
+        for model_id, endpoints in list(self._model_map.items()):
+            if endpoint in endpoints:
+                endpoints.remove(endpoint)
+                if not endpoints:
+                    del self._model_map[model_id]
+        logger.info(f"Invalidated model map for unhealthy endpoint {endpoint}")
 
     # ------------------------------------------------------------------
     # Runner selection

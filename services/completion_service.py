@@ -280,23 +280,66 @@ class CompletionService:
         client_tools: list | None = None,
         tool_choice: str | None = None,
         server_tool_names: set[str] | None = None,
+        _retry_count: int = 0,
     ) -> AsyncIterator[Union[ChatResponse, ServerToolEvent]]:
-        """Build a composer workflow and yield its events."""
-        workflow, builder, _server_url = await CompletionService.build_workflow(
-            user_id,
-            model_name,
-            workflow_type,
-            client_tools,
-            tool_choice,
-            server_tool_names,
-        )
-        initial_state = await create_initial_state(
-            user_id, conversation_id, builder, messages
-        )
-        async for event in CompletionService._run_workflow(
-            initial_state, workflow, workflow_type
-        ):
-            yield event
+        """Build a composer workflow and yield its events.
+
+        When a ``StaleServerError`` is raised (server handle was evicted),
+        automatically re-acquires a fresh server and retries (up to 1 retry).
+        """
+        from graph.errors import StaleServerError
+
+        max_retries = 1
+        try:
+            workflow, builder, _server_url = await CompletionService.build_workflow(
+                user_id,
+                model_name,
+                workflow_type,
+                client_tools,
+                tool_choice,
+                server_tool_names,
+            )
+            initial_state = await create_initial_state(
+                user_id, conversation_id, builder, messages
+            )
+            async for event in CompletionService._run_workflow(
+                initial_state, workflow, workflow_type
+            ):
+                yield event
+        except StaleServerError as e:
+            if _retry_count >= max_retries:
+                logger.error(
+                    f"Stale server {e.server_id} — retry exhausted, propagating error",
+                )
+                raise
+            logger.warning(
+                f"Stale server {e.server_id} detected — releasing and re-acquiring (attempt {_retry_count + 1}/{max_retries})",
+            )
+            # Release the stale handle so the runner can clean it up
+            if builder.server_handle:
+                try:
+                    from services.runner_client import runner_client
+                    await runner_client.release_server(builder.server_handle)
+                except Exception as release_err:
+                    logger.debug(
+                        f"Failed to release stale server {e.server_id}: {release_err}"
+                    )
+            # Force model map refresh so stale endpoints are cleared
+            from services.runner_client import runner_client
+            await runner_client.refresh_model_map()
+            # Retry with a fresh server handle
+            async for event in CompletionService._build_and_run(
+                user_id,
+                messages,
+                model_name,
+                workflow_type,
+                conversation_id,
+                client_tools,
+                tool_choice,
+                server_tool_names,
+                _retry_count=_retry_count + 1,
+            ):
+                yield event
 
     # ------------------------------------------------------------------
     # Streaming path  (yields raw events; router formats SSE)
