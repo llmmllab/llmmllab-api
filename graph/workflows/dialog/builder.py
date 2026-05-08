@@ -117,7 +117,7 @@ class DialogGraphBuilder(GraphBuilder):
                 api_key=SecretStr("none"),
                 model=primary_model_def.name,
                 stream_usage=True,
-                max_retries=0,
+                max_retries=2,  # retry transient 503 (slots busy) errors
             )
             embedding_model = OpenAIEmbeddings(
                 base_url=embedding_handle.base_url,
