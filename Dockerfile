@@ -22,7 +22,7 @@ ENV PYTHONUNBUFFERED=1 \
     MAX_IMAGE_SIZE="2048" \
     IMAGE_RETENTION_HOURS="24"
 
-# Runtime-only apt deps
+# Runtime-only apt deps + Playwright browser
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl libglib2.0-0 libgomp1 \
     && rm -rf /var/lib/apt/lists/*
@@ -38,6 +38,9 @@ COPY pyproject.toml uv.lock .python-version ./
 # Install dependencies
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
+
+# Install Playwright Chromium browser (headless_shell for WebReader)
+RUN ${SHARED_VENV}/bin/playwright install chromium
 
 # Copy application source
 COPY . .

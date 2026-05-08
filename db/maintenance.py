@@ -134,20 +134,26 @@ class DatabaseMaintenanceService:
             return False
 
     async def _run_reindex(self) -> bool:
-        """Run REINDEX using a dedicated session."""
+        """Run REINDEX on a raw connection (no transaction).
+
+        REINDEX CONCURRENTLY cannot run inside a transaction block,
+        so we use a raw engine connection in autocommit mode — same
+        pattern as _run_vacuum_analyze().
+        """
         logger.info(
             "Running REINDEX on database (DB_REINDEX_ON_MAINTENANCE=true)..."
         )
         try:
-            async with self.session_factory() as session:
-                db_name = (await session.execute(
+            async with self.engine.connect().execution_options(
+                isolation_level="AUTOCOMMIT"
+            ) as conn:
+                db_name = (await conn.execute(
                     text("SELECT current_database()")
                 )).scalar()
 
-                await session.execute(
+                await conn.execute(
                     text(f"REINDEX (VERBOSE, CONCURRENTLY) DATABASE {db_name}")
                 )
-                await session.commit()
             logger.info(f"REINDEX completed successfully on database '{db_name}'")
 
             # Flush statement caches across pool connections
