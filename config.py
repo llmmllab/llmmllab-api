@@ -66,6 +66,21 @@ HF_HOME = os.environ.get("HF_HOME", "/root/.cache/huggingface")
 # Cache eviction is controlled by the runner via CACHE_TIMEOUT_MIN and
 # EVICTION_TIMEOUT_MIN environment variables.
 
+# Fraction of the model's context window reserved for conversation input.
+# The remainder is kept free for the model's output tokens.
+# For example, 0.85 means 85 % of num_ctx is available for input, 15 % for output.
+CONTEXT_USAGE_SAFETY_MARGIN = float(
+    os.environ.get("CONTEXT_USAGE_SAFETY_MARGIN", "0.85")
+)
+
+# Minimum acceptable ratio of actual server context to requested context.
+# If a runner starts a server with less than this fraction of the requested
+# context size, the server is rejected and the next runner is tried.
+# Set to 0.0 to disable the check (not recommended in production).
+CONTEXT_MINIMUM_RATIO = float(
+    os.environ.get("CONTEXT_MINIMUM_RATIO", "0.80")
+)
+
 # ── External API keys ───────────────────────────────────────────────
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")

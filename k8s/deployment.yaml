@@ -135,5 +135,9 @@ spec:
               value: "9999"
             - name: TEMPO_ENDPOINT
               value: "http://tempo.llmmllab.svc.cluster.local:4317"
+            - name: CONTEXT_USAGE_SAFETY_MARGIN
+              value: "0.85"
+            - name: CONTEXT_MINIMUM_RATIO
+              value: "0.80"
   strategy:
     type: Recreate
