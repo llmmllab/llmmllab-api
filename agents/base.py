@@ -37,6 +37,9 @@ from utils.message_conversion import (
 )
 from utils.grammar_generator import parse_structured_output
 
+# Safety margin: only use 85% of num_ctx to leave room for the model's output.
+_CONTEXT_USAGE_SAFETY_MARGIN = 0.85
+
 # Get the 'asyncio' logger
 asyncio_logger = logging.getLogger("asyncio")
 # Set the logging level to WARNING or higher (e.g., ERROR, CRITICAL)
@@ -290,6 +293,67 @@ The current date is {current_date}."""
 
         return system_prompt, convo
 
+    async def _ensure_context_fits(
+        self, messages: list[BaseMessage], system_prompt: str
+    ) -> list[BaseMessage]:
+        """Trim conversation messages to fit within the model's context window.
+
+        Estimates token usage for system prompt + conversation messages. If the
+        total exceeds the model's num_ctx (with a safety margin for output),
+        progressively removes the oldest user-assistant message pairs until the
+        context fits.
+
+        Args:
+            messages: Conversation messages (without system message).
+            system_prompt: The system prompt text.
+
+        Returns:
+            Trimmed message list that should fit within the context window.
+        """
+        if self.num_ctx is None or self.num_ctx <= 0:
+            return messages
+
+        # Rough token estimate: ~3 chars per token
+        system_tokens = len(system_prompt) // 3
+        max_convo_tokens = int(self.num_ctx * _CONTEXT_USAGE_SAFETY_MARGIN) - system_tokens
+        if max_convo_tokens <= 0:
+            # System prompt alone is too large; return just the last message
+            return messages[-1:] if messages else messages
+
+        # Estimate total conversation tokens
+        total_tokens = sum(
+            len(m.content) // 3 if isinstance(m.content, str) else 0
+            for m in messages
+        )
+
+        if total_tokens <= max_convo_tokens:
+            return messages
+
+        self.logger.warning(
+            f"Context overflow detected: estimated {total_tokens} tokens "
+            f"(system: {system_tokens}, convo: {total_tokens}) exceeds "
+            f"budget {max_convo_tokens} (num_ctx={self.num_ctx}). "
+            f"Trimming {len(messages)} messages..."
+        )
+
+        # Keep the last message (the user's most recent input) and progressively
+        # remove oldest user-assistant pairs until we fit.
+        # Always keep at least the last 2 messages (user + assistant or system + user).
+        min_keep = 2
+        trimmed = list(messages)
+        while len(trimmed) > min_keep and total_tokens > max_convo_tokens:
+            removed = trimmed.pop(0)
+            removed_tokens = (
+                len(removed.content) // 3 if isinstance(removed.content, str) else 0
+            )
+            total_tokens -= removed_tokens
+
+        self.logger.info(
+            f"Trimmed to {len(trimmed)} messages "
+            f"(estimated {total_tokens} tokens, budget {max_convo_tokens})"
+        )
+        return trimmed
+
     async def run(
         self,
         messages: MessageInput,
@@ -359,6 +423,14 @@ The current date is {current_date}."""
 
             # Convert messages to LangChain format
             normalized_messages = messages_to_lc_messages(convo)
+
+            # Guard against context overflow before invoking the model.
+            # If the estimated token count exceeds the model's context window,
+            # trim older messages to avoid a 400 exceed_context_size_error.
+            normalized_messages = await self._ensure_context_fits(
+                normalized_messages, system_prompt
+            )
+
             self.logger.debug(f"Running agent with {len(normalized_messages)} messages")
             result = await agent.ainvoke({"messages": normalized_messages})  # type: ignore
 
@@ -464,6 +536,12 @@ The current date is {current_date}."""
 
             # Convert messages to LangChain format
             normalized_messages = messages_to_lc_messages(convo)
+
+            # Guard against context overflow
+            normalized_messages = await self._ensure_context_fits(
+                normalized_messages, system_prompt
+            )
+
             self.logger.debug(f"Running agent with {len(normalized_messages)} messages")
             result = await agent.ainvoke({"messages": normalized_messages})  # type: ignore
             self.logger.debug(
