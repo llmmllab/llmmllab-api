@@ -9,6 +9,44 @@ from db.maintenance import DatabaseMaintenanceService
 
 
 @pytest.mark.asyncio
+async def test_reindex_concurrently_uses_autocommit(
+    session_factory, engine,
+):
+    """REINDEX CONCURRENTLY must run in autocommit mode; otherwise
+    PostgreSQL raises 'cannot execute REINDEX CONCURRENTLY inside a
+    transaction block'.
+
+    This test directly exercises _run_reindex() with a real database
+    to confirm the AUTOCOMMIT isolation_level fix (issue #45).
+    """
+    service = DatabaseMaintenanceService()
+    await service.initialize(engine, session_factory)
+
+    # Create a tiny table + index so REINDEX has something to work on
+    async with engine.connect() as conn:
+        await conn.execute(text("CREATE TABLE IF NOT EXISTS _reindex_test (id SERIAL PRIMARY KEY, val TEXT)"))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS _reindex_test_val_idx ON _reindex_test (val)"))
+        await conn.execute(text("INSERT INTO _reindex_test (val) VALUES ('hello')"))
+    # commit happens on connection close (NullPool)
+
+    try:
+        # _run_reindex should succeed (returns True) and NOT raise
+        # "cannot execute REINDEX CONCURRENTLY inside a transaction block"
+        result = await service._run_reindex()
+        assert result is True, "REINDEX CONCURRENTLY should succeed in autocommit mode"
+
+        # Database should still be usable after REINDEX
+        async with session_factory() as session:
+            r = await session.execute(text("SELECT 1 as ok"))
+            assert r.scalar() == 1
+    finally:
+        # Cleanup
+        async with engine.connect() as conn:
+            await conn.execute(text("DROP INDEX IF EXISTS _reindex_test_val_idx"))
+            await conn.execute(text("DROP TABLE IF EXISTS _reindex_test"))
+
+
+@pytest.mark.asyncio
 async def test_maintenance_performs_without_error(
     session_factory, engine,
 ):
