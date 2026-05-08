@@ -83,3 +83,6 @@ RUNNER_ENDPOINTS = os.environ.get("RUNNER_ENDPOINTS", "http://localhost:9000").s
 )
 
 MODEL_CACHE_REFRESH_SEC = int(os.environ.get("MODEL_CACHE_REFRESH_SEC", "60"))
+
+# ── Completion / Retry ─────────────────────────────────────────────────
+RUNNER_RETRIES = int(os.environ.get("RUNNER_RETRIES", "2"))

@@ -32,6 +32,7 @@ from models.message import Message, MessageContent, MessageContentType, MessageR
 from models.tool_call import ToolCall
 from utils.logging import llmmllogger
 from httpx import RemoteProtocolError, ConnectError
+from config import RUNNER_RETRIES
 
 logger = llmmllogger.bind(component="completion_service")
 
@@ -309,7 +310,7 @@ class CompletionService:
         messages: list[Message],
         model_name: str,
         workflow_type: WorkFlowType,
-        max_retries: int = 2,
+        max_retries: int | None = None,
         conversation_id: int = 0,
         client_tools: list | None = None,
         tool_choice: str | None = None,
@@ -325,9 +326,13 @@ class CompletionService:
         Parameters
         ----------
         max_retries:
-            Maximum number of connection-error retries (default 2).
+            Maximum number of connection-error retries.
+            Defaults to RUNNER_RETRIES from config (env: RUNNER_RETRIES).
         """
         from openai import APIConnectionError
+
+        if max_retries is None:
+            max_retries = RUNNER_RETRIES
 
         for attempt in range(max_retries + 1):
             try:
@@ -355,7 +360,7 @@ class CompletionService:
                             "max_retries": max_retries,
                         },
                     )
-                    await asyncio.sleep(1.0 * (attempt + 1))  # Linear backoff
+                    await asyncio.sleep(attempt + 1)  # Linear backoff
                     # Force model map refresh so we get a healthy runner
                     from services.runner_client import runner_client
                     await runner_client.refresh_model_map()
