@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from enum import IntEnum
+from enum import Enum, IntEnum
 from typing import Optional
 
 
-class RequestSource(str, IntEnum):
+class RequestSource(str, Enum):
     """Where a request originated from."""
 
     USER = "user"
