@@ -165,7 +165,7 @@ class IdeGraphBuilder(GraphBuilder):
                 api_key=SecretStr("none"),
                 model=model_def.name,
                 stream_usage=True,
-                max_retries=0,
+                max_retries=2,  # retry transient 503 (slots busy) errors
             )
             self.server_handle = server_handle
 
