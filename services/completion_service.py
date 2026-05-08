@@ -31,8 +31,13 @@ from models.chat_response import ChatResponse
 from models.message import Message, MessageContent, MessageContentType, MessageRole
 from models.tool_call import ToolCall
 from utils.logging import llmmllogger
+from httpx import RemoteProtocolError, ConnectError
 
 logger = llmmllogger.bind(component="completion_service")
+
+# Connection-level errors that indicate the runner/server is unreachable.
+# These should trigger a server-handle refresh, not an empty-response retry.
+_CONNECTION_ERRORS = (RemoteProtocolError, ConnectError)
 
 # ---------------------------------------------------------------------------
 # Metrics
@@ -298,6 +303,66 @@ class CompletionService:
         ):
             yield event
 
+    @staticmethod
+    async def _build_and_run_with_retry(
+        user_id: str,
+        messages: list[Message],
+        model_name: str,
+        workflow_type: WorkFlowType,
+        max_retries: int = 2,
+        conversation_id: int = 0,
+        client_tools: list | None = None,
+        tool_choice: str | None = None,
+        server_tool_names: set[str] | None = None,
+    ) -> AsyncIterator[Union[ChatResponse, ServerToolEvent]]:
+        """Build and run with automatic server handle refresh on connection failure.
+
+        When a request fails with a connection-level error (e.g. the runner
+        restarted mid-request), this method catches the error, forces a model
+        map refresh, and retries with a fresh server handle.  This prevents
+        stale ``ServerHandle`` objects from pointing to dead servers.
+
+        Parameters
+        ----------
+        max_retries:
+            Maximum number of connection-error retries (default 2).
+        """
+        from openai import APIConnectionError
+
+        for attempt in range(max_retries + 1):
+            try:
+                async for event in CompletionService._build_and_run(
+                    user_id,
+                    messages,
+                    model_name,
+                    workflow_type,
+                    conversation_id,
+                    client_tools,
+                    tool_choice,
+                    server_tool_names,
+                ):
+                    yield event
+                return  # Success — all events yielded
+            except (APIConnectionError, *_CONNECTION_ERRORS) as e:
+                if attempt < max_retries:
+                    logger.warning(
+                        "Connection error during workflow execution, "
+                        "retrying with fresh server handle",
+                        extra={
+                            "error": str(e),
+                            "error_type": type(e).__name__,
+                            "attempt": attempt + 1,
+                            "max_retries": max_retries,
+                        },
+                    )
+                    await asyncio.sleep(1.0 * (attempt + 1))  # Linear backoff
+                    # Force model map refresh so we get a healthy runner
+                    from services.runner_client import runner_client
+                    await runner_client.refresh_model_map()
+                    continue
+                # Exhausted retries — re-raise
+                raise
+
     # ------------------------------------------------------------------
     # Streaming path  (yields raw events; router formats SSE)
     # ------------------------------------------------------------------
@@ -326,16 +391,16 @@ class CompletionService:
         acc = StreamAccumulator()
 
         try:
-            # ---------- primary pass ----------
-            async for event in CompletionService._build_and_run(
+            # ---------- primary pass (with connection-error retry) ----------
+            async for event in CompletionService._build_and_run_with_retry(
                 user_id,
                 messages,
                 model_name,
                 workflow_type,
-                conversation_id,
-                client_tools,
-                tool_choice,
-                server_tool_names,
+                conversation_id=conversation_id,
+                client_tools=client_tools,
+                tool_choice=tool_choice,
+                server_tool_names=server_tool_names,
             ):
                 if isinstance(event, ServerToolEvent):
                     yield event, acc
@@ -656,16 +721,16 @@ class CompletionService:
         """
         result = CompletionResult()
 
-        # ---------- primary pass ----------
-        async for event in CompletionService._build_and_run(
+        # ---------- primary pass (with connection-error retry) ----------
+        async for event in CompletionService._build_and_run_with_retry(
             user_id,
             messages,
             model_name,
             workflow_type,
-            conversation_id,
-            client_tools,
-            tool_choice,
-            server_tool_names,
+            conversation_id=conversation_id,
+            client_tools=client_tools,
+            tool_choice=tool_choice,
+            server_tool_names=server_tool_names,
         ):
             if isinstance(event, ServerToolEvent):
                 continue
