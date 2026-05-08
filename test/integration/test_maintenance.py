@@ -59,7 +59,9 @@ async def test_vacuum_analyze_requires_autocommit_mode(
     'cannot run VACUUM in a transaction block'.
     """
     # Positive case: AUTOCOMMIT mode works
-    async with engine.connect().execution_options(
+    # engine.connect() returns an AwaitableConnection in SQLAlchemy 2.x;
+    # we must await it before calling execution_options().
+    async with (await engine.connect()).execution_options(
         isolation_level="AUTOCOMMIT"
     ) as conn:
         await conn.execute(text("VACUUM ANALYZE"))
@@ -67,14 +69,13 @@ async def test_vacuum_analyze_requires_autocommit_mode(
     # Negative case: an explicit transaction block rejects VACUUM.
     # We must BEGIN a transaction ourselves because NullPool + asyncpg
     # may not start a transaction implicitly on engine.connect().
-    with pytest.raises(Exception, match="transaction"):
-        conn = await engine.connect()
-        try:
-            await conn.execute(text("BEGIN"))
+    conn = await engine.connect()
+    try:
+        await conn.execute(text("BEGIN"))
+        with pytest.raises(Exception, match="transaction"):
             await conn.execute(text("VACUUM ANALYZE"))
-        except Exception:
-            await conn.close()
-            raise
+    finally:
+        await conn.close()
 
 
 @pytest.mark.asyncio
