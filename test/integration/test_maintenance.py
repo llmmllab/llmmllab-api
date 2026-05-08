@@ -64,12 +64,17 @@ async def test_vacuum_analyze_requires_autocommit_mode(
     ) as conn:
         await conn.execute(text("VACUUM ANALYZE"))
 
-    # Negative case: a regular connection (transactional) rejects VACUUM.
-    # With asyncpg + NullPool the connection starts in a transaction,
-    # so VACUUM should fail here.
+    # Negative case: an explicit transaction block rejects VACUUM.
+    # We must BEGIN a transaction ourselves because NullPool + asyncpg
+    # may not start a transaction implicitly on engine.connect().
     with pytest.raises(Exception, match="transaction"):
-        async with engine.connect() as conn:
+        conn = await engine.connect()
+        try:
+            await conn.execute(text("BEGIN"))
             await conn.execute(text("VACUUM ANALYZE"))
+        except Exception:
+            await conn.close()
+            raise
 
 
 @pytest.mark.asyncio
