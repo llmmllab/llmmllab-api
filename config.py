@@ -107,3 +107,4 @@ PRIORITY_QUEUE_MAX_WAIT_MAX_SEC = int(
 # ── Completion / Retry ─────────────────────────────────────────────────
 RUNNER_RETRIES = int(os.environ.get("RUNNER_RETRIES", "2"))
 RUNNER_RETRY_BACKOFF_BASE = int(os.environ.get("RUNNER_RETRY_BACKOFF_BASE", "1"))
+STALE_SERVER_RETRIES = int(os.environ.get("STALE_SERVER_RETRIES", "1"))

@@ -431,6 +431,19 @@ The current date is {current_date}."""
 
             if isinstance(e, (APITimeoutError, TimeoutError)):
                 raise
+
+            # Detect stale server handles: 404 "Server X not found" means
+            # the llama.cpp server was evicted from the runner.  Re-raise
+            # as StaleServerError so the CompletionService can re-acquire
+            # a fresh server and retry.
+            error_body = str(e).lower()
+            if ("404" in error_body or "not found" in error_body) and "server" in error_body:
+                import re
+                m = re.search(r"server\s+([a-f0-9]+)", str(e), re.IGNORECASE)
+                server_id = m.group(1) if m else "unknown"
+                from graph.errors import StaleServerError
+                raise StaleServerError(server_id, e) from e
+
             return ChatResponse(
                 done=True,
                 message=Message(
