@@ -64,3 +64,20 @@ async def test_maintenance_vacuum_does_not_break_subsequent_steps(
     finally:
         if original is not None:
             os.environ["DB_REINDEX_ON_MAINTENANCE"] = original
+
+
+@pytest.mark.asyncio
+async def test_reindex_uses_scalar_not_mapping_subscript(session_factory, engine):
+    """Regression test for #68: REINDEX must use .scalar() to read current_database(),
+    not .mappings()['db_name'] which raises 'MappingResult object is not subscriptable'."""
+    service = DatabaseMaintenanceService()
+    await service.initialize(engine, session_factory)
+
+    # Verify that session.execute(text("SELECT current_database()")).scalar()
+    # returns a string (not a MappingResult that would fail subscripting)
+    async with session_factory() as session:
+        db_name = (await session.execute(
+            text("SELECT current_database()")
+        )).scalar()
+    assert isinstance(db_name, str)
+    assert len(db_name) > 0
