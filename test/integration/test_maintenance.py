@@ -7,6 +7,70 @@ from sqlalchemy import text
 
 from db.maintenance import DatabaseMaintenanceService
 
+# ---------------------------------------------------------------------------
+# Regression test for issue #23: VACUUM ANALYZE must run in autocommit mode
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_vacuum_analyze_runs_in_autocommit_mode(
+    session_factory, engine,
+):
+    """Verify that _run_vacuum_analyze opens the connection with
+    isolation_level='AUTOCOMMIT'.  Without this, PostgreSQL rejects
+    VACUUM with 'cannot run VACUUM in a transaction block'.
+
+    We confirm by actually executing VACUUM ANALYZE against a real
+    TimescaleDB container and asserting it completes without error.
+    """
+    service = DatabaseMaintenanceService()
+    await service.initialize(engine, session_factory)
+
+    # Disable REINDEX so the test is fast and deterministic
+    original = os.environ.pop("DB_REINDEX_ON_MAINTENANCE", None)
+    try:
+        del os.environ["DB_REINDEX_ON_MAINTENANCE"]
+    except KeyError:
+        pass
+
+    # This would raise "cannot run VACUUM in a transaction block" if
+    # the connection were NOT in autocommit mode.
+    try:
+        await service._run_vacuum_analyze()
+
+        # DB should still be healthy
+        async with session_factory() as session:
+            r = await session.execute(text("SELECT 1 as ok"))
+            assert r.scalar() == 1
+    finally:
+        if original is not None:
+            os.environ["DB_REINDEX_ON_MAINTENANCE"] = original
+
+
+@pytest.mark.asyncio
+async def test_vacuum_analyze_requires_autocommit_mode(
+    session_factory, engine,
+):
+    """Confirm that VACUUM ANALYZE succeeds with AUTOCOMMIT isolation
+    and fails without it — proving the fix is necessary.
+
+    This is a regression test for issue #23: the original code opened
+    a regular connection (implicit transaction) and tried to run
+    VACUUM ANALYZE, which PostgreSQL rejects with:
+    'cannot run VACUUM in a transaction block'.
+    """
+    # Positive case: AUTOCOMMIT mode works
+    async with engine.connect().execution_options(
+        isolation_level="AUTOCOMMIT"
+    ) as conn:
+        await conn.execute(text("VACUUM ANALYZE"))
+
+    # Negative case: a regular connection (transactional) rejects VACUUM.
+    # With asyncpg + NullPool the connection starts in a transaction,
+    # so VACUUM should fail here.
+    with pytest.raises(Exception, match="transaction"):
+        async with engine.connect() as conn:
+            await conn.execute(text("VACUUM ANALYZE"))
+
 
 @pytest.mark.asyncio
 async def test_maintenance_performs_without_error(
