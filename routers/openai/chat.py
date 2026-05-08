@@ -366,6 +366,8 @@ async def stream_chat_completion(
 
     acc = StreamAccumulator()
 
+    _priority = getattr(getattr(request.state, "request_metadata", None), "priority", None)
+
     try:
         async for event, acc in CompletionService.stream_completion(
             user_id=user_id,
@@ -373,6 +375,7 @@ async def stream_chat_completion(
             model_name=model_name,
             client_tools=client_tools,
             tool_choice=tool_choice,
+            priority=_priority,
         ):
             # Skip ServerToolEvents for OpenAI-compatible clients
 
@@ -595,6 +598,8 @@ async def createChatCompletion(
             },
         )
 
+    _priority = getattr(getattr(request.state, "request_metadata", None), "priority", None)
+
     # Non-streaming response — delegate to CompletionService
     try:
         result = await CompletionService.run_completion(
@@ -603,6 +608,7 @@ async def createChatCompletion(
             model_name=body.model,
             client_tools=client_tools,
             tool_choice=tool_choice,
+            priority=_priority,
         )
     except Exception as e:
         error_msg = str(e).lower()

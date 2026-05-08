@@ -83,3 +83,15 @@ RUNNER_ENDPOINTS = os.environ.get("RUNNER_ENDPOINTS", "http://localhost:9000").s
 )
 
 MODEL_CACHE_REFRESH_SEC = int(os.environ.get("MODEL_CACHE_REFRESH_SEC", "60"))
+
+# - Priority Queue -
+PRIORITY_QUEUE_ENABLED = (
+    os.environ.get("PRIORITY_QUEUE_ENABLED", "true").lower() == "true"
+)
+PRIORITY_QUEUE_MAX_SIZE = int(os.environ.get("PRIORITY_QUEUE_MAX_SIZE", "100"))
+PRIORITY_QUEUE_TIMEOUT_SEC = int(
+    os.environ.get("PRIORITY_QUEUE_TIMEOUT_SEC", "300")
+)
+PRIORITY_QUEUE_AGE_THRESHOLD_SEC = int(
+    os.environ.get("PRIORITY_QUEUE_AGE_THRESHOLD_SEC", "60")
+)

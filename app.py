@@ -66,6 +66,7 @@ from middleware import (
     db_init_middleware,
     MessageValidationMiddleware,
 )
+from middleware.priority import PriorityMiddleware
 from middleware.request_id import RequestIdMiddleware
 from middleware.prometheus_metrics import PrometheusMiddleware
 from middleware.tracing import setup_tracing, shutdown_tracing
@@ -250,6 +251,7 @@ app.state.auth_middleware = global_auth_middleware
 app.add_middleware(MessageValidationMiddleware)
 app.middleware("http")(db_init_middleware)
 app.add_middleware(RequestIdMiddleware)
+app.add_middleware(PriorityMiddleware)
 app.add_middleware(PrometheusMiddleware)
 
 

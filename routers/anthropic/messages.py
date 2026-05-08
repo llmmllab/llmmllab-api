@@ -367,6 +367,8 @@ async def stream_message(
     output_tokens = 0
     acc = StreamAccumulator()
 
+    _priority = getattr(getattr(request.state, "request_metadata", None), "priority", None)
+
     try:
         async for event, acc in CompletionService.stream_completion(
             user_id=user_id,
@@ -375,6 +377,7 @@ async def stream_message(
             client_tools=client_tools,
             tool_choice=tool_choice,
             server_tool_names=server_tool_names or None,
+            priority=_priority,
         ):
             # ---- ServerToolEvent → emit as standard text content blocks ----
             if isinstance(event, ServerToolEvent):
@@ -659,6 +662,8 @@ async def createMessage(
                 },
             )
 
+        _priority = getattr(getattr(request.state, "request_metadata", None), "priority", None)
+
         # Non-streaming path — delegate to CompletionService
         prepared = ToolService.prepare_tools(client_tools)
         try:
@@ -669,6 +674,7 @@ async def createMessage(
                 client_tools=prepared.client_tools,
                 tool_choice=tool_choice,
                 server_tool_names=prepared.server_tool_names or None,
+                priority=_priority,
             )
         except Exception as e:
             error_msg = str(e).lower()
