@@ -362,21 +362,22 @@ The current date is {current_date}."""
             self.logger.debug(f"Running agent with {len(normalized_messages)} messages")
 
             # Retry transient connection errors (e.g., APIConnectionError)
-            # up to 2 times with short backoff. Non-transient errors propagate.
+            # up to 5 times with exponential backoff (1s, 2s, 4s, 8s, 16s).
+            # Non-transient errors propagate immediately.
             from openai import APIConnectionError as _APIConnectionError
 
             last_error = None
-            for attempt in range(3):
+            for attempt in range(6):
                 try:
                     result = await agent.ainvoke({"messages": normalized_messages})  # type: ignore
                     break
                 except _APIConnectionError as e:
                     last_error = e
-                    if attempt < 2:
-                        backoff = 1.0 * (attempt + 1)
+                    if attempt < 5:
+                        backoff = 2 ** attempt  # 1, 2, 4, 8, 16 seconds
                         self.logger.warning(
                             f"Transient connection error, retrying in {backoff}s "
-                            f"(attempt {attempt + 1}/3)",
+                            f"(attempt {attempt + 1}/6)",
                             extra={"error": str(e)},
                         )
                         import asyncio as _asyncio
