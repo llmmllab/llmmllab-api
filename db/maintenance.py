@@ -86,10 +86,18 @@ class DatabaseMaintenanceService:
         return success
 
     async def _run_vacuum_analyze(self) -> None:
-        """Run VACUUM ANALYZE on a raw connection (no transaction)."""
+        """Run VACUUM ANALYZE on a raw connection in autocommit mode.
+
+        PostgreSQL's VACUUM cannot execute inside a transaction block.
+        SQLAlchemy's async engine wraps connections in an implicit
+        transaction by default, so we must set isolation_level=AUTOCOMMIT
+        to disable the transaction wrapper.
+        """
         logger.info("Running VACUUM ANALYZE...")
         try:
-            async with self.engine.connect() as conn:
+            async with self.engine.connect(
+                execution_options={"isolation_level": "AUTOCOMMIT"}
+            ) as conn:
                 await conn.execute(text("VACUUM ANALYZE"))
             logger.info("VACUUM ANALYZE completed successfully")
         except Exception as e:
