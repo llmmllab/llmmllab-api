@@ -140,28 +140,16 @@ class IdeGraphBuilder(GraphBuilder):
                     None,
                 )
                 if not model_def:
-                    # Requested model not on any runner — try user's default_model
-                    from services.model_service import model_service
-
-                    fallback = await model_service.resolve_default_model(
-                        model_name, user_id
+                    # Requested model not on any runner — fall back to user's default
+                    model_name = await self.resolve_model(model_name, user_id)
+                    model_def = next(
+                        (
+                            m
+                            for m in all_models
+                            if m.name == model_name or m.id == model_name
+                        ),
+                        None,
                     )
-                    if fallback and fallback != model_name:
-                        self.logger.info(
-                            "Requested model not available, falling back to default_model",
-                            user_id=user_id,
-                            requested=model_name,
-                            fallback=fallback,
-                        )
-                        model_name = fallback
-                        model_def = next(
-                            (
-                                m
-                                for m in all_models
-                                if m.name == model_name or m.id == model_name
-                            ),
-                            None,
-                        )
                     if not model_def:
                         raise RuntimeError(f"Model '{model_name}' not found")
             else:
