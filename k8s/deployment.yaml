@@ -135,5 +135,7 @@ spec:
               value: "9999"
             - name: TEMPO_ENDPOINT
               value: "http://tempo.llmmllab.svc.cluster.local:4317"
+            - name: CHAT_OPENAI_MAX_RETRIES
+              value: "2"
   strategy:
     type: Recreate
