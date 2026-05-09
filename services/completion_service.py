@@ -32,7 +32,7 @@ from models.message import Message, MessageContent, MessageContentType, MessageR
 from models.tool_call import ToolCall
 from utils.logging import llmmllogger
 from httpx import RemoteProtocolError, ConnectError
-from config import RUNNER_RETRIES
+from config import RUNNER_RETRIES, RUNNER_RETRY_BACKOFF_BASE
 
 logger = llmmllogger.bind(component="completion_service")
 
@@ -360,7 +360,7 @@ class CompletionService:
                             "max_retries": max_retries,
                         },
                     )
-                    await asyncio.sleep(attempt + 1)  # Linear backoff
+                    await asyncio.sleep(RUNNER_RETRY_BACKOFF_BASE * (attempt + 1))  # Linear backoff
                     # Force model map refresh so we get a healthy runner
                     from services.runner_client import runner_client
                     await runner_client.refresh_model_map()

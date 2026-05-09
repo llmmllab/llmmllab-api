@@ -86,3 +86,4 @@ MODEL_CACHE_REFRESH_SEC = int(os.environ.get("MODEL_CACHE_REFRESH_SEC", "60"))
 
 # ── Completion / Retry ─────────────────────────────────────────────────
 RUNNER_RETRIES = int(os.environ.get("RUNNER_RETRIES", "2"))
+RUNNER_RETRY_BACKOFF_BASE = int(os.environ.get("RUNNER_RETRY_BACKOFF_BASE", "1"))

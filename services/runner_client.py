@@ -42,7 +42,7 @@ _FAST_TIMEOUT = httpx.Timeout(10.0)
 _ACQUIRE_TIMEOUT = httpx.Timeout(150.0)
 
 
-@dataclass
+@dataclass(frozen=True)
 class ServerHandle:
     """Reference to an allocated llama.cpp server on a runner."""
 
@@ -64,6 +64,7 @@ class RunnerClient:
         self._client: Optional[httpx.AsyncClient] = None
         self._model_map: Dict[str, List[str]] = {}
         self._refresh_task: Optional[asyncio.Task] = None
+        self._active_handles: set[ServerHandle] = set()
 
     def _get_client(self) -> httpx.AsyncClient:
         """Lazily create a shared ``httpx.AsyncClient``."""
@@ -196,7 +197,21 @@ class RunnerClient:
         return last_response
 
     async def aclose(self) -> None:
-        """Close the shared HTTP client.  Call during app shutdown."""
+        """Close the shared HTTP client and release active servers.  Call during app shutdown."""
+        # Release all active server handles back to their runners.
+        if self._active_handles:
+            logger.info(
+                f"Releasing {len(self._active_handles)} active server handles on shutdown"
+            )
+            for handle in list(self._active_handles):
+                try:
+                    await self.release_server(handle)
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to release server {handle.server_id} on shutdown: {e}"
+                    )
+            self._active_handles.clear()
+
         if self._refresh_task is not None:
             self._refresh_task.cancel()
             try:
@@ -352,6 +367,7 @@ class RunnerClient:
                 )
                 logger.info(f"Acquired server {handle.server_id} from {endpoint}")
                 self._schedule_refresh()
+                self._active_handles.add(handle)
                 return handle
 
             except Exception as e:
@@ -373,6 +389,7 @@ class RunnerClient:
             )
             resp.raise_for_status()
             logger.info(f"Released server {handle.server_id}")
+            self._active_handles.discard(handle)
         except Exception as e:
             logger.error(f"Failed to release server {handle.server_id}: {e}")
             raise
