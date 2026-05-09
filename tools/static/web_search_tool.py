@@ -43,7 +43,7 @@ from models import SearchResult, SearchResultContent, WebSearchConfig
 # Native SearxNG wrapper — replaces langchain_community SearxSearchWrapper
 # to eliminate the langchain-community dependency.
 class SearxNGWrapper:
-    """Lightweight SearxNG wrapper using httpx (no langchain_community needed)."""
+    """Lightweight SearxNG wrapper using httpx."""
 
     def __init__(
         self,
