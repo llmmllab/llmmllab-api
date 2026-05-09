@@ -29,7 +29,11 @@ from graph.state import ServerToolEvent
 from graph.workflows.factory import WorkFlowType
 from models.chat_response import ChatResponse
 from models.message import Message, MessageContent, MessageContentType, MessageRole
-from models.request_metadata import Priority, RequestMetadata, RequestSource
+from models.request_priority_metadata import (
+    Priority,
+    RequestPriorityMetadata,
+    RequestSource,
+)
 from models.tool_call import ToolCall
 from utils.logging import llmmllogger
 from httpx import RemoteProtocolError, ConnectError
@@ -224,6 +228,7 @@ class CompletionService:
         """
         try:
             from services import model_service  # noqa: F811
+
             model = await model_service.get_model_by_id(model_name)
             if model and model.details and model.details.original_ctx:
                 return model.details.original_ctx
@@ -361,9 +366,12 @@ class CompletionService:
                             "max_retries": max_retries,
                         },
                     )
-                    await asyncio.sleep(RUNNER_RETRY_BACKOFF_BASE * (attempt + 1))  # Linear backoff
+                    await asyncio.sleep(
+                        RUNNER_RETRY_BACKOFF_BASE * (attempt + 1)
+                    )  # Linear backoff
                     # Force model map refresh so we get a healthy runner
                     from services.runner_client import runner_client
+
                     await runner_client.refresh_model_map()
                     continue
                 # Exhausted retries — re-raise
@@ -397,7 +405,6 @@ class CompletionService:
         """
         acc = StreamAccumulator()
 
-
         # Priority queue integration
         from config import PRIORITY_QUEUE_ENABLED
         from services.priority_queue import priority_queue
@@ -405,7 +412,7 @@ class CompletionService:
         _effective_priority = priority if priority is not None else Priority.HIGH
         _queue_ctx = None
         if PRIORITY_QUEUE_ENABLED:
-            _meta = RequestMetadata(
+            _meta = RequestPriorityMetadata(
                 source=RequestSource.USER,
                 priority=_effective_priority,
                 user_id=user_id,
@@ -610,7 +617,9 @@ class CompletionService:
                 # Skip retry if context is likely too large — retrying the
                 # same oversized messages (or adding a nudge) is futile.
                 if _is_context_overflow(
-                    acc.input_tokens, acc.finish_reason, acc.output_tokens,
+                    acc.input_tokens,
+                    acc.finish_reason,
+                    acc.output_tokens,
                     model_num_ctx=_model_num_ctx,
                 ):
                     logger.warning(
@@ -712,7 +721,10 @@ class CompletionService:
 
                             if event.message and event.message.content:
                                 for part in event.message.content:
-                                    if part.type == MessageContentType.TEXT and part.text:
+                                    if (
+                                        part.type == MessageContentType.TEXT
+                                        and part.text
+                                    ):
                                         acc.has_content = True
                             yield event, acc
 
@@ -753,7 +765,7 @@ class CompletionService:
         _effective_priority = priority if priority is not None else Priority.HIGH
         _queue_ctx = None
         if PRIORITY_QUEUE_ENABLED:
-            _meta = RequestMetadata(
+            _meta = RequestPriorityMetadata(
                 source=RequestSource.USER,
                 priority=_effective_priority,
                 user_id=user_id,
@@ -761,7 +773,7 @@ class CompletionService:
             _queue_ctx = await priority_queue.enqueue(_meta)
 
         try:
-    
+
             # ---------- primary pass (with connection-error retry) ----------
             async for event in CompletionService._build_and_run_with_retry(
                 user_id,
@@ -777,10 +789,10 @@ class CompletionService:
                     continue
                 if event.done and event.message:
                     result.chat_response = event
-    
+
             if result.chat_response is None:
                 return result
-    
+
             # Filter server tool calls
             if (
                 server_tool_names
@@ -792,7 +804,7 @@ class CompletionService:
                     for tc in result.chat_response.message.tool_calls
                     if tc.name not in server_tool_names
                 ]
-    
+
             # ---------- truncation continuation ----------
             if result.has_content and not result.has_tool_calls:
                 accumulated_text = "".join(
@@ -873,7 +885,7 @@ class CompletionService:
                                     result.chat_response.eval_count or 0
                                 ) + int(event.eval_count)
                             result.chat_response = event
-    
+
             # ---------- continuation check ----------
             # Skip when the model naturally stopped or was cut off by token
             # limit — see streaming path comment.
@@ -914,7 +926,8 @@ class CompletionService:
                             role=MessageRole.USER,
                             content=[
                                 MessageContent(
-                                    type=MessageContentType.TEXT, text=_CONTINUATION_PROMPT
+                                    type=MessageContentType.TEXT,
+                                    text=_CONTINUATION_PROMPT,
                                 )
                             ],
                         ),
@@ -934,9 +947,13 @@ class CompletionService:
                         if event.done and event.message:
                             if event.message.tool_calls:
                                 result.chat_response = event
-    
+
             # ---------- empty-response retry ----------
-            if not result.has_content and not result.has_tool_calls and not result.is_error:
+            if (
+                not result.has_content
+                and not result.has_tool_calls
+                and not result.is_error
+            ):
                 # Gather token info from the primary response for overflow detection.
                 _primary_prompt_tokens = 0
                 _primary_output_tokens = 0
@@ -946,17 +963,17 @@ class CompletionService:
                         result.chat_response.prompt_eval_count or 0
                     )
                     _primary_output_tokens = int(result.chat_response.eval_count or 0)
-                    _primary_finish_reason = (
-                        result.chat_response.finish_reason or ""
-                    )
-    
+                    _primary_finish_reason = result.chat_response.finish_reason or ""
+
                 # Look up the model's context window for an accurate overflow check.
                 _model_num_ctx = await CompletionService._get_model_num_ctx(model_name)
-    
+
                 # Skip retry if context is likely too large — retrying the
                 # same oversized messages (or adding a nudge) is futile.
                 if _is_context_overflow(
-                    _primary_prompt_tokens, _primary_finish_reason, _primary_output_tokens,
+                    _primary_prompt_tokens,
+                    _primary_finish_reason,
+                    _primary_output_tokens,
                     model_num_ctx=_model_num_ctx,
                 ):
                     logger.warning(
@@ -988,7 +1005,7 @@ class CompletionService:
                             continue
                         if event.done and event.message:
                             result.chat_response = event
-    
+
                     # ---------- nudge ----------
                     if not result.has_content and not result.has_tool_calls:
                         logger.warning(
@@ -1020,7 +1037,7 @@ class CompletionService:
                                 continue
                             if event.done and event.message:
                                 result.chat_response = event
-    
+
             return result
         finally:
             if _queue_ctx is not None:

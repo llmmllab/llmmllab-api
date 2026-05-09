@@ -1,7 +1,7 @@
 """
 Unit tests for RequestMetadata and priority classification.
 
-Covers RequestSource, Priority, and RequestMetadata from models/request_metadata.py,
+Covers RequestSource, Priority, and RequestMetadata from models/request_priority_metadata.py,
 and the priority middleware's _classify_request logic from middleware/priority.py.
 """
 
@@ -9,7 +9,11 @@ import time
 
 import pytest
 
-from models.request_metadata import Priority, RequestMetadata, RequestSource
+from models.request_priority_metadata import (
+    Priority,
+    RequestPriorityMetadata,
+    RequestSource,
+)
 
 
 class TestRequestSource:
@@ -46,7 +50,7 @@ class TestRequestMetadata:
     """RequestMetadata defaults and computed properties."""
 
     def test_defaults(self):
-        meta = RequestMetadata()
+        meta = RequestPriorityMetadata()
         assert meta.source == RequestSource.USER
         assert meta.priority == Priority.HIGH
         assert meta.user_id is None
@@ -54,7 +58,7 @@ class TestRequestMetadata:
         assert meta.scheduled_at is None
 
     def test_custom_values(self):
-        meta = RequestMetadata(
+        meta = RequestPriorityMetadata(
             source=RequestSource.SCHEDULED,
             priority=Priority.LOW,
             user_id="u-1",
@@ -68,13 +72,13 @@ class TestRequestMetadata:
         assert meta.scheduled_at == 100.0
 
     def test_wait_time_increases(self):
-        meta = RequestMetadata()
+        meta = RequestPriorityMetadata()
         t1 = meta.wait_time
         time.sleep(0.05)
         t2 = meta.wait_time
         assert t2 > t1
 
     def test_wait_time_starts_near_zero(self):
-        meta = RequestMetadata()
+        meta = RequestPriorityMetadata()
         assert meta.wait_time >= 0
         assert meta.wait_time < 1.0

@@ -8,7 +8,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from models.request_metadata import Priority, RequestMetadata
+from models.request_priority_metadata import Priority, RequestPriorityMetadata
 from utils.logging import llmmllogger
 
 logger = llmmllogger.bind(component="priority_queue")
@@ -72,9 +72,7 @@ def _set_size(priority: Priority, size: int) -> None:
 
 def _inc_aged(from_p: Priority, to_p: Priority) -> None:
     if _HAS_PROMETHEUS:
-        _queue_aged_total.labels(
-            from_priority=from_p.name, to_priority=to_p.name
-        ).inc()
+        _queue_aged_total.labels(from_priority=from_p.name, to_priority=to_p.name).inc()
 
 
 @dataclass(order=True)
@@ -82,11 +80,11 @@ class _QueueItem:
     """Internal queue item with priority ordering."""
 
     sort_key: tuple = field(compare=True)
-    metadata: RequestMetadata = field(compare=False)
+    metadata: RequestPriorityMetadata = field(compare=False)
     event: asyncio.Event = field(compare=False, default_factory=asyncio.Event)
 
     @classmethod
-    def create(cls, metadata: RequestMetadata) -> _QueueItem:
+    def create(cls, metadata: RequestPriorityMetadata) -> _QueueItem:
         return cls(
             sort_key=(metadata.priority.value, metadata.enqueued_at),
             metadata=metadata,
@@ -115,7 +113,7 @@ class AsyncPriorityQueue:
         self._counter = 0
         self._sizes = {p: 0 for p in Priority}
 
-    async def enqueue(self, metadata: RequestMetadata) -> asyncio.Event:
+    async def enqueue(self, metadata: RequestPriorityMetadata) -> asyncio.Event:
         """Add a request to the queue and return an event to wait on.
 
         The event is set when it is this request's turn to proceed.
@@ -159,7 +157,7 @@ class AsyncPriorityQueue:
 
         return item.event
 
-    async def dequeue(self) -> Optional[RequestMetadata]:
+    async def dequeue(self) -> Optional[RequestPriorityMetadata]:
         """Remove and return the highest-priority request's metadata.
 
         Call this after processing a request to let the next one through.
@@ -187,12 +185,15 @@ class AsyncPriorityQueue:
             if item in self._queue:
                 self._queue.remove(item)
                 self._sizes[item.metadata.priority] = sum(
-                    1 for i in self._queue
+                    1
+                    for i in self._queue
                     if i.metadata.priority == item.metadata.priority
                 )
                 self._update_gauges()
 
-    async def _age_item(self, item: _QueueItem, metadata: RequestMetadata) -> None:
+    async def _age_item(
+        self, item: _QueueItem, metadata: RequestPriorityMetadata
+    ) -> None:
         """Promote a request's priority after age_threshold seconds."""
         await asyncio.sleep(self._age_threshold_sec)
         async with self._lock:

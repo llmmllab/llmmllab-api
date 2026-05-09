@@ -10,6 +10,7 @@ from pydantic import ValidationError
 import regex
 
 from middleware.auth import get_user_id
+from models.request_priority_metadata import Priority
 from services import (
     CompletionService,
     StreamAccumulator,
@@ -306,6 +307,7 @@ async def stream_message(
     model_name: str,
     client_tools: list | None = None,
     tool_choice: str | None = None,
+    priority: Priority | None = None,
 ) -> AsyncIterator[str]:
     """Stream composer events as Anthropic SSE message chunks.
 
@@ -367,8 +369,6 @@ async def stream_message(
     output_tokens = 0
     acc = StreamAccumulator()
 
-    _priority = getattr(getattr(request.state, "request_metadata", None), "priority", None)
-
     try:
         async for event, acc in CompletionService.stream_completion(
             user_id=user_id,
@@ -377,7 +377,7 @@ async def stream_message(
             client_tools=client_tools,
             tool_choice=tool_choice,
             server_tool_names=server_tool_names or None,
-            priority=_priority,
+            priority=priority,
         ):
             # ---- ServerToolEvent → emit as standard text content blocks ----
             if isinstance(event, ServerToolEvent):
@@ -612,6 +612,9 @@ async def createMessage(
         req_body = _strip_server_tool_blocks(req_body)
         body = CreateMessageRequest.model_validate(req_body)
         internal_messages = messages_from_anthropic(body.messages, system=body.system)
+        priority = getattr(
+            getattr(request.state, "request_priority_metadata", {}), "priority", None
+        )
 
         # Resolve model: fall back to user's default_model if unavailable
         resolved_model = await model_service.resolve_default_model(body.model, user_id)
@@ -653,6 +656,7 @@ async def createMessage(
                     body.model,
                     client_tools=raw_client_tools,
                     tool_choice=tool_choice,
+                    priority=priority,
                 ),
                 media_type="text/event-stream",
                 headers={
@@ -661,8 +665,6 @@ async def createMessage(
                     "X-Accel-Buffering": "no",
                 },
             )
-
-        _priority = getattr(getattr(request.state, "request_metadata", None), "priority", None)
 
         # Non-streaming path — delegate to CompletionService
         prepared = ToolService.prepare_tools(client_tools)
@@ -674,11 +676,14 @@ async def createMessage(
                 client_tools=prepared.client_tools,
                 tool_choice=tool_choice,
                 server_tool_names=prepared.server_tool_names or None,
-                priority=_priority,
+                priority=priority,
             )
         except Exception as e:
             error_msg = str(e).lower()
-            if any(kw in error_msg for kw in ("connection", "runner", "unavailable", "refused", "protocol")):
+            if any(
+                kw in error_msg
+                for kw in ("connection", "runner", "unavailable", "refused", "protocol")
+            ):
                 raise HTTPException(
                     status_code=503,
                     detail="Runner service is temporarily unavailable. Please retry.",

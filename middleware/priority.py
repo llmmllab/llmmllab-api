@@ -10,13 +10,17 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
-from models.request_metadata import Priority, RequestMetadata, RequestSource
+from models.request_priority_metadata import (
+    Priority,
+    RequestPriorityMetadata,
+    RequestSource,
+)
 from utils.logging import llmmllogger
 
 logger = llmmllogger.bind(component="priority_middleware")
 
 
-def _classify_request(request: Request) -> RequestMetadata:
+def _classify_request(request: Request) -> RequestPriorityMetadata:
     """Classify an incoming request by source and assign priority."""
     source_header = request.headers.get("X-Request-Source", "").lower()
     priority_header = request.headers.get("X-Request-Priority", "").lower()
@@ -28,6 +32,9 @@ def _classify_request(request: Request) -> RequestMetadata:
         source = RequestSource.SYSTEM
     else:
         source = RequestSource.USER
+
+    # Set default priority, will be overridden by header if provided
+    priority = Priority.MEDIUM
 
     # Determine priority (header overrides source-based default)
     if priority_header == "low":
@@ -41,14 +48,12 @@ def _classify_request(request: Request) -> RequestMetadata:
         if source == RequestSource.USER:
             priority = Priority.HIGH
         elif source == RequestSource.SCHEDULED:
-            priority = Priority.MEDIUM
-        else:
             priority = Priority.LOW
 
     # Extract user_id from auth state if available
     user_id = getattr(request.state, "user_id", None)
 
-    return RequestMetadata(
+    return RequestPriorityMetadata(
         source=source,
         priority=priority,
         user_id=user_id,
@@ -56,19 +61,25 @@ def _classify_request(request: Request) -> RequestMetadata:
     )
 
 
+COMPLETION_ENDPOINTS = {"/chat/completions", "/messages"}
+
+
+def is_completion_endpoint(path: str) -> bool:
+    """Check if the request path is a completion endpoint."""
+    return any(path.find(endpoint) != -1 for endpoint in COMPLETION_ENDPOINTS)
+
+
 class PriorityMiddleware(BaseHTTPMiddleware):
     """Attach RequestMetadata to every request for downstream priority scheduling."""
 
     async def dispatch(self, request: Request, call_next) -> Response:
         # Skip non-API paths
-        if not request.url.path.startswith("/v1/") and not request.url.path.startswith(
-            "/api/"
-        ):
+        if not is_completion_endpoint(request.url.path):
             response = await call_next(request)
             return response
 
         metadata = _classify_request(request)
-        request.state.request_metadata = metadata
+        request.state.request_priority_metadata = metadata
 
         response = await call_next(request)
         response.headers["X-Queue-Priority"] = metadata.priority.name.lower()

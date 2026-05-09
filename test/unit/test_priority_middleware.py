@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from models.request_metadata import Priority, RequestSource
+from models.request_priority_metadata import Priority, RequestSource
 
 
 def _make_request(headers: dict | None = None, state_attrs: dict | None = None):
