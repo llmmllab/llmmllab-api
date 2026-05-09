@@ -77,6 +77,9 @@ ENABLE_TOOL_CONTINUATION = (
     os.environ.get("ENABLE_TOOL_CONTINUATION", "true").lower() == "true"
 )
 
+# ── Chat / LLM ─────────────────────────────────────────────────────
+CHAT_OPENAI_MAX_RETRIES = int(os.environ.get("CHAT_OPENAI_MAX_RETRIES", "2"))
+
 # ── Runner service ─────────────────────────────────────────────────────
 RUNNER_ENDPOINTS = os.environ.get("RUNNER_ENDPOINTS", "http://localhost:9000").split(
     ","
