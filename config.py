@@ -77,6 +77,9 @@ ENABLE_TOOL_CONTINUATION = (
     os.environ.get("ENABLE_TOOL_CONTINUATION", "true").lower() == "true"
 )
 
+# ── Chat / LLM ─────────────────────────────────────────────────────
+CHAT_OPENAI_MAX_RETRIES = int(os.environ.get("CHAT_OPENAI_MAX_RETRIES", "2"))
+
 # ── Runner service ─────────────────────────────────────────────────────
 RUNNER_ENDPOINTS = os.environ.get("RUNNER_ENDPOINTS", "http://localhost:9000").split(
     ","
@@ -95,3 +98,6 @@ PRIORITY_QUEUE_TIMEOUT_SEC = int(
 PRIORITY_QUEUE_AGE_THRESHOLD_SEC = int(
     os.environ.get("PRIORITY_QUEUE_AGE_THRESHOLD_SEC", "60")
 )
+# ── Completion / Retry ─────────────────────────────────────────────────
+RUNNER_RETRIES = int(os.environ.get("RUNNER_RETRIES", "2"))
+RUNNER_RETRY_BACKOFF_BASE = int(os.environ.get("RUNNER_RETRY_BACKOFF_BASE", "1"))

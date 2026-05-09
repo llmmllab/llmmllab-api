@@ -13,6 +13,7 @@ from langchain.chat_models import BaseChatModel
 from langchain.embeddings import Embeddings
 from pydantic import BaseModel
 
+import config
 from constants import (
     AGENT_NODE_NAME,
     MEMORY_CREATE_NODE_NAME,
@@ -117,7 +118,7 @@ class DialogGraphBuilder(GraphBuilder):
                 api_key=SecretStr("none"),
                 model=primary_model_def.name,
                 stream_usage=True,
-                max_retries=0,
+                max_retries=config.CHAT_OPENAI_MAX_RETRIES,  # retry transient 503 (slots busy) errors
             )
             embedding_model = OpenAIEmbeddings(
                 base_url=embedding_handle.base_url,

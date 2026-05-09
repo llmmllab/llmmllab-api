@@ -131,9 +131,15 @@ spec:
             - name: RUNNER_ENDPOINTS
               value: "http://llmmllab-runner.llmmllab.svc.cluster.local:8000,http://llmmllab-\
                 runner-small.llmmllab.svc.cluster.local:8000"
+            - name: RUNNER_RETRIES
+              value: "3"
+            - name: RUNNER_RETRY_BACKOFF_BASE
+              value: "2"
             - name: PORT
               value: "9999"
             - name: TEMPO_ENDPOINT
               value: "http://tempo.llmmllab.svc.cluster.local:4317"
+            - name: CHAT_OPENAI_MAX_RETRIES
+              value: "2"
   strategy:
     type: Recreate

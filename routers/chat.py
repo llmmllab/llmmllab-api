@@ -124,20 +124,26 @@ async def chat_completion(
 
         # Provide specific error messages
         error_detail = f"Error in chat completion: {str(e)}"
-        if "composer service not initialized" in str(e).lower():
+        error_msg = str(e).lower()
+        if "composer service not initialized" in error_msg:
             error_detail = "AI service not ready. Please try again in a moment."
-        elif "workflow construction" in str(e).lower():
+        elif "workflow construction" in error_msg:
             error_detail = (
                 "Unable to create AI workflow. Please check your configuration."
             )
-        elif "unknown model architecture" in str(e):
+        elif "unknown model architecture" in error_msg:
             error_detail = (
                 "Model architecture not supported. Please try a different model."
             )
-        elif "Failed to create llama_context" in str(e):
+        elif "failed to create llama_context" in error_msg:
             error_detail = (
                 "Model failed to load. This may be due to insufficient memory."
             )
+        elif any(kw in error_msg for kw in ("connection", "runner", "unavailable", "refused", "protocol")):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Runner service is temporarily unavailable. Please retry.",
+            ) from e
 
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
