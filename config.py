@@ -83,3 +83,6 @@ RUNNER_ENDPOINTS = os.environ.get("RUNNER_ENDPOINTS", "http://localhost:9000").s
 )
 
 MODEL_CACHE_REFRESH_SEC = int(os.environ.get("MODEL_CACHE_REFRESH_SEC", "60"))
+
+# Number of retries when a stale server handle is detected (default 1).
+STALE_SERVER_RETRIES = int(os.environ.get("STALE_SERVER_RETRIES", "1"))

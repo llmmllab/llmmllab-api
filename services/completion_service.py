@@ -48,7 +48,7 @@ from middleware.api_metrics import (  # noqa: E402
 # Configuration
 # ---------------------------------------------------------------------------
 
-from config import ENABLE_TOOL_CONTINUATION
+from config import ENABLE_TOOL_CONTINUATION, STALE_SERVER_RETRIES
 
 _CONTINUATION_ENABLED = ENABLE_TOOL_CONTINUATION
 
@@ -289,7 +289,7 @@ class CompletionService:
         """
         from graph.errors import StaleServerError
 
-        max_retries = 1
+        max_retries = STALE_SERVER_RETRIES
         try:
             workflow, builder, _server_url = await CompletionService.build_workflow(
                 user_id,
