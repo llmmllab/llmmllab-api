@@ -7,13 +7,24 @@ shutdown) and model discovery across all runners.
 
 Uses a persistent ``httpx.AsyncClient`` with connection pooling to avoid
 the overhead of opening a new TCP connection for every request.
+
+Server Handle Lifecycle
+-----------------------
+Every handle returned by ``acquire_server()`` is automatically registered
+in an internal registry. On application shutdown, ``aclose()`` calls
+``shutdown_all_handles()`` which sends DELETE requests to the runner for
+each registered handle, ensuring no orphaned llama.cpp servers remain.
+
+The ``num_ctx`` parameter on ``acquire_server()`` is forwarded to the
+runner so it can refuse to start servers with insufficient context
+(relative to ``CONTEXT_MINIMUM_RATIO``).
 """
 
 import asyncio
 import logging
 import time
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Set
 
 import httpx
 
@@ -64,6 +75,8 @@ class RunnerClient:
         self._client: Optional[httpx.AsyncClient] = None
         self._model_map: Dict[str, List[str]] = {}
         self._refresh_task: Optional[asyncio.Task] = None
+        # Registry of active server handles for cleanup on shutdown.
+        self._active_handles: Set[str] = set()
 
     def _get_client(self) -> httpx.AsyncClient:
         """Lazily create a shared ``httpx.AsyncClient``."""
@@ -195,8 +208,42 @@ class RunnerClient:
 
         return last_response
 
+    async def shutdown_all_handles(self) -> None:
+        """Shut down all registered server handles on the runner.
+
+        Called during application shutdown to ensure no orphaned llama.cpp
+        servers remain running on the runner nodes.
+        """
+        if not self._active_handles:
+            return
+
+        handles_to_shutdown = list(self._active_handles)
+        logger.info(
+            f"Shutting down {len(handles_to_shutdown)} active server handle(s)"
+        )
+
+        for key in handles_to_shutdown:
+            try:
+                # key is "runner_host/server_id"
+                runner_host, server_id = key.rsplit("/", 1)
+                handle = ServerHandle(
+                    base_url=f"{runner_host}/v1/server/{server_id}",
+                    server_id=server_id,
+                    runner_host=runner_host,
+                )
+                await self.shutdown_server(handle)
+            except Exception as e:
+                logger.warning(
+                    f"Failed to shutdown handle {key} during cleanup: {e}"
+                )
+
+        self._active_handles.clear()
+
     async def aclose(self) -> None:
         """Close the shared HTTP client.  Call during app shutdown."""
+        # Shut down all active server handles before closing the client
+        await self.shutdown_all_handles()
+
         if self._refresh_task is not None:
             self._refresh_task.cancel()
             try:
@@ -257,23 +304,47 @@ class RunnerClient:
     # Server lifecycle
     # ------------------------------------------------------------------
 
-    async def acquire_server(self, model_id: str, **kwargs) -> ServerHandle:
+    def register_handle(self, handle: ServerHandle) -> None:
+        """Register a server handle for lifecycle cleanup on shutdown."""
+        key = f"{handle.runner_host}/{handle.server_id}"
+        self._active_handles.add(key)
+
+    def unregister_handle(self, handle: ServerHandle) -> None:
+        """Unregister a server handle after it has been released/shutdown."""
+        key = f"{handle.runner_host}/{handle.server_id}"
+        self._active_handles.discard(key)
+
+    async def acquire_server(self, model_id: str, num_ctx: Optional[int] = None, **kwargs) -> ServerHandle:
         """Acquire a new llama.cpp server from a runner.
 
         Uses the cached model map for fast routing. Falls back to
         health-check scan if the model isn't in the map.
 
-        Extra kwargs are accepted for forward compatibility with callers
-        that pass task/config_override. config_override is forwarded to
-        the runner if present.
+        Parameters
+        ----------
+        model_id:
+            Identifier of the model to load.
+        num_ctx:
+            Requested context window size.  Passed to the runner so it can
+            refuse to start a server when the available context is smaller
+            than ``CONTEXT_MINIMUM_RATIO * num_ctx``.
+        **kwargs:
+            Forwarded for compatibility (task, config_override).
 
-        Returns:
-            ServerHandle with connection details for the allocated server.
+        Returns
+        -------
+        ServerHandle
+            Connection details for the allocated server (auto-registered
+            for shutdown cleanup).
 
-        Raises:
-            RuntimeError: if no runner can satisfy the request.
+        Raises
+        ------
+        RuntimeError
+            If no runner can satisfy the request.
         """
         payload: dict[str, Any] = {"model_id": model_id}
+        if num_ctx is not None:
+            payload["num_ctx"] = num_ctx
         config_override = kwargs.get("config_override")
         if config_override:
             payload["config_override"] = config_override
@@ -317,6 +388,7 @@ class RunnerClient:
                     server_id=data["server_id"],
                     runner_host=endpoint,
                 )
+                self.register_handle(handle)
                 logger.info(f"Acquired server {handle.server_id} from {endpoint}")
                 self._schedule_refresh()
                 return handle
@@ -343,6 +415,8 @@ class RunnerClient:
         except Exception as e:
             logger.error(f"Failed to release server {handle.server_id}: {e}")
             raise
+        finally:
+            self.unregister_handle(handle)
 
     async def shutdown_server(self, handle: ServerHandle) -> None:
         """Permanently shut down a server on the runner."""
@@ -356,6 +430,8 @@ class RunnerClient:
         except Exception as e:
             logger.error(f"Failed to shutdown server {handle.server_id}: {e}")
             raise
+        finally:
+            self.unregister_handle(handle)
 
     # ------------------------------------------------------------------
     # Model map

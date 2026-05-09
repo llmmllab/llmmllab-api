@@ -105,6 +105,11 @@ class DialogGraphBuilder(GraphBuilder):
 
             primary_handle = await runner_client.acquire_server(
                 model_id=primary_model_def.id,
+                num_ctx=(
+                    primary_model_def.parameters.num_ctx
+                    if primary_model_def.parameters
+                    else 90000
+                ),
                 task=primary_model_def.task,
             )
             embedding_handle = await runner_client.acquire_server(
