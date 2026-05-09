@@ -11,6 +11,7 @@ the overhead of opening a new TCP connection for every request.
 
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -36,10 +37,16 @@ for _lib_name in (
 
 logger = llmmllogger.bind(component="runner_client")
 
-# Timeouts for different request categories
-_HEALTH_TIMEOUT = httpx.Timeout(5.0)
-_FAST_TIMEOUT = httpx.Timeout(10.0)
-_ACQUIRE_TIMEOUT = httpx.Timeout(150.0)
+# Timeouts for different request categories (configurable via env)
+_HEALTH_TIMEOUT = httpx.Timeout(float(os.environ.get("RUNNER_HEALTH_TIMEOUT_SEC", "5.0")))
+_FAST_TIMEOUT = httpx.Timeout(float(os.environ.get("RUNNER_FAST_TIMEOUT_SEC", "10.0")))
+_ACQUIRE_TIMEOUT = httpx.Timeout(float(os.environ.get("RUNNER_ACQUIRE_TIMEOUT_SEC", "150.0")))
+
+# Circuit breaker thresholds (configurable via env)
+_MAX_ACQUIRE_FAILURES = int(os.environ.get("RUNNER_MAX_ACQUIRE_FAILURES", "3"))
+_UNHEALTHY_WINDOW = float(os.environ.get("RUNNER_UNHEALTHY_WINDOW_SEC", "60.0"))
+# Per-endpoint connection retries during acquire
+_ACQUIRE_RETRIES = int(os.environ.get("RUNNER_ACQUIRE_RETRIES", "2"))
 
 
 @dataclass
@@ -68,8 +75,8 @@ class RunnerClient:
         self._acquire_failures: Dict[str, int] = {}
         # Circuit breaker: skip a runner if it has >= this many consecutive
         # acquire failures within the last UNHEALTHY_WINDOW seconds.
-        self._MAX_ACQUIRE_FAILURES = 3
-        self._UNHEALTHY_WINDOW = 60.0
+        self._MAX_ACQUIRE_FAILURES = _MAX_ACQUIRE_FAILURES
+        self._UNHEALTHY_WINDOW = _UNHEALTHY_WINDOW
 
     def _get_client(self) -> httpx.AsyncClient:
         """Lazily create a shared ``httpx.AsyncClient``."""
@@ -343,8 +350,8 @@ class RunnerClient:
                 )
                 continue
 
-            # Retry connection-level errors up to 2 times per endpoint
-            max_retries = 2
+            # Retry connection-level errors per endpoint (configurable via RUNNER_ACQUIRE_RETRIES)
+            max_retries = _ACQUIRE_RETRIES
             for attempt in range(max_retries + 1):
                 try:
                     client = self._get_client()
