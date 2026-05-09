@@ -596,13 +596,23 @@ async def createChatCompletion(
         )
 
     # Non-streaming response — delegate to CompletionService
-    result = await CompletionService.run_completion(
-        user_id=user_id,
-        messages=internal_messages,
-        model_name=body.model,
-        client_tools=client_tools,
-        tool_choice=tool_choice,
-    )
+    try:
+        result = await CompletionService.run_completion(
+            user_id=user_id,
+            messages=internal_messages,
+            model_name=body.model,
+            client_tools=client_tools,
+            tool_choice=tool_choice,
+        )
+    except Exception as e:
+        error_msg = str(e).lower()
+        if any(kw in error_msg for kw in ("connection", "runner", "unavailable", "refused", "protocol")):
+            raise HTTPException(
+                status_code=503,
+                detail="Runner service is temporarily unavailable. Please retry.",
+            ) from e
+        raise
+
     if result.chat_response is None or (not result.has_content and not result.has_tool_calls):
         raise HTTPException(
             status_code=503,

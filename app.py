@@ -35,6 +35,7 @@ The application handles initialization and cleanup of all services and provides
 detailed logging throughout the startup and shutdown processes.
 """
 
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
@@ -131,6 +132,32 @@ async def lifespan(_: FastAPI):
         logger.info("Runner model map warmed up")
     except Exception as e:
         logger.warning(f"Runner model map warm-up failed: {e}")
+
+    # Wait for at least one runner to be healthy before accepting requests
+    try:
+        import time as _time  # pylint: disable=import-outside-toplevel
+        from services.runner_client import (
+            runner_client,
+        )  # pylint: disable=import-outside-toplevel
+
+        _start = _time.monotonic()
+        _timeout = 120
+        while _time.monotonic() - _start < _timeout:
+            try:
+                models = await runner_client.list_models()
+                if models:
+                    logger.info(f"Runner ready with {len(models)} models")
+                    break
+            except Exception:
+                pass
+            await asyncio.sleep(2)
+        else:
+            logger.error(
+                "Runner not ready after %ds timeout — accepting requests anyway",
+                _timeout,
+            )
+    except Exception as e:
+        logger.warning(f"Runner readiness check failed: {e}")
 
     try:
         yield  # Application runs here

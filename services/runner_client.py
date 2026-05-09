@@ -42,7 +42,7 @@ _FAST_TIMEOUT = httpx.Timeout(10.0)
 _ACQUIRE_TIMEOUT = httpx.Timeout(150.0)
 
 
-@dataclass
+@dataclass(frozen=True)
 class ServerHandle:
     """Reference to an allocated llama.cpp server on a runner."""
 
@@ -64,6 +64,7 @@ class RunnerClient:
         self._client: Optional[httpx.AsyncClient] = None
         self._model_map: Dict[str, List[str]] = {}
         self._refresh_task: Optional[asyncio.Task] = None
+        self._active_handles: set[ServerHandle] = set()
 
     def _get_client(self) -> httpx.AsyncClient:
         """Lazily create a shared ``httpx.AsyncClient``."""
@@ -196,7 +197,21 @@ class RunnerClient:
         return last_response
 
     async def aclose(self) -> None:
-        """Close the shared HTTP client.  Call during app shutdown."""
+        """Close the shared HTTP client and release active servers.  Call during app shutdown."""
+        # Release all active server handles back to their runners.
+        if self._active_handles:
+            logger.info(
+                f"Releasing {len(self._active_handles)} active server handles on shutdown"
+            )
+            for handle in list(self._active_handles):
+                try:
+                    await self.release_server(handle)
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to release server {handle.server_id} on shutdown: {e}"
+                    )
+            self._active_handles.clear()
+
         if self._refresh_task is not None:
             self._refresh_task.cancel()
             try:
@@ -225,12 +240,45 @@ class RunnerClient:
             else:
                 if endpoint in self._healthy:
                     self._healthy.remove(endpoint)
+                self._invalidate_model_map_for_endpoint(endpoint)
                 return None
         except Exception as e:
             logger.warning(f"Runner {endpoint} health check failed: {e}")
             if endpoint in self._healthy:
                 self._healthy.remove(endpoint)
+            self._invalidate_model_map_for_endpoint(endpoint)
             return None
+
+    def _invalidate_model_map_for_endpoint(self, endpoint: str) -> None:
+        """Remove an endpoint from the model map immediately when it becomes unhealthy.
+
+        This avoids waiting for the next scheduled refresh (default 60 s) and
+        prevents ``acquire_server()`` from routing to a dead runner.
+        """
+        for model_id, endpoints in list(self._model_map.items()):
+            if endpoint in endpoints:
+                endpoints.remove(endpoint)
+                if not endpoints:
+                    del self._model_map[model_id]
+        logger.info(
+            f"Invalidated model map for unhealthy endpoint {endpoint}",
+        )
+
+    async def validate_server_handle(self, handle: ServerHandle) -> bool:
+        """Check if a server handle is still valid by hitting the server's /health.
+
+        Returns ``True`` if the llama.cpp server behind the handle responds
+        with HTTP 200, ``False`` otherwise.
+        """
+        try:
+            client = self._get_client()
+            resp = await client.get(
+                f"{handle.base_url}/health",
+                timeout=httpx.Timeout(3.0),
+            )
+            return resp.status_code == 200
+        except Exception:
+            return False
 
     # ------------------------------------------------------------------
     # Runner selection
@@ -319,6 +367,7 @@ class RunnerClient:
                 )
                 logger.info(f"Acquired server {handle.server_id} from {endpoint}")
                 self._schedule_refresh()
+                self._active_handles.add(handle)
                 return handle
 
             except Exception as e:
@@ -340,6 +389,7 @@ class RunnerClient:
             )
             resp.raise_for_status()
             logger.info(f"Released server {handle.server_id}")
+            self._active_handles.discard(handle)
         except Exception as e:
             logger.error(f"Failed to release server {handle.server_id}: {e}")
             raise
