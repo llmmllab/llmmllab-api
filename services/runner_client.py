@@ -251,6 +251,20 @@ class RunnerClient:
         self._acquire_failures.pop(endpoint, None)
         self._unhealthy_since.pop(endpoint, None)
 
+    def _trip_circuit_and_cleanup(self, endpoint: str) -> None:
+        """Immediately open the circuit breaker and clean up orphaned servers.
+
+        Called when a runner is determined to be unhealthy (connection error,
+        HTTP error, or any acquire failure).  Forces the circuit open so we
+        don't waste time retrying, and attempts to kill any known servers on
+        this runner to free VRAM.
+        """
+        self._acquire_failures[endpoint] = self._MAX_ACQUIRE_FAILURES
+        self._unhealthy_since[endpoint] = time.monotonic()
+        if endpoint in self._healthy:
+            self._healthy.remove(endpoint)
+        asyncio.create_task(self._cleanup_endpoint(endpoint))
+
     async def _cleanup_endpoint(self, endpoint: str) -> None:
         """Best-effort attempt to kill all known servers on an endpoint.
 
@@ -417,25 +431,19 @@ class RunnerClient:
                     last_error = str(e)
                     is_conn_err = self._is_connection_error(e)
 
+                    # Any acquire failure (connection error, HTTP error, etc.)
+                    # means the runner is unhealthy.  Trip the circuit
+                    # immediately and clean up orphaned servers so VRAM isn't
+                    # wasted.
                     if is_conn_err:
-                        # Connection-level error: runner is unreachable.  Trip the
-                        # circuit breaker immediately so we don't waste time
-                        # retrying, and attempt to kill any known servers on this
-                        # runner to free VRAM.
                         logger.warning(
                             f"Connection error from {endpoint}, tripping circuit breaker: {e}"
                         )
-                        # Force circuit open by setting failures to threshold
-                        self._acquire_failures[endpoint] = self._MAX_ACQUIRE_FAILURES
-                        self._unhealthy_since[endpoint] = time.monotonic()
-                        if endpoint in self._healthy:
-                            self._healthy.remove(endpoint)
-                        # Best-effort cleanup of orphaned servers on this runner
-                        asyncio.create_task(self._cleanup_endpoint(endpoint))
-                        break  # move to next endpoint
-
-                    logger.warning(f"Failed to acquire from {endpoint}: {e}")
-                    self._record_acquire_failure(endpoint)
+                    else:
+                        logger.warning(
+                            f"Acquire error from {endpoint}, tripping circuit breaker: {e}"
+                        )
+                    self._trip_circuit_and_cleanup(endpoint)
                     break  # move to next endpoint
 
         raise RuntimeError(
