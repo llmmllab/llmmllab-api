@@ -384,14 +384,20 @@ class RunnerClient:
                     last_error = str(e)
                     is_conn_err = self._is_connection_error(e)
 
-                    if is_conn_err and attempt < max_retries:
-                        backoff = 2 ** attempt
+                    if is_conn_err:
+                        # Connection-level error: runner is unreachable.  Trip the
+                        # circuit breaker immediately so we don't waste time
+                        # retrying, and avoid leaving a partially-started server
+                        # consuming VRAM on a dead runner.
                         logger.warning(
-                            f"Connection error from {endpoint} (attempt {attempt + 1}/{max_retries + 1}), "
-                            f"retrying in {backoff}s: {e}"
+                            f"Connection error from {endpoint}, tripping circuit breaker: {e}"
                         )
-                        await asyncio.sleep(backoff)
-                        continue
+                        # Force circuit open by setting failures to threshold
+                        self._acquire_failures[endpoint] = self._MAX_ACQUIRE_FAILURES
+                        self._unhealthy_since[endpoint] = time.monotonic()
+                        if endpoint in self._healthy:
+                            self._healthy.remove(endpoint)
+                        break  # move to next endpoint
 
                     logger.warning(f"Failed to acquire from {endpoint}: {e}")
                     self._record_acquire_failure(endpoint)
