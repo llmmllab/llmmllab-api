@@ -47,7 +47,7 @@ def _classify_request(request: Request) -> RequestPriorityMetadata:
         # Default priority based on source
         if source == RequestSource.USER:
             priority = Priority.HIGH
-        elif source == RequestSource.SCHEDULED:
+        elif source == RequestSource.SCHEDULED or source == RequestSource.SYSTEM:
             priority = Priority.LOW
 
     # Extract user_id from auth state if available

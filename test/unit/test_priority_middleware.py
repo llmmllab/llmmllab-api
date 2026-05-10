@@ -68,12 +68,12 @@ class TestClassifyRequestPriority:
         meta = _classify_request(req)
         assert meta.priority == Priority.HIGH
 
-    def test_scheduled_default_is_medium(self):
+    def test_scheduled_default_is_low(self):
         from middleware.priority import _classify_request
 
         req = _make_request(headers={"X-Request-Source": "scheduled"})
         meta = _classify_request(req)
-        assert meta.priority == Priority.MEDIUM
+        assert meta.priority == Priority.LOW
 
     def test_system_default_is_low(self):
         from middleware.priority import _classify_request
