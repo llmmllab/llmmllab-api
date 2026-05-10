@@ -25,6 +25,7 @@ from composer_init import (
     execute_workflow,
     get_graph_builder,
 )
+from graph.errors import ContextExceededError
 from graph.state import ServerToolEvent
 from graph.workflows.factory import WorkFlowType
 from models.chat_response import ChatResponse
@@ -138,6 +139,121 @@ def _is_truncated(text: str, finish_reason: str) -> bool:
     if len(stripped) < _TRUNCATION_MIN_LEN:
         return False
     return stripped[-1] not in _SENTENCE_TERMINATORS
+
+
+# ---------------------------------------------------------------------------
+# Early context-size guard (pre-server-acquire)
+# ---------------------------------------------------------------------------
+
+def _estimate_message_token_count(messages: list[Message], system_text: str = "") -> int:
+    """Estimate the total token count for a list of messages plus a system prompt.
+
+    Uses a rough ~3 chars per token heuristic, consistent with the rest of the
+    codebase.  Includes a small per-message overhead for role formatting.
+
+    Returns
+    -------
+    int
+        Estimated total token count.
+    """
+    total = 0
+    # System prompt tokens
+    total += len(system_text) // 3
+
+    for msg in messages:
+        if msg.content:
+            for part in msg.content:
+                if part.type == MessageContentType.TEXT and part.text:
+                    total += len(part.text) // 3
+        # Per-message overhead (role labels, formatting)
+        total += 15
+
+    return total
+
+
+def _get_effective_context_window(model_num_ctx: int | None) -> int | None:
+    """Return the effective context window with safety margin applied.
+
+    The safety margin reserves a fraction of the context window for output
+    tokens, so the input budget is smaller than the raw ``num_ctx``.
+
+    Parameters
+    ----------
+    model_num_ctx:
+        The model's context window (``original_ctx`` from model details).
+
+    Returns
+    -------
+    int | None
+        The input token budget, or ``None`` if *model_num_ctx* is unknown.
+    """
+    if model_num_ctx is None or model_num_ctx <= 0:
+        return None
+    from config import CONTEXT_USAGE_SAFETY_MARGIN
+    return int(model_num_ctx * CONTEXT_USAGE_SAFETY_MARGIN)
+
+
+async def _check_context_fits(
+    messages: list[Message],
+    model_name: str,
+    system_text: str = "",
+) -> None:
+    """Raise ``ContextExceededError`` if the estimated input exceeds the model's context window.
+
+    This check runs **before** a server is acquired, so the runner never
+    starts a llama.cpp instance for a request it can't handle.  The runner
+    already has access to ``n_ctx`` from the model definitions and can
+    independently refuse undersized requests.
+
+    Parameters
+    ----------
+    messages:
+        The conversation messages to be sent to the model.
+    model_name:
+        The model identifier (used for error messages and lookups).
+    system_text:
+        The system prompt text (included in the token estimate).
+
+    Raises
+    ------
+    ContextExceededError
+        When the estimated input token count exceeds the model's context
+        window (with safety margin).
+    """
+    try:
+        from services import model_service  # noqa: F811
+        model = await model_service.get_model_by_id(model_name)
+        if model and model.details and model.details.original_ctx:
+            model_num_ctx = model.details.original_ctx
+        else:
+            # Model not found in cache — can't check, let it through.
+            # The runner will refuse if the context is too large.
+            return
+    except Exception as e:
+        logger.debug(f"Failed to look up model for context check: {e}")
+        return
+
+    effective_ctx = _get_effective_context_window(model_num_ctx)
+    if effective_ctx is None:
+        return
+
+    estimated_tokens = _estimate_message_token_count(messages, system_text)
+
+    if estimated_tokens >= effective_ctx:
+        logger.warning(
+            "Refusing request — estimated input tokens exceed model context window",
+            extra={
+                "model": model_name,
+                "estimated_tokens": estimated_tokens,
+                "effective_context_window": effective_ctx,
+                "model_num_ctx": model_num_ctx,
+            },
+        )
+        raise ContextExceededError(
+            estimated_tokens=estimated_tokens,
+            model_context_window=model_num_ctx,
+            model_name=model_name,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -324,6 +440,30 @@ class CompletionService:
         those secondary passes.
         """
         acc = StreamAccumulator()
+
+        # Early guard: refuse to start a server if the input context
+        # exceeds the model's context window.
+        try:
+            await _check_context_fits(messages, model_name)
+        except ContextExceededError as e:
+            logger.info(
+                "Request refused — context exceeds model window",
+                extra={
+                    "model": e.model_name,
+                    "estimated_tokens": e.estimated_tokens,
+                    "model_context_window": e.model_context_window,
+                },
+            )
+            error_response = ChatResponse(
+                message=Message(
+                    role=MessageRole.ASSISTANT,
+                    content=[MessageContent(type=MessageContentType.TEXT, text=e.message)],
+                ),
+                finish_reason="error",
+                done=True,
+            )
+            yield error_response, acc
+            return
 
         try:
             # ---------- primary pass ----------
@@ -655,6 +795,28 @@ class CompletionService:
         identically to the streaming path.
         """
         result = CompletionResult()
+
+        # Early guard: refuse before acquiring a server
+        try:
+            await _check_context_fits(messages, model_name)
+        except ContextExceededError as e:
+            logger.info(
+                "Non-streaming request refused — context exceeds model window",
+                extra={
+                    "model": e.model_name,
+                    "estimated_tokens": e.estimated_tokens,
+                    "model_context_window": e.model_context_window,
+                },
+            )
+            result.chat_response = ChatResponse(
+                message=Message(
+                    role=MessageRole.ASSISTANT,
+                    content=[MessageContent(type=MessageContentType.TEXT, text=e.message)],
+                ),
+                finish_reason="error",
+                done=True,
+            )
+            return result
 
         # ---------- primary pass ----------
         async for event in CompletionService._build_and_run(
