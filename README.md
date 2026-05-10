@@ -46,6 +46,10 @@ Copy `.env.example` to `.env` and set the required values:
 | `PORT` | Server port (default: 8000) |
 | `LOG_LEVEL` | Logging verbosity (debug, info, warning, error) |
 | `CUDA_VISIBLE_DEVICES` | GPU devices for inference |
+| `RUNNER_ENDPOINTS` | Comma-separated runner service URLs |
+| `MODEL_CACHE_REFRESH_SEC` | Model-to-runner map refresh interval (default: 60) |
+| `RUNNER_RETRIES` | Connection-error retries for completions (default: 2) |
+| `RUNNER_RETRY_BACKOFF_BASE` | Linear backoff multiplier in seconds (default: 1) |
 
 ## Project Structure
 
