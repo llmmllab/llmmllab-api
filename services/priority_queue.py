@@ -6,7 +6,7 @@ import asyncio
 import time
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from models.request_priority_metadata import Priority, RequestPriorityMetadata
 from services.queue_exceptions import QueueFullError, QueueTimeoutError
@@ -113,6 +113,11 @@ class AsyncPriorityQueue:
         self._lock = asyncio.Lock()
         self._counter = 0
         self._sizes = {p: 0 for p in Priority}
+        self._can_proceed: Optional[
+            Callable[[RequestPriorityMetadata], Awaitable[bool]]
+        ] = None
+        self._recheck_task: Optional[asyncio.Task] = None
+        self._recheck_interval = 5.0
 
     async def enqueue(
         self,
@@ -147,6 +152,12 @@ class AsyncPriorityQueue:
             _inc_enqueued(metadata.priority, metadata.source.value)
             self._update_gauges()
 
+            # If this is the only item in the queue, it's at the front and
+            # can proceed immediately — there's no prior request whose
+            # dequeue() would set its event.
+            if len(self._queue) == 1:
+                item.event.set()
+
         # Start aging task
         asyncio.create_task(self._age_item(item, metadata))
 
@@ -171,10 +182,36 @@ class AsyncPriorityQueue:
 
         return item.event
 
-    async def dequeue(self) -> Optional[RequestPriorityMetadata]:
-        """Remove and return the highest-priority request's metadata.
+    def set_can_proceed_callback(
+        self,
+        can_proceed: Optional[Callable[[RequestPriorityMetadata], Awaitable[bool]]],
+    ) -> None:
+        """Set or clear the resource availability callback used by dequeue()."""
+        self._can_proceed = can_proceed
+        if can_proceed and self._recheck_task is None:
+            self._recheck_task = asyncio.create_task(self._recheck_blocked())
+        elif not can_proceed and self._recheck_task is not None:
+            self._recheck_task.cancel()
+            self._recheck_task = None
 
-        Call this after processing a request to let the next one through.
+    async def close(self) -> None:
+        """Cancel the background recheck task."""
+        if self._recheck_task is not None:
+            self._recheck_task.cancel()
+            try:
+                await self._recheck_task
+            except asyncio.CancelledError:
+                pass
+            self._recheck_task = None
+
+    async def dequeue(self) -> Optional[RequestPriorityMetadata]:
+        """Remove the current request and let the next eligible one through.
+
+        Pops the highest-priority (front) item — which is the request
+        that just finished. Then iterates through remaining items and
+        releases the first one whose resources are available (as determined
+        by the ``_can_proceed`` callback). Items that can't proceed stay
+        blocked in the queue.
         """
         async with self._lock:
             if not self._queue:
@@ -190,20 +227,77 @@ class AsyncPriorityQueue:
                 item.metadata.source.value,
             )
             self._update_gauges()
+
+            if not self._queue:
+                item.event.set()
+                return item.metadata
+
+            # Always set the popped item's event so its enqueue() completes
             item.event.set()
-            return item.metadata
+
+            # No callback — release next item unconditionally (original behavior)
+            if self._can_proceed is None:
+                self._queue[0].event.set()
+                return item.metadata
+
+            # Collect metadata for all pending items to check outside lock
+            pending: list[tuple[int, RequestPriorityMetadata]] = [
+                (i, m.metadata) for i, m in enumerate(self._queue)
+            ]
+
+        # Call callback outside the lock to avoid blocking other operations
+        for idx, metadata in pending:
+            can_go = await self._can_proceed(metadata)
+            if can_go:
+                async with self._lock:
+                    if (
+                        idx < len(self._queue)
+                        and self._queue[idx].metadata is metadata
+                        and not self._queue[idx].event.is_set()
+                    ):
+                        self._queue[idx].event.set()
+                break
+
+        return item.metadata
 
     async def _remove_item(self, item: _QueueItem) -> None:
         """Remove a specific item (e.g., on timeout)."""
         async with self._lock:
-            if item in self._queue:
-                self._queue.remove(item)
-                self._sizes[item.metadata.priority] = sum(
-                    1
-                    for i in self._queue
-                    if i.metadata.priority == item.metadata.priority
-                )
-                self._update_gauges()
+            if item not in self._queue:
+                return
+            was_first = item is self._queue[0]
+            self._queue.remove(item)
+            self._sizes[item.metadata.priority] = sum(
+                1
+                for i in self._queue
+                if i.metadata.priority == item.metadata.priority
+            )
+            self._update_gauges()
+
+            if not was_first or not self._queue:
+                return
+
+            # No callback — release unconditionally
+            if self._can_proceed is None:
+                self._queue[0].event.set()
+                return
+
+            # Collect pending items to check outside lock
+            pending: list[tuple[int, RequestPriorityMetadata]] = [
+                (i, m.metadata) for i, m in enumerate(self._queue)
+            ]
+
+        for idx, metadata in pending:
+            can_go = await self._can_proceed(metadata)
+            if can_go:
+                async with self._lock:
+                    if (
+                        idx < len(self._queue)
+                        and self._queue[idx].metadata is metadata
+                        and not self._queue[idx].event.is_set()
+                    ):
+                        self._queue[idx].event.set()
+                break
 
     async def _age_item(
         self, item: _QueueItem, metadata: RequestPriorityMetadata
@@ -236,6 +330,33 @@ class AsyncPriorityQueue:
                     "wait_time": metadata.wait_time,
                 },
             )
+
+    async def _recheck_blocked(self) -> None:
+        """Periodically re-check if blocked items can now proceed."""
+        while True:
+            await asyncio.sleep(self._recheck_interval)
+            async with self._lock:
+                if not self._queue or self._can_proceed is None:
+                    continue
+                pending: list[tuple[int, RequestPriorityMetadata]] = [
+                    (i, m.metadata)
+                    for i, m in enumerate(self._queue)
+                    if not m.event.is_set()
+                ]
+                if not pending:
+                    continue
+
+            for idx, metadata in pending:
+                can_go = await self._can_proceed(metadata)
+                if can_go:
+                    async with self._lock:
+                        if (
+                            idx < len(self._queue)
+                            and self._queue[idx].metadata is metadata
+                            and not self._queue[idx].event.is_set()
+                        ):
+                            self._queue[idx].event.set()
+                    break
 
     def _update_gauges(self) -> None:
         for p in Priority:

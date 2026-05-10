@@ -441,6 +441,7 @@ class CompletionService:
                 source=RequestSource.USER,
                 priority=_effective_priority,
                 user_id=user_id,
+                model_id=model_name,
                 max_queue_wait=max_queue_wait,
             )
             _queue_ctx = await priority_queue.enqueue(_meta)
@@ -796,6 +797,7 @@ class CompletionService:
                 source=RequestSource.USER,
                 priority=_effective_priority,
                 user_id=user_id,
+                model_id=model_name,
                 max_queue_wait=max_queue_wait,
             )
             _queue_ctx = await priority_queue.enqueue(_meta)

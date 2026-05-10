@@ -451,6 +451,73 @@ class RunnerClient:
         self._refresh_task = asyncio.create_task(_do_refresh())
 
     # ------------------------------------------------------------------
+    # Slot availability
+    # ------------------------------------------------------------------
+
+    async def check_slot_availability(self, model_id: str) -> bool:
+        """Check if a request for *model_id* can proceed without hitting 503.
+
+        Returns ``True`` if an existing server has free slots, or if
+        sufficient VRAM exists on a runner to start a new server.
+        Returns ``True`` on any check failure (fail-open).
+        """
+        _slots_timeout = httpx.Timeout(3.0)
+        client = self._get_client()
+
+        # Case 1: Check active handles for free slots
+        for handle in self._active_handles:
+            try:
+                resp = await client.get(
+                    f"{handle.base_url}/slots",
+                    timeout=_slots_timeout,
+                )
+                if resp.status_code == 200:
+                    slots = resp.json()
+                    if slots and any(
+                        not s.get("is_processing", False) for s in slots
+                    ):
+                        return True
+            except Exception:
+                continue
+
+        # Case 2: No active server with free slots — check if a new one
+        # can be started (VRAM vs model size)
+        endpoints = self._model_map.get(model_id, list(self._endpoints))
+        for endpoint in endpoints:
+            try:
+                health_resp = await client.get(
+                    f"{endpoint}/health",
+                    timeout=_HEALTH_TIMEOUT,
+                )
+                if health_resp.status_code != 200:
+                    continue
+                health = health_resp.json()
+                gpu_info = health.get("gpu", {})
+                # Sum free_mb across all GPUs, convert to bytes
+                available_vram = sum(
+                    v.get("free_mb", 0)
+                    for v in gpu_info.values()
+                    if isinstance(v, dict)
+                ) * 1024 * 1024
+
+                model_resp = await client.get(
+                    f"{endpoint}/v1/models/{model_id}",
+                    timeout=_FAST_TIMEOUT,
+                )
+                if model_resp.status_code != 200:
+                    continue
+                model_data = model_resp.json()
+                model_size = model_data.get("details", {}).get("size", 0) or 0
+                # 128 MB overhead for context, KV cache, etc.
+                required = model_size + (128 * 1024 * 1024)
+                if available_vram >= required:
+                    return True
+            except Exception:
+                continue
+
+        return False
+
+    # ------------------------------------------------------------------
     # Model discovery
     # ------------------------------------------------------------------
 

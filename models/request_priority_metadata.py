@@ -50,6 +50,10 @@ class RequestPriorityMetadata(BaseModel):
             description="The time at which the request is scheduled to be processed.",
         ),
     ] = None
+    model_id: Annotated[
+        Optional[str],
+        Field(None, description="The model ID this request targets."),
+    ] = None
     max_queue_wait: Annotated[
         Optional[float],
         Field(

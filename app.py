@@ -145,6 +145,28 @@ async def lifespan(_: FastAPI):
     except Exception as e:
         logger.warning(f"Runner model map warm-up failed: {e}")
 
+    # Wire up resource-aware priority queue
+    try:
+        from services.runner_client import (
+            runner_client as _runner_client,
+        )  # pylint: disable=import-outside-toplevel
+        from services.priority_queue import (
+            priority_queue,
+        )  # pylint: disable=import-outside-toplevel
+
+        async def _can_proceed(metadata):
+            if not metadata.model_id:
+                return True
+            try:
+                return await _runner_client.check_slot_availability(metadata.model_id)
+            except Exception:
+                return True  # Never block on check failure
+
+        priority_queue.set_can_proceed_callback(_can_proceed)
+        logger.info("Resource-aware priority queue callback wired up")
+    except Exception as e:
+        logger.warning(f"Failed to wire up queue resource callback: {e}")
+
     # Wait for at least one runner to be healthy before accepting requests
     try:
         import time as _time  # pylint: disable=import-outside-toplevel
@@ -202,6 +224,16 @@ async def lifespan(_: FastAPI):
             logger.info("Runner client closed")
         except Exception as e:
             logger.info(f"Error closing runner client: {e}")
+
+        # Close priority queue (stops background recheck task)
+        try:
+            from services.priority_queue import (
+                priority_queue,
+            )  # pylint: disable=import-outside-toplevel
+
+            await priority_queue.close()
+        except Exception as e:
+            logger.info(f"Error closing priority queue: {e}")
 
         # Shutdown tracing
         shutdown_tracing()
