@@ -1,15 +1,23 @@
 """Request classification middleware - assigns priority based on request source.
 
-Reads ``X-Request-Source`` and ``X-Request-Priority`` headers, falls back
-to sensible defaults.  Attaches ``RequestMetadata`` to ``request.state``.
+Reads ``X-Request-Source``, ``X-Request-Priority``, and ``X-Max-Queue-Wait``
+headers, falls back to sensible defaults.  Attaches ``RequestMetadata`` to
+``request.state``.
 """
 
 from __future__ import annotations
+
+from typing import Optional
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
+from config import (
+    PRIORITY_QUEUE_MAX_WAIT_MAX_SEC,
+    PRIORITY_QUEUE_MAX_WAIT_MIN_SEC,
+    PRIORITY_QUEUE_TIMEOUT_SEC,
+)
 from models.request_priority_metadata import (
     Priority,
     RequestPriorityMetadata,
@@ -18,6 +26,30 @@ from models.request_priority_metadata import (
 from utils.logging import llmmllogger
 
 logger = llmmllogger.bind(component="priority_middleware")
+
+
+def _parse_max_queue_wait(header_value: str) -> Optional[float]:
+    """Parse X-Max-Queue-Wait header. Returns None if invalid/missing."""
+    if not header_value:
+        return None
+    try:
+        val = int(header_value)
+    except ValueError:
+        logger.warning(f"Invalid X-Max-Queue-Wait header: {header_value!r}, ignoring")
+        return None
+    if val < PRIORITY_QUEUE_MAX_WAIT_MIN_SEC:
+        logger.warning(
+            f"X-Max-Queue-Wait={val} below minimum ({PRIORITY_QUEUE_MAX_WAIT_MIN_SEC}s), "
+            f"clamping to {PRIORITY_QUEUE_MAX_WAIT_MIN_SEC}"
+        )
+        return float(PRIORITY_QUEUE_MAX_WAIT_MIN_SEC)
+    if val > PRIORITY_QUEUE_MAX_WAIT_MAX_SEC:
+        logger.warning(
+            f"X-Max-Queue-Wait={val} exceeds maximum ({PRIORITY_QUEUE_MAX_WAIT_MAX_SEC}s), "
+            f"clamping to {PRIORITY_QUEUE_MAX_WAIT_MAX_SEC}"
+        )
+        return float(PRIORITY_QUEUE_MAX_WAIT_MAX_SEC)
+    return float(val)
 
 
 def _classify_request(request: Request) -> RequestPriorityMetadata:
@@ -53,11 +85,17 @@ def _classify_request(request: Request) -> RequestPriorityMetadata:
     # Extract user_id from auth state if available
     user_id = getattr(request.state, "user_id", None)
 
+    # Parse optional max queue wait time
+    max_queue_wait = _parse_max_queue_wait(
+        request.headers.get("X-Max-Queue-Wait", "")
+    )
+
     return RequestPriorityMetadata(
         source=source,
         priority=priority,
         user_id=user_id,
         session_id=request.headers.get("X-Session-ID"),
+        max_queue_wait=max_queue_wait,
     )
 
 
@@ -83,4 +121,6 @@ class PriorityMiddleware(BaseHTTPMiddleware):
 
         response = await call_next(request)
         response.headers["X-Queue-Priority"] = metadata.priority.name.lower()
+        effective_wait = metadata.max_queue_wait or PRIORITY_QUEUE_TIMEOUT_SEC
+        response.headers["X-Queue-Max-Wait"] = str(int(effective_wait))
         return response

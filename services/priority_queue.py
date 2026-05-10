@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from models.request_priority_metadata import Priority, RequestPriorityMetadata
+from services.queue_exceptions import QueueFullError, QueueTimeoutError
 from utils.logging import llmmllogger
 
 logger = llmmllogger.bind(component="priority_queue")
@@ -113,14 +114,24 @@ class AsyncPriorityQueue:
         self._counter = 0
         self._sizes = {p: 0 for p in Priority}
 
-    async def enqueue(self, metadata: RequestPriorityMetadata) -> asyncio.Event:
+    async def enqueue(
+        self,
+        metadata: RequestPriorityMetadata,
+        timeout_sec: Optional[float] = None,
+    ) -> asyncio.Event:
         """Add a request to the queue and return an event to wait on.
 
         The event is set when it is this request's turn to proceed.
+
+        Raises:
+            QueueFullError: If the queue is at capacity.
+            QueueTimeoutError: If the request exceeds its max wait time.
         """
+        effective_timeout = timeout_sec or metadata.max_queue_wait or self._timeout_sec
+
         async with self._lock:
             if len(self._queue) >= self._max_size:
-                raise RuntimeError(
+                raise QueueFullError(
                     f"Priority queue full ({self._max_size} items). "
                     "Consider increasing PRIORITY_QUEUE_MAX_SIZE."
                 )
@@ -141,7 +152,7 @@ class AsyncPriorityQueue:
 
         # Wait for turn
         try:
-            await asyncio.wait_for(item.event.wait(), timeout=self._timeout_sec)
+            await asyncio.wait_for(item.event.wait(), timeout=effective_timeout)
         except asyncio.TimeoutError:
             logger.warning(
                 "Request timed out in priority queue",
@@ -149,11 +160,14 @@ class AsyncPriorityQueue:
                     "priority": metadata.priority.name,
                     "source": metadata.source.value,
                     "wait_time": metadata.wait_time,
+                    "max_wait_sec": effective_timeout,
                 },
             )
-            # Still try to dequeue it
             await self._remove_item(item)
-            return item.event
+            raise QueueTimeoutError(
+                max_wait_sec=effective_timeout,
+                actual_wait_sec=metadata.wait_time,
+            ) from None
 
         return item.event
 
@@ -236,5 +250,15 @@ class AsyncPriorityQueue:
         return {p.name: self._sizes.get(p, 0) for p in Priority}
 
 
-# Module-level singleton
-priority_queue = AsyncPriorityQueue()
+# Module-level singleton (configured from environment)
+from config import (
+    PRIORITY_QUEUE_MAX_SIZE,
+    PRIORITY_QUEUE_TIMEOUT_SEC,
+    PRIORITY_QUEUE_AGE_THRESHOLD_SEC,
+)
+
+priority_queue = AsyncPriorityQueue(
+    max_size=PRIORITY_QUEUE_MAX_SIZE,
+    timeout_sec=PRIORITY_QUEUE_TIMEOUT_SEC,
+    age_threshold_sec=PRIORITY_QUEUE_AGE_THRESHOLD_SEC,
+)

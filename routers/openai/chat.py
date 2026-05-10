@@ -335,6 +335,7 @@ async def stream_chat_completion(
     client_tools: list[dict] | None = None,
     tool_choice: str | None = None,
     priority: Priority | None = None,
+    max_queue_wait: float | None = None,
 ) -> AsyncIterator[str]:
     """Stream composer events as OpenAI SSE chat completion chunks.
 
@@ -376,6 +377,7 @@ async def stream_chat_completion(
             client_tools=client_tools,
             tool_choice=tool_choice,
             priority=priority,
+            max_queue_wait=max_queue_wait,
         ):
             # Skip ServerToolEvents for OpenAI-compatible clients
 
@@ -576,8 +578,10 @@ async def createChatCompletion(
     else:
         logger.debug("OAI request without tools")
 
-    priority = getattr(
-        getattr(request.state, "request_priority_metadata", {}), "priority", None
+    _priority_meta = getattr(request.state, "request_priority_metadata", None)
+    priority = getattr(_priority_meta, "priority", None) if _priority_meta else None
+    max_queue_wait = (
+        getattr(_priority_meta, "max_queue_wait", None) if _priority_meta else None
     )
 
     if body.stream:
@@ -595,6 +599,7 @@ async def createChatCompletion(
                 internal_messages,
                 body.model,
                 priority=priority,
+                max_queue_wait=max_queue_wait,
                 **stream_kwargs,
             ),
             media_type="text/event-stream",
@@ -614,6 +619,7 @@ async def createChatCompletion(
             client_tools=client_tools,
             tool_choice=tool_choice,
             priority=priority,
+            max_queue_wait=max_queue_wait,
         )
     except Exception as e:
         error_msg = str(e).lower()

@@ -1,7 +1,7 @@
 """
-Unit tests for RequestMetadata and priority classification.
+Unit tests for RequestPriorityMetadata and priority classification.
 
-Covers RequestSource, Priority, and RequestMetadata from models/request_priority_metadata.py,
+Covers RequestSource, Priority, and RequestPriorityMetadata from models/request_priority_metadata.py,
 and the priority middleware's _classify_request logic from middleware/priority.py.
 """
 
@@ -56,6 +56,15 @@ class TestRequestMetadata:
         assert meta.user_id is None
         assert meta.session_id is None
         assert meta.scheduled_at is None
+        assert meta.max_queue_wait is None
+
+    def test_max_queue_wait_custom(self):
+        meta = RequestPriorityMetadata(max_queue_wait=120.0)
+        assert meta.max_queue_wait == 120.0
+
+    def test_max_queue_wait_none_by_default(self):
+        meta = RequestPriorityMetadata()
+        assert meta.max_queue_wait is None
 
     def test_custom_values(self):
         meta = RequestPriorityMetadata(

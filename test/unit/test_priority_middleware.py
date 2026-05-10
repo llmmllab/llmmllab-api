@@ -113,3 +113,44 @@ class TestClassifyRequestMetadata:
         req = _make_request(headers={"X-Session-ID": "sess-abc"})
         meta = _classify_request(req)
         assert meta.session_id == "sess-abc"
+
+
+class TestMaxQueueWaitHeader:
+    """X-Max-Queue-Wait header is parsed and attached to metadata."""
+
+    def test_no_header_is_none(self):
+        from middleware.priority import _classify_request
+
+        req = _make_request()
+        meta = _classify_request(req)
+        assert meta.max_queue_wait is None
+
+    def test_valid_header_parsed(self):
+        from middleware.priority import _classify_request
+
+        req = _make_request(headers={"X-Max-Queue-Wait": "120"})
+        meta = _classify_request(req)
+        assert meta.max_queue_wait == 120.0
+
+    def test_invalid_header_is_none(self):
+        from middleware.priority import _classify_request
+
+        req = _make_request(headers={"X-Max-Queue-Wait": "abc"})
+        meta = _classify_request(req)
+        assert meta.max_queue_wait is None
+
+    def test_zero_clamped_to_minimum(self):
+        from config import PRIORITY_QUEUE_MAX_WAIT_MIN_SEC
+        from middleware.priority import _classify_request
+
+        req = _make_request(headers={"X-Max-Queue-Wait": "0"})
+        meta = _classify_request(req)
+        assert meta.max_queue_wait == float(PRIORITY_QUEUE_MAX_WAIT_MIN_SEC)
+
+    def test_large_value_clamped_to_maximum(self):
+        from config import PRIORITY_QUEUE_MAX_WAIT_MAX_SEC
+        from middleware.priority import _classify_request
+
+        req = _make_request(headers={"X-Max-Queue-Wait": "99999"})
+        meta = _classify_request(req)
+        assert meta.max_queue_wait == float(PRIORITY_QUEUE_MAX_WAIT_MAX_SEC)

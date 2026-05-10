@@ -392,6 +392,7 @@ class CompletionService:
         tool_choice: str | None = None,
         server_tool_names: set[str] | None = None,
         priority: Priority | None = None,
+        max_queue_wait: float | None = None,
     ) -> AsyncIterator[tuple[Union[ChatResponse, ServerToolEvent], StreamAccumulator]]:
         """Execute a workflow and yield ``(event, accumulator)`` pairs.
 
@@ -416,6 +417,7 @@ class CompletionService:
                 source=RequestSource.USER,
                 priority=_effective_priority,
                 user_id=user_id,
+                max_queue_wait=max_queue_wait,
             )
             _queue_ctx = await priority_queue.enqueue(_meta)
         try:
@@ -750,6 +752,7 @@ class CompletionService:
         tool_choice: str | None = None,
         server_tool_names: set[str] | None = None,
         priority: Priority | None = None,
+        max_queue_wait: float | None = None,
     ) -> CompletionResult:
         """Execute a workflow and return the final accumulated result.
 
@@ -769,6 +772,7 @@ class CompletionService:
                 source=RequestSource.USER,
                 priority=_effective_priority,
                 user_id=user_id,
+                max_queue_wait=max_queue_wait,
             )
             _queue_ctx = await priority_queue.enqueue(_meta)
 

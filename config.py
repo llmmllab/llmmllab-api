@@ -98,6 +98,12 @@ PRIORITY_QUEUE_TIMEOUT_SEC = int(
 PRIORITY_QUEUE_AGE_THRESHOLD_SEC = int(
     os.environ.get("PRIORITY_QUEUE_AGE_THRESHOLD_SEC", "60")
 )
+PRIORITY_QUEUE_MAX_WAIT_MIN_SEC = int(
+    os.environ.get("PRIORITY_QUEUE_MAX_WAIT_MIN_SEC", "1")
+)
+PRIORITY_QUEUE_MAX_WAIT_MAX_SEC = int(
+    os.environ.get("PRIORITY_QUEUE_MAX_WAIT_MAX_SEC", "3600")
+)
 # ── Completion / Retry ─────────────────────────────────────────────────
 RUNNER_RETRIES = int(os.environ.get("RUNNER_RETRIES", "2"))
 RUNNER_RETRY_BACKOFF_BASE = int(os.environ.get("RUNNER_RETRY_BACKOFF_BASE", "1"))

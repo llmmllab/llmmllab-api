@@ -308,6 +308,7 @@ async def stream_message(
     client_tools: list | None = None,
     tool_choice: str | None = None,
     priority: Priority | None = None,
+    max_queue_wait: float | None = None,
 ) -> AsyncIterator[str]:
     """Stream composer events as Anthropic SSE message chunks.
 
@@ -378,6 +379,7 @@ async def stream_message(
             tool_choice=tool_choice,
             server_tool_names=server_tool_names or None,
             priority=priority,
+            max_queue_wait=max_queue_wait,
         ):
             # ---- ServerToolEvent → emit as standard text content blocks ----
             if isinstance(event, ServerToolEvent):
@@ -612,8 +614,10 @@ async def createMessage(
         req_body = _strip_server_tool_blocks(req_body)
         body = CreateMessageRequest.model_validate(req_body)
         internal_messages = messages_from_anthropic(body.messages, system=body.system)
-        priority = getattr(
-            getattr(request.state, "request_priority_metadata", {}), "priority", None
+        _priority_meta = getattr(request.state, "request_priority_metadata", None)
+        priority = getattr(_priority_meta, "priority", None) if _priority_meta else None
+        max_queue_wait = (
+            getattr(_priority_meta, "max_queue_wait", None) if _priority_meta else None
         )
 
         # Resolve model: fall back to user's default_model if unavailable
@@ -657,6 +661,7 @@ async def createMessage(
                     client_tools=raw_client_tools,
                     tool_choice=tool_choice,
                     priority=priority,
+                    max_queue_wait=max_queue_wait,
                 ),
                 media_type="text/event-stream",
                 headers={
@@ -677,6 +682,7 @@ async def createMessage(
                 tool_choice=tool_choice,
                 server_tool_names=prepared.server_tool_names or None,
                 priority=priority,
+                max_queue_wait=max_queue_wait,
             )
         except Exception as e:
             error_msg = str(e).lower()
