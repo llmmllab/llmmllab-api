@@ -66,11 +66,13 @@ from middleware import (
     db_init_middleware,
     MessageValidationMiddleware,
 )
+from middleware.priority import PriorityMiddleware
 from middleware.request_id import RequestIdMiddleware
 from middleware.prometheus_metrics import PrometheusMiddleware
 from middleware.tracing import setup_tracing, shutdown_tracing
 from config import AUTH_JWKS_URI
 from services.cleanup_service import cleanup_service
+from services.queue_exceptions import QueueFullError, QueueTimeoutError
 from db.maintenance import maintenance_service
 from utils.logging import llmmllogger
 from composer_init import shutdown_composer
@@ -88,6 +90,16 @@ async def lifespan(_: FastAPI):
     """Simplified lifespan: start services, optionally init composer, yield, then shutdown."""
     logger.info("Initializing services...")
     cleanup_service.start()
+
+    # Initialize async Redis for durable priority queue
+    try:
+        from db.redis_client import (  # pylint: disable=import-outside-toplevel
+            async_redis,
+        )
+
+        await async_redis.connect()
+    except Exception as e:
+        logger.warning(f"Async Redis init failed (queue will use in-memory): {e}")
 
     # Initialize database connection and schema if configured
     try:
@@ -194,6 +206,16 @@ async def lifespan(_: FastAPI):
         # Shutdown tracing
         shutdown_tracing()
 
+        # Close async Redis
+        try:
+            from db.redis_client import (  # pylint: disable=import-outside-toplevel
+                async_redis,
+            )
+
+            await async_redis.close()
+        except Exception as e:
+            logger.info(f"Error closing async Redis: {e}")
+
         cleanup_service.shutdown()
 
 logger.info(f"Pre-initializing auth middleware with JWKS URI: {AUTH_JWKS_URI}")
@@ -246,10 +268,29 @@ async def proxy_headers_middleware(request: Request, call_next):
 
 # Store auth middleware in app.state right away
 app.state.auth_middleware = global_auth_middleware
+
+# Exception handlers for queue rejections
+@app.exception_handler(QueueTimeoutError)
+async def queue_timeout_handler(request: Request, exc: QueueTimeoutError):
+    return JSONResponse(
+        status_code=408,
+        content={"error": str(exc)},
+        headers={"Retry-After": "5"},
+    )
+
+
+@app.exception_handler(QueueFullError)
+async def queue_full_handler(request: Request, exc: QueueFullError):
+    return JSONResponse(
+        status_code=503,
+        content={"error": str(exc) or "Queue is full. Please retry later."},
+        headers={"Retry-After": "10"},
+    )
 # Add message validation middleware to ensure proper response structure
 app.add_middleware(MessageValidationMiddleware)
 app.middleware("http")(db_init_middleware)
 app.add_middleware(RequestIdMiddleware)
+app.add_middleware(PriorityMiddleware)
 app.add_middleware(PrometheusMiddleware)
 
 

@@ -27,7 +27,7 @@ async def test_reindex_concurrently_uses_autocommit(
         await conn.execute(text("CREATE TABLE IF NOT EXISTS _reindex_test (id SERIAL PRIMARY KEY, val TEXT)"))
         await conn.execute(text("CREATE INDEX IF NOT EXISTS _reindex_test_val_idx ON _reindex_test (val)"))
         await conn.execute(text("INSERT INTO _reindex_test (val) VALUES ('hello')"))
-    # commit happens on connection close (NullPool)
+        await conn.commit()
 
     try:
         # _run_reindex should succeed (returns True) and NOT raise
@@ -135,6 +135,7 @@ async def test_reindex_with_cache_flush(session_factory, engine):
         await conn.execute(text("CREATE TABLE IF NOT EXISTS _reindex_flush_test (id SERIAL PRIMARY KEY, val TEXT)"))
         await conn.execute(text("CREATE INDEX IF NOT EXISTS _reindex_flush_val_idx ON _reindex_flush_test (val)"))
         await conn.execute(text("INSERT INTO _reindex_flush_test (val) VALUES ('world')"))
+        await conn.commit()
 
     try:
         # Run REINDEX (autocommit) + cache flush

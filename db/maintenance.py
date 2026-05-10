@@ -95,9 +95,8 @@ class DatabaseMaintenanceService:
         """
         logger.info("Running VACUUM ANALYZE...")
         try:
-            async with self.engine.connect(
-                execution_options={"isolation_level": "AUTOCOMMIT"}
-            ) as conn:
+            async with self.engine.connect() as conn:
+                await conn.execution_options(isolation_level="AUTOCOMMIT")
                 await conn.execute(text("VACUUM ANALYZE"))
             logger.info("VACUUM ANALYZE completed successfully")
         except Exception as e:
@@ -152,9 +151,8 @@ class DatabaseMaintenanceService:
             "Running REINDEX on database (DB_REINDEX_ON_MAINTENANCE=true)..."
         )
         try:
-            async with self.engine.connect().execution_options(
-                isolation_level="AUTOCOMMIT"
-            ) as conn:
+            async with self.engine.connect() as conn:
+                await conn.execution_options(isolation_level="AUTOCOMMIT")
                 db_name = (await conn.execute(
                     text("SELECT current_database()")
                 )).scalar()
