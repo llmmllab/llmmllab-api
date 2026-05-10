@@ -41,11 +41,13 @@ class TestVacuumAnalyze:
         )
 
     async def test_vacuum_executes_vacuum_analyze(self):
-        """_run_vacuum_analyze runs the VACUUM ANALYZE statement."""
+        """_run_vacuum_analyze runs the VACUUM ANALYZE statement on the autocommit connection."""
         svc = self._make_service()
 
         mock_conn = AsyncMock()
-        mock_conn.execute = AsyncMock()
+        mock_autocommit_conn = AsyncMock()
+        mock_conn.execution_options = AsyncMock(return_value=mock_autocommit_conn)
+        mock_autocommit_conn.execute = AsyncMock()
         mock_ctx = MagicMock()
         mock_ctx.__aenter__ = AsyncMock(return_value=mock_conn)
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
@@ -54,9 +56,9 @@ class TestVacuumAnalyze:
 
         await svc._run_vacuum_analyze()
 
-        # Verify VACUUM ANALYZE was executed
-        mock_conn.execute.assert_called_once()
-        call_args = mock_conn.execute.call_args[0][0]
+        # Verify VACUUM ANALYZE was executed on the autocommit connection
+        mock_autocommit_conn.execute.assert_called_once()
+        call_args = mock_autocommit_conn.execute.call_args[0][0]
         assert "VACUUM ANALYZE" in str(call_args)
 
     async def test_vacuum_handles_exception(self):
