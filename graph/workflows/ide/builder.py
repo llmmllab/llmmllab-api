@@ -128,7 +128,16 @@ class IdeGraphBuilder(GraphBuilder):
             Compiled workflow ready for execution
         """
         try:
-            # Look up model by name or fall back to first TextToText model
+            # Look up model by name or fall back to first TextToText model.
+            #
+            # NOTE on model resolution: the service layer
+            # (CompletionService._build_and_run) already calls
+            # _resolve_model() before reaching this builder, so the
+            # model_name arriving here is typically already resolved to
+            # an available model. The fallback below is a safety net for
+            # direct builder usage (bypassing the service layer) and for
+            # edge cases where the resolved name still doesn't match any
+            # runner model.
             if model_name:
                 all_models = await runner_client.list_models()
                 model_def = next(
