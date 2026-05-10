@@ -77,6 +77,8 @@ class RunnerClient:
         # acquire failures within the last UNHEALTHY_WINDOW seconds.
         self._MAX_ACQUIRE_FAILURES = _MAX_ACQUIRE_FAILURES
         self._UNHEALTHY_WINDOW = _UNHEALTHY_WINDOW
+        # Track active server IDs per runner endpoint for cleanup on failure
+        self._active_servers_by_endpoint: Dict[str, set[str]] = {}
 
     def _get_client(self) -> httpx.AsyncClient:
         """Lazily create a shared ``httpx.AsyncClient``."""
@@ -249,6 +251,28 @@ class RunnerClient:
         self._acquire_failures.pop(endpoint, None)
         self._unhealthy_since.pop(endpoint, None)
 
+    async def _cleanup_endpoint(self, endpoint: str) -> None:
+        """Best-effort attempt to kill all known servers on an endpoint.
+
+        Called when a runner becomes unreachable or unhealthy, to free VRAM
+        that would otherwise be wasted on orphaned servers.
+        """
+        server_ids = self._active_servers_by_endpoint.pop(endpoint, set())
+        if not server_ids:
+            return
+        logger.info(
+            f"Cleaning up {len(server_ids)} server(s) on unreachable endpoint {endpoint}"
+        )
+        client = self._get_client()
+        for sid in server_ids:
+            try:
+                await client.delete(f"{endpoint}/v1/server/{sid}", timeout=_FAST_TIMEOUT)
+                logger.info(f"Cleaned up server {sid} on {endpoint}")
+            except Exception as e:
+                logger.warning(
+                    f"Failed to clean up server {sid} on {endpoint}: {e}"
+                )
+
     def _is_connection_error(self, exc: Exception) -> bool:
         """Check if the exception is a connection-level error (disconnect, timeout, etc.)."""
         return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout,
@@ -277,6 +301,13 @@ class RunnerClient:
             logger.warning(f"Runner {endpoint} health check failed: {e}")
             if endpoint in self._healthy:
                 self._healthy.remove(endpoint)
+            # Connection-level errors indicate an unreachable runner —
+            # trip the circuit breaker and attempt to clean up orphaned
+            # servers so VRAM isn't wasted.
+            if self._is_connection_error(e):
+                self._acquire_failures[endpoint] = self._MAX_ACQUIRE_FAILURES
+                self._unhealthy_since[endpoint] = time.monotonic()
+                asyncio.create_task(self._cleanup_endpoint(endpoint))
             return None
 
     # ------------------------------------------------------------------
@@ -377,6 +408,8 @@ class RunnerClient:
                     )
                     logger.info(f"Acquired server {handle.server_id} from {endpoint}")
                     self._record_acquire_success(endpoint)
+                    # Track active server for cleanup if runner goes down
+                    self._active_servers_by_endpoint.setdefault(endpoint, set()).add(data["server_id"])
                     self._schedule_refresh()
                     return handle
 
@@ -387,8 +420,8 @@ class RunnerClient:
                     if is_conn_err:
                         # Connection-level error: runner is unreachable.  Trip the
                         # circuit breaker immediately so we don't waste time
-                        # retrying, and avoid leaving a partially-started server
-                        # consuming VRAM on a dead runner.
+                        # retrying, and attempt to kill any known servers on this
+                        # runner to free VRAM.
                         logger.warning(
                             f"Connection error from {endpoint}, tripping circuit breaker: {e}"
                         )
@@ -397,6 +430,8 @@ class RunnerClient:
                         self._unhealthy_since[endpoint] = time.monotonic()
                         if endpoint in self._healthy:
                             self._healthy.remove(endpoint)
+                        # Best-effort cleanup of orphaned servers on this runner
+                        asyncio.create_task(self._cleanup_endpoint(endpoint))
                         break  # move to next endpoint
 
                     logger.warning(f"Failed to acquire from {endpoint}: {e}")
@@ -420,6 +455,11 @@ class RunnerClient:
         except Exception as e:
             logger.error(f"Failed to release server {handle.server_id}: {e}")
             raise
+        finally:
+            # Remove from active tracking so cleanup doesn't try to kill it
+            servers = self._active_servers_by_endpoint.get(handle.runner_host)
+            if servers:
+                servers.discard(handle.server_id)
 
     async def shutdown_server(self, handle: ServerHandle) -> None:
         """Permanently shut down a server on the runner."""
@@ -433,6 +473,11 @@ class RunnerClient:
         except Exception as e:
             logger.error(f"Failed to shutdown server {handle.server_id}: {e}")
             raise
+        finally:
+            # Remove from active tracking
+            servers = self._active_servers_by_endpoint.get(handle.runner_host)
+            if servers:
+                servers.discard(handle.server_id)
 
     # ------------------------------------------------------------------
     # Model map
