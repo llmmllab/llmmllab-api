@@ -44,7 +44,6 @@ _ACQUIRE_TIMEOUT = httpx.Timeout(float(os.environ.get("RUNNER_ACQUIRE_TIMEOUT_SE
 
 # Circuit breaker thresholds (configurable via env)
 _MAX_ACQUIRE_FAILURES = int(os.environ.get("RUNNER_MAX_ACQUIRE_FAILURES", "3"))
-_UNHEALTHY_WINDOW = float(os.environ.get("RUNNER_UNHEALTHY_WINDOW_SEC", "60.0"))
 # Per-endpoint connection retries during acquire
 _ACQUIRE_RETRIES = int(os.environ.get("RUNNER_ACQUIRE_RETRIES", "2"))
 
@@ -73,10 +72,10 @@ class RunnerClient:
         self._refresh_task: Optional[asyncio.Task] = None
         self._unhealthy_since: Dict[str, float] = {}
         self._acquire_failures: Dict[str, int] = {}
-        # Circuit breaker: skip a runner if it has >= this many consecutive
-        # acquire failures within the last UNHEALTHY_WINDOW seconds.
+        # Circuit breaker: once tripped, a runner stays unhealthy
+        # permanently (no auto-reset) to avoid wasting resources on
+        # unreachable runners.
         self._MAX_ACQUIRE_FAILURES = _MAX_ACQUIRE_FAILURES
-        self._UNHEALTHY_WINDOW = _UNHEALTHY_WINDOW
         # Track active server IDs per runner endpoint for cleanup on failure
         self._active_servers_by_endpoint: Dict[str, set[str]] = {}
 
@@ -228,28 +227,16 @@ class RunnerClient:
     # ------------------------------------------------------------------
 
     def _is_circuit_open(self, endpoint: str) -> bool:
-        """Check if the circuit breaker is open for this runner."""
-        now = time.monotonic()
-        # Reset if outside the unhealthy window
-        if endpoint in self._unhealthy_since:
-            if now - self._unhealthy_since[endpoint] > self._UNHEALTHY_WINDOW:
-                self._unhealthy_since.pop(endpoint, None)
-                self._acquire_failures.pop(endpoint, None)
-                return False
-        failures = self._acquire_failures.get(endpoint, 0)
-        return failures >= self._MAX_ACQUIRE_FAILURES
+        """Check if the circuit breaker is open for this runner.
 
-    def _record_acquire_failure(self, endpoint: str) -> None:
-        """Record an acquire failure and potentially open the circuit."""
-        self._acquire_failures[endpoint] = self._acquire_failures.get(endpoint, 0) + 1
-        self._unhealthy_since[endpoint] = time.monotonic()
-        if endpoint in self._healthy:
-            self._healthy.remove(endpoint)
+        Once tripped, the circuit stays open permanently — an unhealthy
+        runner should not be retried, as it wastes VRAM and memory.
+        """
+        return endpoint in self._unhealthy_since
 
     def _record_acquire_success(self, endpoint: str) -> None:
-        """Reset failure count on success."""
-        self._acquire_failures.pop(endpoint, None)
-        self._unhealthy_since.pop(endpoint, None)
+        """Reset failure count on success (no-op; circuit stays tripped)."""
+        pass
 
     def _trip_circuit_and_cleanup(self, endpoint: str) -> None:
         """Immediately open the circuit breaker and clean up orphaned servers.

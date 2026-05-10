@@ -579,8 +579,12 @@ class TestRunnerClientCircuitBreaker:
         mock.post.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_circuit_closes_after_window(self):
-        """Circuit resets after UNHEALTHY_WINDOW seconds."""
+    async def test_circuit_stays_open_permanently(self):
+        """Circuit stays open permanently once tripped — no auto-reset.
+
+        An unhealthy runner should not be retried, as it wastes VRAM
+        and memory even if unreachable.
+        """
         import time
         client = RunnerClient(endpoints=["http://r1:8000"])
         client._acquire_failures["http://r1:8000"] = client._MAX_ACQUIRE_FAILURES
@@ -588,10 +592,10 @@ class TestRunnerClientCircuitBreaker:
 
         assert client._is_circuit_open("http://r1:8000")
 
-        # Simulate time passing beyond the window
+        # Even after a very long time, circuit should stay open
         with patch("services.runner_client.time") as mock_time:
-            mock_time.monotonic.return_value = client._unhealthy_since["http://r1:8000"] + client._UNHEALTHY_WINDOW + 1.0
-            assert not client._is_circuit_open("http://r1:8000")
+            mock_time.monotonic.return_value = client._unhealthy_since["http://r1:8000"] + 99999
+            assert client._is_circuit_open("http://r1:8000")
 
     @pytest.mark.asyncio
     async def test_cleanup_called_on_connection_error(self):
