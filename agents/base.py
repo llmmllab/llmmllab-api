@@ -360,7 +360,48 @@ The current date is {current_date}."""
             # Convert messages to LangChain format
             normalized_messages = messages_to_lc_messages(convo)
             self.logger.debug(f"Running agent with {len(normalized_messages)} messages")
-            result = await agent.ainvoke({"messages": normalized_messages})  # type: ignore
+
+            # Retry transient errors (connection errors + 5xx status errors like 503)
+            # up to 10 times with exponential backoff.
+            # Early retries use short delays (2s, 4s, 8s); later retries
+            # use longer delays (16s, 32s, 60s, 60s, 60s, 60s) to allow
+            # time for the runner/API to recover.
+            # Non-transient errors propagate immediately.
+            from openai import APIConnectionError as _APIConnectionError
+            from openai import APIStatusError as _APIStatusError
+
+            _TRANSIENT_STATUS_CODES = frozenset({502, 503, 504})
+
+            def _is_transient_error(e: Exception) -> bool:
+                if isinstance(e, _APIConnectionError):
+                    return True
+                if isinstance(e, _APIStatusError) and e.status_code in _TRANSIENT_STATUS_CODES:
+                    return True
+                return False
+
+            last_error = None
+            max_attempts = 11
+            for attempt in range(max_attempts):
+                try:
+                    result = await agent.ainvoke({"messages": normalized_messages})  # type: ignore
+                    break
+                except Exception as e:
+                    if not _is_transient_error(e):
+                        raise
+                    last_error = e
+                    if attempt < max_attempts - 1:
+                        # Exponential backoff capped at 60s
+                        backoff = min(2 ** (attempt + 1), 60)
+                        self.logger.warning(
+                            f"Transient error ({type(e).__name__}), retrying in {backoff}s "
+                            f"(attempt {attempt + 1}/{max_attempts})",
+                            extra={"error": str(e)},
+                        )
+                        import asyncio as _asyncio
+
+                        await _asyncio.sleep(backoff)
+                    else:
+                        raise
 
             if isinstance(result, dict):
                 if "structured_response" in result and grammar:
@@ -465,7 +506,44 @@ The current date is {current_date}."""
             # Convert messages to LangChain format
             normalized_messages = messages_to_lc_messages(convo)
             self.logger.debug(f"Running agent with {len(normalized_messages)} messages")
-            result = await agent.ainvoke({"messages": normalized_messages})  # type: ignore
+
+            # Retry transient errors (connection errors + 5xx status errors like 503)
+            # up to 10 times with exponential backoff.
+            from openai import APIConnectionError as _APIConnectionError
+            from openai import APIStatusError as _APIStatusError
+
+            _TRANSIENT_STATUS_CODES = frozenset({502, 503, 504})
+
+            def _is_transient_error(e: Exception) -> bool:
+                if isinstance(e, _APIConnectionError):
+                    return True
+                if isinstance(e, _APIStatusError) and e.status_code in _TRANSIENT_STATUS_CODES:
+                    return True
+                return False
+
+            last_error = None
+            max_attempts = 11
+            for attempt in range(max_attempts):
+                try:
+                    result = await agent.ainvoke({"messages": normalized_messages})  # type: ignore
+                    break
+                except Exception as e:
+                    if not _is_transient_error(e):
+                        raise
+                    last_error = e
+                    if attempt < max_attempts - 1:
+                        backoff = min(2 ** (attempt + 1), 60)
+                        self.logger.warning(
+                            f"Transient error ({type(e).__name__}), retrying in {backoff}s "
+                            f"(attempt {attempt + 1}/{max_attempts})",
+                            extra={"error": str(e)},
+                        )
+                        import asyncio as _asyncio
+
+                        await _asyncio.sleep(backoff)
+                    else:
+                        raise
+
             self.logger.debug(
                 f"Agent run result ({type(result)}): {serialize_event_data(result)}"
             )
