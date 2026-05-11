@@ -4,11 +4,13 @@ import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Literal, TypeAlias, Union
+from wsgiref import headers
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from middleware.auth import get_user_id
+from models.request_priority_metadata import Priority, RequestSource
 from services import CompletionService, model_service
 from graph.state import ServerToolEvent
 from models.openai.chat_completion_deleted import ChatCompletionDeleted
@@ -333,6 +335,10 @@ async def stream_chat_completion(
     model_name: str,
     client_tools: list[dict] | None = None,
     tool_choice: str | None = None,
+    priority: Priority | None = None,
+    max_queue_wait: float | None = None,
+    source: RequestSource | None = None,
+    session_id: str | None = None,
 ) -> AsyncIterator[str]:
     """Stream composer events as OpenAI SSE chat completion chunks.
 
@@ -373,6 +379,10 @@ async def stream_chat_completion(
             model_name=model_name,
             client_tools=client_tools,
             tool_choice=tool_choice,
+            priority=priority,
+            max_queue_wait=max_queue_wait,
+            source=source,
+            session_id=session_id,
         ):
             # Skip ServerToolEvents for OpenAI-compatible clients
 
@@ -449,7 +459,9 @@ async def stream_chat_completion(
 
     # All retries produced nothing — send error message
     if not has_content and not has_tool_calls and not final_content:
-        logger.warning("All retries produced empty response", extra={"model": model_name})
+        logger.warning(
+            "All retries produced empty response", extra={"model": model_name}
+        )
         error_text = "[Model returned empty response after all retries. The context may be too large or the model may need to be reloaded.]"
         error_chunk = CreateChatCompletionStreamResponse(
             id=chunk_id,
@@ -541,6 +553,11 @@ async def createChatCompletion(
     if not user_id:
         raise HTTPException(status_code=401, detail="User ID not found in request")
 
+    logger.debug(
+        "Headers received in createChatCompletion",
+        extra={"headers": dict(request.headers)},
+    )
+
     internal_messages = messages_from_openai(body.messages)
 
     # Resolve model: fall back to user's default_model if unavailable
@@ -571,6 +588,16 @@ async def createChatCompletion(
     else:
         logger.debug("OAI request without tools")
 
+    _priority_meta = getattr(request.state, "request_priority_metadata", None)
+    priority = getattr(_priority_meta, "priority", None) if _priority_meta else None
+    max_queue_wait = (
+        getattr(_priority_meta, "max_queue_wait", None) if _priority_meta else None
+    )
+    req_source = getattr(_priority_meta, "source", None) if _priority_meta else None
+    req_session_id = (
+        getattr(_priority_meta, "session_id", None) if _priority_meta else None
+    )
+
     if body.stream:
         # Only pass tool kwargs when they have actual values to avoid
         # bypassing workflow caching with empty build_kwargs
@@ -585,6 +612,10 @@ async def createChatCompletion(
                 user_id,
                 internal_messages,
                 body.model,
+                priority=priority,
+                max_queue_wait=max_queue_wait,
+                source=req_source,
+                session_id=req_session_id,
                 **stream_kwargs,
             ),
             media_type="text/event-stream",
@@ -596,17 +627,41 @@ async def createChatCompletion(
         )
 
     # Non-streaming response — delegate to CompletionService
-    result = await CompletionService.run_completion(
-        user_id=user_id,
-        messages=internal_messages,
-        model_name=body.model,
-        client_tools=client_tools,
-        tool_choice=tool_choice,
-    )
-    if result.chat_response is None or (not result.has_content and not result.has_tool_calls):
+    try:
+        result = await CompletionService.run_completion(
+            user_id=user_id,
+            messages=internal_messages,
+            model_name=body.model,
+            client_tools=client_tools,
+            tool_choice=tool_choice,
+            priority=priority,
+            max_queue_wait=max_queue_wait,
+            source=req_source,
+            session_id=req_session_id,
+        )
+    except Exception as e:
+        error_msg = str(e).lower()
+        if any(
+            kw in error_msg
+            for kw in ("connection", "runner", "unavailable", "refused", "protocol")
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail="Runner service is temporarily unavailable. Please retry.",
+            ) from e
+        raise
+
+    if result.chat_response is None or (
+        not result.has_content and not result.has_tool_calls
+    ):
+        if getattr(result, "context_overflow", False):
+            raise HTTPException(
+                status_code=507,
+                detail="Context window exceeded. Please reduce conversation length or use a model with larger context.",
+            )
         raise HTTPException(
             status_code=503,
-            detail="Model returned empty response after all retries. Context may be too large."
+            detail="Model returned an empty response.",
         )
     return openai_response_from_chat_response(result.chat_response, model=body.model)
 

@@ -74,6 +74,7 @@ try:
     from . import rabbitmq_config
     from . import redis_config
     from . import requests
+    from . import request_priority_metadata
     from . import research_plan
     from . import research_question
     from . import research_question_result
@@ -178,6 +179,7 @@ __all__ = [
     "rabbitmq_config",
     "redis_config",
     "requests",
+    "request_priority_metadata",
     "research_plan",
     "research_question",
     "research_question_result",
@@ -506,6 +508,11 @@ from .requests import (
     ModelRequest,
     ModelsListResponse,
     PromptRequest,
+)
+from .request_priority_metadata import (
+    Priority,
+    RequestPriorityMetadata,
+    RequestSource,
 )
 from .research_plan import (
     ResearchPlan,

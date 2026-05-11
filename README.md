@@ -46,6 +46,14 @@ Copy `.env.example` to `.env` and set the required values:
 | `PORT` | Server port (default: 8000) |
 | `LOG_LEVEL` | Logging verbosity (debug, info, warning, error) |
 | `CUDA_VISIBLE_DEVICES` | GPU devices for inference |
+| `CONTEXT_USAGE_SAFETY_MARGIN` | Fraction of context window reserved for output (default: 0.85) |
+| `CONTEXT_MINIMUM_RATIO` | Minimum context ratio before refusing server start (default: 0.80) |
+| `CHAT_OPENAI_MAX_RETRIES` | Max retries for OpenAI-compatible chat completions (default: 2) |
+| `PRIORITY_QUEUE_ENABLED` | Enable request priority queue (default: true) |
+| `PRIORITY_QUEUE_MAX_SIZE` | Max queued requests (default: 100) |
+| `PRIORITY_QUEUE_TIMEOUT_SEC` | Queue timeout in seconds (default: 300) |
+| `RUNNER_RETRIES` | Runner acquisition retries (default: 2) |
+| `RUNNER_RETRY_BACKOFF_BASE` | Runner retry backoff base (default: 1) |
 
 ## Project Structure
 

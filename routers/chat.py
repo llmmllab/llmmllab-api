@@ -18,6 +18,7 @@ from models import (
 )
 from graph.state import ServerToolEvent
 from graph.workflows.factory import WorkFlowType
+from models.request_priority_metadata import Priority, RequestSource
 from services import CompletionService
 from utils import extract_text_from_message
 from utils.logging import llmmllogger
@@ -32,6 +33,10 @@ async def composer_chat_completion(
     conversation_id: int,
     request_id: str,
     model_name: Optional[str] = None,
+    priority: Optional[Priority] = None,
+    max_queue_wait: Optional[float] = None,
+    source: Optional[RequestSource] = None,
+    session_id: Optional[str] = None,
 ) -> AsyncIterator[str]:
     """Handle chat completions via CompletionService.
 
@@ -47,6 +52,10 @@ async def composer_chat_completion(
         model_name=model_name or "",
         workflow_type=WorkFlowType.DIALOG,
         conversation_id=conversation_id,
+        priority=priority,
+        max_queue_wait=max_queue_wait,
+        source=source,
+        session_id=session_id,
     ):
         if isinstance(event, ServerToolEvent):
             continue
@@ -104,13 +113,32 @@ async def chat_completion(
 
     logger.info(f"Processing chat completion request {request_id} for user {user_id}")
 
+    # Extract priority metadata from middleware
+    _priority_meta = getattr(request.state, "request_priority_metadata", None)
+    priority = getattr(_priority_meta, "priority", None) if _priority_meta else None
+    max_queue_wait = (
+        getattr(_priority_meta, "max_queue_wait", None) if _priority_meta else None
+    )
+    req_source = (
+        getattr(_priority_meta, "source", None) if _priority_meta else None
+    )
+    req_session_id = (
+        getattr(_priority_meta, "session_id", None) if _priority_meta else None
+    )
+
     try:
         # Transform file content to documents before storing
         msg = await transform_file_content_to_documents(msg, user_id)
 
         await message_service.add_message(msg)
         return StreamingResponse(
-            composer_chat_completion(user_id, msg.conversation_id, request_id, body.model_name),  # type: ignore
+            composer_chat_completion(
+                user_id, msg.conversation_id, request_id, body.model_name,  # type: ignore
+                priority=priority,
+                max_queue_wait=max_queue_wait,
+                source=req_source,
+                session_id=req_session_id,
+            ),
             media_type="application/json",
             headers={
                 "Cache-Control": "no-cache",
@@ -124,20 +152,26 @@ async def chat_completion(
 
         # Provide specific error messages
         error_detail = f"Error in chat completion: {str(e)}"
-        if "composer service not initialized" in str(e).lower():
+        error_msg = str(e).lower()
+        if "composer service not initialized" in error_msg:
             error_detail = "AI service not ready. Please try again in a moment."
-        elif "workflow construction" in str(e).lower():
+        elif "workflow construction" in error_msg:
             error_detail = (
                 "Unable to create AI workflow. Please check your configuration."
             )
-        elif "unknown model architecture" in str(e):
+        elif "unknown model architecture" in error_msg:
             error_detail = (
                 "Model architecture not supported. Please try a different model."
             )
-        elif "Failed to create llama_context" in str(e):
+        elif "failed to create llama_context" in error_msg:
             error_detail = (
                 "Model failed to load. This may be due to insufficient memory."
             )
+        elif any(kw in error_msg for kw in ("connection", "runner", "unavailable", "refused", "protocol")):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Runner service is temporarily unavailable. Please retry.",
+            ) from e
 
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
