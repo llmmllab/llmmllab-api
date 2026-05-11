@@ -130,7 +130,7 @@ class TestAgentRetryNonTransientError:
 
     @pytest.mark.asyncio
     async def test_value_error_propagates_immediately(self):
-        agent = _make_base_base_agent = _make_base_agent()
+        agent = _make_base_agent()
 
         mock_lc_agent = AsyncMock()
         mock_lc_agent.ainvoke.side_effect = ValueError("bad model")
@@ -180,3 +180,65 @@ class TestAgentRetryBackoffSchedule:
         # Expected backoffs: 2, 4, 8, 16, 32, 60, 60, 60, 60, 60
         expected = [2, 4, 8, 16, 32, 60, 60, 60, 60, 60]
         assert sleep_calls == expected
+
+
+class TestAgentNodeMetadata:
+    """BaseAgent.bind_node_metadata() correctly updates metadata and logger."""
+
+    def test_bind_node_metadata(self):
+        from models import NodeMetadata
+
+        agent = _make_base_agent()
+        meta = NodeMetadata(
+            node_name="test-node",
+            node_id="n-123",
+            node_type="TestAgent",
+            user_id="u-456",
+        )
+        result = agent.bind_node_metadata(meta)
+
+        assert result is agent  # returns self for chaining
+        assert agent._node_metadata.node_name == "test-node"
+        assert agent._node_metadata.node_id == "n-123"
+        assert agent._node_metadata.user_id == "u-456"
+
+
+class TestAgentRunStructured:
+    """BaseAgent.run_structured() returns parsed grammar output."""
+
+    @pytest.mark.asyncio
+    async def test_run_structured_returns_parsed_model(self):
+        from pydantic import BaseModel as PydanticModel
+        from langchain_core.messages import AIMessage
+
+        class Greeting(PydanticModel):
+            name: str
+
+        agent = _make_base_agent()
+
+        mock_lc_agent = AsyncMock()
+        mock_lc_agent.ainvoke.return_value = AIMessage(
+            content='{"name": "World"}'
+        )
+        agent._get_or_create_agent = AsyncMock(return_value=mock_lc_agent)
+
+        result = await agent.run_structured("Say hi", grammar=Greeting)
+
+        assert isinstance(result, Greeting)
+        assert result.name == "World"
+
+    @pytest.mark.asyncio
+    async def test_run_structured_raises_on_error(self):
+        from pydantic import BaseModel as PydanticModel
+
+        class Greeting(PydanticModel):
+            name: str
+
+        agent = _make_base_agent()
+
+        mock_lc_agent = AsyncMock()
+        mock_lc_agent.ainvoke.side_effect = RuntimeError("model crash")
+        agent._get_or_create_agent = AsyncMock(return_value=mock_lc_agent)
+
+        with pytest.raises(RuntimeError, match="Structured agent execution failed"):
+            await agent.run_structured("Say hi", grammar=Greeting)
