@@ -16,8 +16,8 @@ in an internal registry. On application shutdown, ``aclose()`` calls
 each registered handle, ensuring no orphaned llama.cpp servers remain.
 
 The ``num_ctx`` parameter on ``acquire_server()`` is forwarded to the
-runner so it can refuse to start servers with insufficient context
-(relative to ``CONTEXT_MINIMUM_RATIO``).
+runner, which refuses to start servers when the requested context exceeds
+the model's configured context window (returns HTTP 507).
 """
 
 import asyncio
@@ -441,9 +441,9 @@ class RunnerClient:
         model_id:
             Identifier of the model to load.
         num_ctx:
-            Requested context window size.  Passed to the runner so it can
-            refuse to start a server when the available context is smaller
-            than ``CONTEXT_MINIMUM_RATIO * num_ctx``.
+            Requested context window size. Passed to the runner, which
+            refuses the request (HTTP 507) when it exceeds the model's
+            configured context window.
         **kwargs:
             Forwarded for compatibility (task, config_override).
 

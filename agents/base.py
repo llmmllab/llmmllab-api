@@ -39,9 +39,9 @@ from utils.grammar_generator import parse_structured_output
 
 # Safety margin: fraction of num_ctx reserved for conversation input.
 # Configurable via CONTEXT_USAGE_SAFETY_MARGIN env var (default 0.85 = 85%).
-# CONTEXT_MINIMUM_RATIO: reject servers with less than this fraction of
-# requested context (default 0.80 = 80 %).
-from config import CONTEXT_USAGE_SAFETY_MARGIN, CONTEXT_MINIMUM_RATIO
+# The runner enforces CONTEXT_MINIMUM_RATIO server-side; the API only
+# needs the safety margin for client-side context trimming.
+from config import CONTEXT_USAGE_SAFETY_MARGIN
 
 
 class ContextOverflowError(Exception):
