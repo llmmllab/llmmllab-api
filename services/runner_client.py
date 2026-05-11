@@ -11,6 +11,7 @@ the overhead of opening a new TCP connection for every request.
 
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -36,10 +37,16 @@ for _lib_name in (
 
 logger = llmmllogger.bind(component="runner_client")
 
-# Timeouts for different request categories
-_HEALTH_TIMEOUT = httpx.Timeout(5.0)
-_FAST_TIMEOUT = httpx.Timeout(10.0)
-_ACQUIRE_TIMEOUT = httpx.Timeout(150.0)
+# Timeouts for different request categories (configurable via env)
+_HEALTH_TIMEOUT = httpx.Timeout(float(os.environ.get("RUNNER_HEALTH_TIMEOUT_SEC", "5.0")))
+_FAST_TIMEOUT = httpx.Timeout(float(os.environ.get("RUNNER_FAST_TIMEOUT_SEC", "10.0")))
+_ACQUIRE_TIMEOUT = httpx.Timeout(float(os.environ.get("RUNNER_ACQUIRE_TIMEOUT_SEC", "150.0")))
+
+# Circuit breaker thresholds (configurable via env)
+_MAX_ACQUIRE_FAILURES = int(os.environ.get("RUNNER_MAX_ACQUIRE_FAILURES", "3"))
+_UNHEALTHY_WINDOW = float(os.environ.get("RUNNER_UNHEALTHY_WINDOW_SEC", "60.0"))
+# Per-endpoint connection retries during acquire
+_ACQUIRE_RETRIES = int(os.environ.get("RUNNER_ACQUIRE_RETRIES", "2"))
 
 
 @dataclass(frozen=True)
@@ -64,6 +71,14 @@ class RunnerClient:
         self._client: Optional[httpx.AsyncClient] = None
         self._model_map: Dict[str, List[str]] = {}
         self._refresh_task: Optional[asyncio.Task] = None
+        self._unhealthy_since: Dict[str, float] = {}
+        self._acquire_failures: Dict[str, int] = {}
+        # Circuit breaker: skip a runner if it has >= this many consecutive
+        # acquire failures within the last UNHEALTHY_WINDOW seconds.
+        self._MAX_ACQUIRE_FAILURES = _MAX_ACQUIRE_FAILURES
+        self._UNHEALTHY_WINDOW = _UNHEALTHY_WINDOW
+        # Track active server IDs per runner endpoint for cleanup on failure
+        self._active_servers_by_endpoint: Dict[str, set[str]] = {}
         self._active_handles: set[ServerHandle] = set()
 
     def _get_client(self) -> httpx.AsyncClient:
@@ -227,8 +242,78 @@ class RunnerClient:
     # Health
     # ------------------------------------------------------------------
 
+    def _is_circuit_open(self, endpoint: str) -> bool:
+        """Check if the circuit breaker is open for this runner."""
+        now = time.monotonic()
+        # Reset if outside the unhealthy window
+        if endpoint in self._unhealthy_since:
+            if now - self._unhealthy_since[endpoint] > self._UNHEALTHY_WINDOW:
+                self._unhealthy_since.pop(endpoint, None)
+                self._acquire_failures.pop(endpoint, None)
+                return False
+        failures = self._acquire_failures.get(endpoint, 0)
+        return failures >= self._MAX_ACQUIRE_FAILURES
+
+    def _record_acquire_failure(self, endpoint: str) -> None:
+        """Record an acquire failure and potentially open the circuit."""
+        self._acquire_failures[endpoint] = self._acquire_failures.get(endpoint, 0) + 1
+        self._unhealthy_since[endpoint] = time.monotonic()
+        if endpoint in self._healthy:
+            self._healthy.remove(endpoint)
+
+    def _record_acquire_success(self, endpoint: str) -> None:
+        """Reset failure count on success."""
+        self._acquire_failures.pop(endpoint, None)
+        self._unhealthy_since.pop(endpoint, None)
+
+    def _trip_circuit_and_cleanup(self, endpoint: str) -> None:
+        """Immediately open the circuit breaker and clean up orphaned servers.
+
+        Called when a runner is determined to be unhealthy (connection error,
+        HTTP error, or any acquire failure).  Forces the circuit open so we
+        don't waste time retrying, and attempts to kill any known servers on
+        this runner to free VRAM.
+        """
+        self._acquire_failures[endpoint] = self._MAX_ACQUIRE_FAILURES
+        self._unhealthy_since[endpoint] = time.monotonic()
+        if endpoint in self._healthy:
+            self._healthy.remove(endpoint)
+        asyncio.create_task(self._cleanup_endpoint(endpoint))
+
+    async def _cleanup_endpoint(self, endpoint: str) -> None:
+        """Best-effort attempt to kill all known servers on an endpoint.
+
+        Called when a runner becomes unreachable or unhealthy, to free VRAM
+        that would otherwise be wasted on orphaned servers.
+        """
+        server_ids = self._active_servers_by_endpoint.pop(endpoint, set())
+        if not server_ids:
+            return
+        logger.info(
+            f"Cleaning up {len(server_ids)} server(s) on unreachable endpoint {endpoint}"
+        )
+        client = self._get_client()
+        for sid in server_ids:
+            try:
+                await client.delete(f"{endpoint}/v1/server/{sid}", timeout=_FAST_TIMEOUT)
+                logger.info(f"Cleaned up server {sid} on {endpoint}")
+            except Exception as e:
+                logger.warning(
+                    f"Failed to clean up server {sid} on {endpoint}: {e}"
+                )
+
+    def _is_connection_error(self, exc: Exception) -> bool:
+        """Check if the exception is a connection-level error (disconnect, timeout, etc.)."""
+        return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout,
+                                httpx.ReadTimeout, httpx.RemoteProtocolError,
+                                ConnectionError))
+
     async def _health(self, endpoint: str) -> Optional[dict]:
         """Check health of a single runner. Returns health dict or None."""
+        # Skip runners with open circuit breaker
+        if self._is_circuit_open(endpoint):
+            logger.debug(f"Skipping health check for {endpoint}: circuit breaker open")
+            return None
         try:
             client = self._get_client()
             resp = await client.get(f"{endpoint}/health", timeout=_HEALTH_TIMEOUT)
@@ -246,6 +331,13 @@ class RunnerClient:
             logger.warning(f"Runner {endpoint} health check failed: {e}")
             if endpoint in self._healthy:
                 self._healthy.remove(endpoint)
+           # Connection-level errors indicate an unreachable runner —
+            # trip the circuit breaker and attempt to clean up orphaned
+            # servers so VRAM isn't wasted.
+            if self._is_connection_error(e):
+                self._acquire_failures[endpoint] = self._MAX_ACQUIRE_FAILURES
+                self._unhealthy_since[endpoint] = time.monotonic()
+                asyncio.create_task(self._cleanup_endpoint(endpoint))
             self._invalidate_model_map_for_endpoint(endpoint)
             return None
 
@@ -343,37 +435,64 @@ class RunnerClient:
 
         last_error = None
         for endpoint in ordered:
-            try:
-                client = self._get_client()
-                resp = await client.post(
-                    f"{endpoint}/v1/server/create",
-                    json=payload,
-                    timeout=_ACQUIRE_TIMEOUT,
+            # Skip runners with open circuit breaker
+            if self._is_circuit_open(endpoint):
+                logger.warning(
+                    f"Skipping {endpoint}: circuit breaker open "
+                    f"({self._acquire_failures.get(endpoint, 0)} failures)"
                 )
-
-                if resp.status_code == 507:
-                    logger.warning(
-                        f"Runner {endpoint} returned 507, trying next runner"
-                    )
-                    last_error = "Insufficient capacity"
-                    continue
-
-                resp.raise_for_status()
-                data = resp.json()
-                handle = ServerHandle(
-                    base_url=f"{endpoint}/v1/server/{data['server_id']}",
-                    server_id=data["server_id"],
-                    runner_host=endpoint,
-                )
-                logger.info(f"Acquired server {handle.server_id} from {endpoint}")
-                self._schedule_refresh()
-                self._active_handles.add(handle)
-                return handle
-
-            except Exception as e:
-                logger.warning(f"Failed to acquire from {endpoint}: {e}")
-                last_error = str(e)
                 continue
+
+            # Retry connection-level errors per endpoint (configurable via RUNNER_ACQUIRE_RETRIES)
+            max_retries = _ACQUIRE_RETRIES
+            for attempt in range(max_retries + 1):
+                try:
+                    client = self._get_client()
+                    resp = await client.post(
+                        f"{endpoint}/v1/server/create",
+                        json=payload,
+                        timeout=_ACQUIRE_TIMEOUT,
+                    )
+
+                    if resp.status_code == 507:
+                        logger.warning(
+                            f"Runner {endpoint} returned 507, trying next runner"
+                        )
+                        last_error = "Insufficient capacity"
+                        break  # no point retrying 507
+
+                    resp.raise_for_status()
+                    data = resp.json()
+                    handle = ServerHandle(
+                        base_url=f"{endpoint}/v1/server/{data['server_id']}",
+                        server_id=data["server_id"],
+                        runner_host=endpoint,
+                    )
+                    logger.info(f"Acquired server {handle.server_id} from {endpoint}")
+                    self._record_acquire_success(endpoint)
+                    self._active_servers_by_endpoint.setdefault(endpoint, set()).add(data["server_id"])
+                    self._active_handles.add(handle)
+                    self._schedule_refresh()
+                    return handle
+
+                except Exception as e:
+                    last_error = str(e)
+                    is_conn_err = self._is_connection_error(e)
+
+                    # Any acquire failure (connection error, HTTP error, etc.)
+                    # means the runner is unhealthy.  Trip the circuit
+                    # immediately and clean up orphaned servers so VRAM isn't
+                    # wasted.
+                    if is_conn_err:
+                        logger.warning(
+                            f"Connection error from {endpoint}, tripping circuit breaker: {e}"
+                        )
+                    else:
+                        logger.warning(
+                            f"Acquire error from {endpoint}, tripping circuit breaker: {e}"
+                        )
+                    self._trip_circuit_and_cleanup(endpoint)
+                    break  # move to next endpoint
 
         raise RuntimeError(
             f"No healthy runner available for model {model_id}. "
@@ -393,6 +512,11 @@ class RunnerClient:
         except Exception as e:
             logger.error(f"Failed to release server {handle.server_id}: {e}")
             raise
+        finally:
+            # Remove from active tracking so cleanup doesn't try to kill it
+            servers = self._active_servers_by_endpoint.get(handle.runner_host)
+            if servers:
+                servers.discard(handle.server_id)
 
     async def shutdown_server(self, handle: ServerHandle) -> None:
         """Permanently shut down a server on the runner."""
@@ -406,6 +530,11 @@ class RunnerClient:
         except Exception as e:
             logger.error(f"Failed to shutdown server {handle.server_id}: {e}")
             raise
+        finally:
+            # Remove from active tracking
+            servers = self._active_servers_by_endpoint.get(handle.runner_host)
+            if servers:
+                servers.discard(handle.server_id)
 
     # ------------------------------------------------------------------
     # Model map
