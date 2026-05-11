@@ -162,8 +162,20 @@ class BaseAgent:
         # This allows different system prompts, tools, and grammars while maintaining server reuse
 
         self.logger.debug("Creating LangChain agent (pipeline will be reused)")
+
+        # Ensure the model carries the configured context window (n_ctx)
+        # so that requests don't exceed the server's context limit.
+        # Merge with any existing extra_body (e.g. from bind_tools) to avoid
+        # overwriting provider-specific parameters.
+        model = self.model
+        if self.num_ctx is not None:
+            existing_extra = getattr(model, "extra_body", None) or {}
+            model = model.model_copy(
+                update={"extra_body": {**existing_extra, "n_ctx": self.num_ctx}}
+            )
+
         agent = create_agent(
-            model=self.model,
+            model=model,
             tools=tools or [],
             system_prompt=system_prompt,
             response_format=ProviderStrategy(grammar) if grammar else None,
