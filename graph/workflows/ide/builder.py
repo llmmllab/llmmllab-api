@@ -128,7 +128,16 @@ class IdeGraphBuilder(GraphBuilder):
             Compiled workflow ready for execution
         """
         try:
-            # Look up model by name or fall back to first TextToText model
+            # Look up model by name or fall back to first TextToText model.
+            #
+            # NOTE on model resolution: the service layer
+            # (CompletionService._build_and_run) already calls
+            # _resolve_model() before reaching this builder, so the
+            # model_name arriving here is typically already resolved to
+            # an available model. The fallback below is a safety net for
+            # direct builder usage (bypassing the service layer) and for
+            # edge cases where the resolved name still doesn't match any
+            # runner model.
             if model_name:
                 all_models = await runner_client.list_models()
                 model_def = next(
@@ -140,7 +149,18 @@ class IdeGraphBuilder(GraphBuilder):
                     None,
                 )
                 if not model_def:
-                    raise RuntimeError(f"Model '{model_name}' not found")
+                    # Requested model not on any runner — fall back to user's default
+                    model_name = await self.resolve_model(model_name, user_id)
+                    model_def = next(
+                        (
+                            m
+                            for m in all_models
+                            if m.name == model_name or m.id == model_name
+                        ),
+                        None,
+                    )
+                    if not model_def:
+                        raise RuntimeError(f"Model '{model_name}' not found")
             else:
                 model_def = await runner_client.model_by_task(ModelTask.TEXTTOTEXT)
                 if not model_def:

@@ -63,6 +63,27 @@ from config import ENABLE_TOOL_CONTINUATION
 
 _CONTINUATION_ENABLED = ENABLE_TOOL_CONTINUATION
 
+
+async def _resolve_model(model_name: str, user_id: str) -> str:
+    """Resolve a model name, falling back to the user's default if unavailable.
+
+    This centralises the fallback logic so every workflow gets consistent
+    behaviour: if the requested model isn't on any runner, try the user's
+    ``default_model`` before giving up.
+
+    Returns
+    -------
+    str
+        The resolved model ID (may be the original if no fallback exists).
+    """
+    try:
+        from services.model_service import model_service
+
+        return await model_service.resolve_default_model(model_name, user_id)
+    except Exception:
+        # If model_service is unavailable, return the original name
+        return model_name
+
 _CONTINUATION_PROMPT = (
     "You described using a tool but did not actually call one. "
     "Call the appropriate tool now. Do not describe what you will do — invoke the tool directly."
@@ -294,6 +315,9 @@ class CompletionService:
         server_tool_names: set[str] | None = None,
     ) -> AsyncIterator[Union[ChatResponse, ServerToolEvent]]:
         """Build a composer workflow and yield its events."""
+        # Resolve model name — fall back to user's default if unavailable
+        model_name = await _resolve_model(model_name, user_id)
+
         workflow, builder, _server_url = await CompletionService.build_workflow(
             user_id,
             model_name,
