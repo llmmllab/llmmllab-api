@@ -195,11 +195,18 @@ class IdeGraphBuilder(GraphBuilder):
                 bind_kwargs["tool_choice"] = tool_choice or "auto"
                 primary_model = primary_model.bind_tools(client_tools, **bind_kwargs)  # type: ignore[union-attr]
 
+            # Use model's num_ctx if specified, but enforce a minimum to prevent
+            # context overflow errors. The runner may have reduced context due to
+            # memory constraints, but we need enough context for typical agent operations.
+            model_num_ctx = model_def.parameters.num_ctx if model_def.parameters else None
+            agent_num_ctx = model_num_ctx if model_num_ctx is not None else 90000
+            # Enforce minimum context size to prevent "exceeds available context" errors
+            agent_num_ctx = max(agent_num_ctx, 32768)
+
             primary_agent = ChatAgent(
                 model=cast(BaseChatModel, primary_model),
                 system_prompt=model_def.system_prompt or IDE_PRIMARY_SYSTEM_PROMPT,
-                num_ctx=(model_def.parameters.num_ctx if model_def.parameters else None)
-                or 90000,
+                num_ctx=agent_num_ctx,
                 component_name="PrimaryCodingAgent",
             )
 
