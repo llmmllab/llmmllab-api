@@ -77,9 +77,33 @@ ENABLE_TOOL_CONTINUATION = (
     os.environ.get("ENABLE_TOOL_CONTINUATION", "true").lower() == "true"
 )
 
+# ── Chat / LLM ─────────────────────────────────────────────────────
+CHAT_OPENAI_MAX_RETRIES = int(os.environ.get("CHAT_OPENAI_MAX_RETRIES", "2"))
+
 # ── Runner service ─────────────────────────────────────────────────────
 RUNNER_ENDPOINTS = os.environ.get("RUNNER_ENDPOINTS", "http://localhost:9000").split(
     ","
 )
 
 MODEL_CACHE_REFRESH_SEC = int(os.environ.get("MODEL_CACHE_REFRESH_SEC", "60"))
+
+# - Priority Queue -
+PRIORITY_QUEUE_ENABLED = (
+    os.environ.get("PRIORITY_QUEUE_ENABLED", "true").lower() == "true"
+)
+PRIORITY_QUEUE_MAX_SIZE = int(os.environ.get("PRIORITY_QUEUE_MAX_SIZE", "100"))
+PRIORITY_QUEUE_TIMEOUT_SEC = int(
+    os.environ.get("PRIORITY_QUEUE_TIMEOUT_SEC", "300")
+)
+PRIORITY_QUEUE_AGE_THRESHOLD_SEC = int(
+    os.environ.get("PRIORITY_QUEUE_AGE_THRESHOLD_SEC", "60")
+)
+PRIORITY_QUEUE_MAX_WAIT_MIN_SEC = int(
+    os.environ.get("PRIORITY_QUEUE_MAX_WAIT_MIN_SEC", "1")
+)
+PRIORITY_QUEUE_MAX_WAIT_MAX_SEC = int(
+    os.environ.get("PRIORITY_QUEUE_MAX_WAIT_MAX_SEC", "3600")
+)
+# ── Completion / Retry ─────────────────────────────────────────────────
+RUNNER_RETRIES = int(os.environ.get("RUNNER_RETRIES", "2"))
+RUNNER_RETRY_BACKOFF_BASE = int(os.environ.get("RUNNER_RETRY_BACKOFF_BASE", "1"))

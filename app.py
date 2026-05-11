@@ -35,6 +35,7 @@ The application handles initialization and cleanup of all services and provides
 detailed logging throughout the startup and shutdown processes.
 """
 
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
@@ -65,11 +66,13 @@ from middleware import (
     db_init_middleware,
     MessageValidationMiddleware,
 )
+from middleware.priority import PriorityMiddleware
 from middleware.request_id import RequestIdMiddleware
 from middleware.prometheus_metrics import PrometheusMiddleware
 from middleware.tracing import setup_tracing, shutdown_tracing
 from config import AUTH_JWKS_URI
 from services.cleanup_service import cleanup_service
+from services.queue_exceptions import QueueFullError, QueueTimeoutError
 from db.maintenance import maintenance_service
 from utils.logging import llmmllogger
 from composer_init import shutdown_composer
@@ -87,6 +90,16 @@ async def lifespan(_: FastAPI):
     """Simplified lifespan: start services, optionally init composer, yield, then shutdown."""
     logger.info("Initializing services...")
     cleanup_service.start()
+
+    # Initialize async Redis for durable priority queue
+    try:
+        from db.redis_client import (  # pylint: disable=import-outside-toplevel
+            async_redis,
+        )
+
+        await async_redis.connect()
+    except Exception as e:
+        logger.warning(f"Async Redis init failed (queue will use in-memory): {e}")
 
     # Initialize database connection and schema if configured
     try:
@@ -132,6 +145,79 @@ async def lifespan(_: FastAPI):
     except Exception as e:
         logger.warning(f"Runner model map warm-up failed: {e}")
 
+    # Wire up resource-aware priority queue
+    try:
+        from services.runner_client import (
+            runner_client as _runner_client,
+        )  # pylint: disable=import-outside-toplevel
+        from services.priority_queue import (
+            priority_queue,
+        )  # pylint: disable=import-outside-toplevel
+
+        _active_sessions: set[str] = set()
+
+        async def _can_proceed(metadata):
+            if not metadata.model_id:
+                return True
+            # Serialize scheduled/system requests per model to prevent
+            # multiple cron jobs from competing for the same server.
+            try:
+                from models.request_priority_metadata import (  # pylint: disable=import-outside-toplevel
+                    RequestSource,
+                )
+            except Exception:
+                RequestSource = None
+            if (
+                RequestSource
+                and metadata.source in (RequestSource.SCHEDULED, RequestSource.SYSTEM)
+                and metadata.model_id in _active_sessions
+            ):
+                return False
+            try:
+                return await _runner_client.check_slot_availability(metadata.model_id)
+            except Exception:
+                return True  # Never block on check failure
+
+        def _on_release(metadata):
+            if metadata.model_id:
+                _active_sessions.add(metadata.model_id)
+
+        def _on_complete(metadata):
+            if metadata.model_id:
+                _active_sessions.discard(metadata.model_id)
+
+        priority_queue.set_can_proceed_callback(_can_proceed)
+        priority_queue.set_session_callbacks(_on_release, _on_complete)
+        logger.info("Resource-aware priority queue callback wired up")
+    except Exception as e:
+        logger.warning(f"Failed to wire up queue resource callback: {e}")
+
+    # Wait for at least one runner to be healthy before accepting requests
+    try:
+        import time as _time  # pylint: disable=import-outside-toplevel
+        from services.runner_client import (
+            runner_client,
+        )  # pylint: disable=import-outside-toplevel
+
+        _start = _time.monotonic()
+        _timeout = 120
+        while _time.monotonic() - _start < _timeout:
+            try:
+                models = await runner_client.list_models()
+                if models:
+                    logger.info(f"Runner ready with {len(models)} models")
+                    break
+            except Exception:
+                pass
+            await asyncio.sleep(2)
+        else:
+            logger.error(
+                "Runner not ready after %ds timeout — accepting requests anyway",
+                _timeout,
+            )
+    except Exception as e:
+        logger.warning(f"Runner readiness check failed: {e}")
+
     try:
         yield  # Application runs here
     finally:
@@ -164,8 +250,28 @@ async def lifespan(_: FastAPI):
         except Exception as e:
             logger.info(f"Error closing runner client: {e}")
 
+        # Close priority queue (stops background recheck task)
+        try:
+            from services.priority_queue import (
+                priority_queue,
+            )  # pylint: disable=import-outside-toplevel
+
+            await priority_queue.close()
+        except Exception as e:
+            logger.info(f"Error closing priority queue: {e}")
+
         # Shutdown tracing
         shutdown_tracing()
+
+        # Close async Redis
+        try:
+            from db.redis_client import (  # pylint: disable=import-outside-toplevel
+                async_redis,
+            )
+
+            await async_redis.close()
+        except Exception as e:
+            logger.info(f"Error closing async Redis: {e}")
 
         cleanup_service.shutdown()
 
@@ -219,10 +325,29 @@ async def proxy_headers_middleware(request: Request, call_next):
 
 # Store auth middleware in app.state right away
 app.state.auth_middleware = global_auth_middleware
+
+# Exception handlers for queue rejections
+@app.exception_handler(QueueTimeoutError)
+async def queue_timeout_handler(request: Request, exc: QueueTimeoutError):
+    return JSONResponse(
+        status_code=408,
+        content={"error": str(exc)},
+        headers={"Retry-After": "5"},
+    )
+
+
+@app.exception_handler(QueueFullError)
+async def queue_full_handler(request: Request, exc: QueueFullError):
+    return JSONResponse(
+        status_code=503,
+        content={"error": str(exc) or "Queue is full. Please retry later."},
+        headers={"Retry-After": "10"},
+    )
 # Add message validation middleware to ensure proper response structure
 app.add_middleware(MessageValidationMiddleware)
 app.middleware("http")(db_init_middleware)
 app.add_middleware(RequestIdMiddleware)
+app.add_middleware(PriorityMiddleware)
 app.add_middleware(PrometheusMiddleware)
 
 

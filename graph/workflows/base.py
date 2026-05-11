@@ -70,6 +70,24 @@ class GraphBuilder(ABC):
             storage.checkpoint
         )
 
+    async def resolve_model(
+        self, requested_model: str, user_id: str
+    ) -> str:
+        """Resolve a model name, falling back to the user's default if unavailable.
+
+        This centralises the fallback logic so every workflow gets consistent
+        behaviour: if the requested model isn't on any runner, try the user's
+        ``default_model`` before giving up.
+
+        Returns
+        -------
+        str
+            The resolved model ID (may be the original if no fallback exists).
+        """
+        from services.model_service import model_service
+
+        return await model_service.resolve_default_model(requested_model, user_id)
+
     @abstractmethod
     async def build_workflow(
         self,

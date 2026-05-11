@@ -10,6 +10,7 @@ from pydantic import ValidationError
 import regex
 
 from middleware.auth import get_user_id
+from models.request_priority_metadata import Priority, RequestSource
 from services import (
     CompletionService,
     StreamAccumulator,
@@ -306,6 +307,10 @@ async def stream_message(
     model_name: str,
     client_tools: list | None = None,
     tool_choice: str | None = None,
+    priority: Priority | None = None,
+    max_queue_wait: float | None = None,
+    source: RequestSource | None = None,
+    session_id: str | None = None,
 ) -> AsyncIterator[str]:
     """Stream composer events as Anthropic SSE message chunks.
 
@@ -375,6 +380,10 @@ async def stream_message(
             client_tools=client_tools,
             tool_choice=tool_choice,
             server_tool_names=server_tool_names or None,
+            priority=priority,
+            max_queue_wait=max_queue_wait,
+            source=source,
+            session_id=session_id,
         ):
             # ---- ServerToolEvent → emit as standard text content blocks ----
             if isinstance(event, ServerToolEvent):
@@ -609,6 +618,17 @@ async def createMessage(
         req_body = _strip_server_tool_blocks(req_body)
         body = CreateMessageRequest.model_validate(req_body)
         internal_messages = messages_from_anthropic(body.messages, system=body.system)
+        _priority_meta = getattr(request.state, "request_priority_metadata", None)
+        priority = getattr(_priority_meta, "priority", None) if _priority_meta else None
+        max_queue_wait = (
+            getattr(_priority_meta, "max_queue_wait", None) if _priority_meta else None
+        )
+        req_source = (
+            getattr(_priority_meta, "source", None) if _priority_meta else None
+        )
+        req_session_id = (
+            getattr(_priority_meta, "session_id", None) if _priority_meta else None
+        )
 
         # Resolve model: fall back to user's default_model if unavailable
         resolved_model = await model_service.resolve_default_model(body.model, user_id)
@@ -650,6 +670,10 @@ async def createMessage(
                     body.model,
                     client_tools=raw_client_tools,
                     tool_choice=tool_choice,
+                    priority=priority,
+                    max_queue_wait=max_queue_wait,
+                    source=req_source,
+                    session_id=req_session_id,
                 ),
                 media_type="text/event-stream",
                 headers={
@@ -661,22 +685,43 @@ async def createMessage(
 
         # Non-streaming path — delegate to CompletionService
         prepared = ToolService.prepare_tools(client_tools)
-        result = await CompletionService.run_completion(
-            user_id=user_id,
-            messages=internal_messages,
-            model_name=body.model,
-            client_tools=prepared.client_tools,
-            tool_choice=tool_choice,
-            server_tool_names=prepared.server_tool_names or None,
-        )
+        try:
+            result = await CompletionService.run_completion(
+                user_id=user_id,
+                messages=internal_messages,
+                model_name=body.model,
+                client_tools=prepared.client_tools,
+                tool_choice=tool_choice,
+                server_tool_names=prepared.server_tool_names or None,
+                priority=priority,
+                max_queue_wait=max_queue_wait,
+                source=req_source,
+                session_id=req_session_id,
+            )
+        except Exception as e:
+            error_msg = str(e).lower()
+            if any(
+                kw in error_msg
+                for kw in ("connection", "runner", "unavailable", "refused", "protocol")
+            ):
+                raise HTTPException(
+                    status_code=503,
+                    detail="Runner service is temporarily unavailable. Please retry.",
+                ) from e
+            raise
 
         if result.chat_response is None or (
             not result.has_content and not result.has_tool_calls
         ):
-            raise HTTPException(
-                status_code=503,
-                detail="Model returned empty response after all retries. Context may be too large.",
+            if getattr(result, "context_overflow", False):
+                raise HTTPException(
+                status_code=507,
+                detail="Context window exceeded. Please reduce conversation length or use a model with larger context.",
             )
+        raise HTTPException(
+            status_code=503,
+            detail="Model returned an empty response.",
+        )
 
         stop_reason_map: dict[str | None, str] = {
             "stop": "end_turn",

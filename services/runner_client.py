@@ -49,7 +49,7 @@ _UNHEALTHY_WINDOW = float(os.environ.get("RUNNER_UNHEALTHY_WINDOW_SEC", "60.0"))
 _ACQUIRE_RETRIES = int(os.environ.get("RUNNER_ACQUIRE_RETRIES", "2"))
 
 
-@dataclass
+@dataclass(frozen=True)
 class ServerHandle:
     """Reference to an allocated llama.cpp server on a runner."""
 
@@ -79,6 +79,7 @@ class RunnerClient:
         self._UNHEALTHY_WINDOW = _UNHEALTHY_WINDOW
         # Track active server IDs per runner endpoint for cleanup on failure
         self._active_servers_by_endpoint: Dict[str, set[str]] = {}
+        self._active_handles: set[ServerHandle] = set()
 
     def _get_client(self) -> httpx.AsyncClient:
         """Lazily create a shared ``httpx.AsyncClient``."""
@@ -211,7 +212,21 @@ class RunnerClient:
         return last_response
 
     async def aclose(self) -> None:
-        """Close the shared HTTP client.  Call during app shutdown."""
+        """Close the shared HTTP client and release active servers.  Call during app shutdown."""
+        # Release all active server handles back to their runners.
+        if self._active_handles:
+            logger.info(
+                f"Releasing {len(self._active_handles)} active server handles on shutdown"
+            )
+            for handle in list(self._active_handles):
+                try:
+                    await self.release_server(handle)
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to release server {handle.server_id} on shutdown: {e}"
+                    )
+            self._active_handles.clear()
+
         if self._refresh_task is not None:
             self._refresh_task.cancel()
             try:
@@ -310,19 +325,52 @@ class RunnerClient:
             else:
                 if endpoint in self._healthy:
                     self._healthy.remove(endpoint)
+                self._invalidate_model_map_for_endpoint(endpoint)
                 return None
         except Exception as e:
             logger.warning(f"Runner {endpoint} health check failed: {e}")
             if endpoint in self._healthy:
                 self._healthy.remove(endpoint)
-            # Connection-level errors indicate an unreachable runner —
+           # Connection-level errors indicate an unreachable runner —
             # trip the circuit breaker and attempt to clean up orphaned
             # servers so VRAM isn't wasted.
             if self._is_connection_error(e):
                 self._acquire_failures[endpoint] = self._MAX_ACQUIRE_FAILURES
                 self._unhealthy_since[endpoint] = time.monotonic()
                 asyncio.create_task(self._cleanup_endpoint(endpoint))
+            self._invalidate_model_map_for_endpoint(endpoint)
             return None
+
+    def _invalidate_model_map_for_endpoint(self, endpoint: str) -> None:
+        """Remove an endpoint from the model map immediately when it becomes unhealthy.
+
+        This avoids waiting for the next scheduled refresh (default 60 s) and
+        prevents ``acquire_server()`` from routing to a dead runner.
+        """
+        for model_id, endpoints in list(self._model_map.items()):
+            if endpoint in endpoints:
+                endpoints.remove(endpoint)
+                if not endpoints:
+                    del self._model_map[model_id]
+        logger.info(
+            f"Invalidated model map for unhealthy endpoint {endpoint}",
+        )
+
+    async def validate_server_handle(self, handle: ServerHandle) -> bool:
+        """Check if a server handle is still valid by hitting the server's /health.
+
+        Returns ``True`` if the llama.cpp server behind the handle responds
+        with HTTP 200, ``False`` otherwise.
+        """
+        try:
+            client = self._get_client()
+            resp = await client.get(
+                f"{handle.base_url}/health",
+                timeout=httpx.Timeout(3.0),
+            )
+            return resp.status_code == 200
+        except Exception:
+            return False
 
     # ------------------------------------------------------------------
     # Runner selection
@@ -422,8 +470,8 @@ class RunnerClient:
                     )
                     logger.info(f"Acquired server {handle.server_id} from {endpoint}")
                     self._record_acquire_success(endpoint)
-                    # Track active server for cleanup if runner goes down
                     self._active_servers_by_endpoint.setdefault(endpoint, set()).add(data["server_id"])
+                    self._active_handles.add(handle)
                     self._schedule_refresh()
                     return handle
 
@@ -460,6 +508,7 @@ class RunnerClient:
             )
             resp.raise_for_status()
             logger.info(f"Released server {handle.server_id}")
+            self._active_handles.discard(handle)
         except Exception as e:
             logger.error(f"Failed to release server {handle.server_id}: {e}")
             raise
@@ -529,6 +578,73 @@ class RunnerClient:
             finally:
                 self._refresh_task = None
         self._refresh_task = asyncio.create_task(_do_refresh())
+
+    # ------------------------------------------------------------------
+    # Slot availability
+    # ------------------------------------------------------------------
+
+    async def check_slot_availability(self, model_id: str) -> bool:
+        """Check if a request for *model_id* can proceed without hitting 503.
+
+        Returns ``True`` if an existing server has free slots, or if
+        sufficient VRAM exists on a runner to start a new server.
+        Returns ``True`` on any check failure (fail-open).
+        """
+        _slots_timeout = httpx.Timeout(3.0)
+        client = self._get_client()
+
+        # Case 1: Check active handles for free slots
+        for handle in self._active_handles:
+            try:
+                resp = await client.get(
+                    f"{handle.base_url}/slots",
+                    timeout=_slots_timeout,
+                )
+                if resp.status_code == 200:
+                    slots = resp.json()
+                    if slots and any(
+                        not s.get("is_processing", False) for s in slots
+                    ):
+                        return True
+            except Exception:
+                continue
+
+        # Case 2: No active server with free slots — check if a new one
+        # can be started (VRAM vs model size)
+        endpoints = self._model_map.get(model_id, list(self._endpoints))
+        for endpoint in endpoints:
+            try:
+                health_resp = await client.get(
+                    f"{endpoint}/health",
+                    timeout=_HEALTH_TIMEOUT,
+                )
+                if health_resp.status_code != 200:
+                    continue
+                health = health_resp.json()
+                gpu_info = health.get("gpu", {})
+                # Sum free_mb across all GPUs, convert to bytes
+                available_vram = sum(
+                    v.get("free_mb", 0)
+                    for v in gpu_info.values()
+                    if isinstance(v, dict)
+                ) * 1024 * 1024
+
+                model_resp = await client.get(
+                    f"{endpoint}/v1/models/{model_id}",
+                    timeout=_FAST_TIMEOUT,
+                )
+                if model_resp.status_code != 200:
+                    continue
+                model_data = model_resp.json()
+                model_size = model_data.get("details", {}).get("size", 0) or 0
+                # 128 MB overhead for context, KV cache, etc.
+                required = model_size + (128 * 1024 * 1024)
+                if available_vram >= required:
+                    return True
+            except Exception:
+                continue
+
+        return False
 
     # ------------------------------------------------------------------
     # Model discovery

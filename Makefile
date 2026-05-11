@@ -55,7 +55,7 @@ clean:
 # Docker — multi-arch build and push
 # Buildx --push doesn't support insecure registries, so we build each arch
 # with --load, push with docker push, then create a manifest list.
-.PHONY: docker-build docker-push
+.PHONY: docker-build docker-push test
 
 docker-build:
 	@echo "Building amd64 image..."

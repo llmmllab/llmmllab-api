@@ -13,6 +13,7 @@ from langchain.chat_models import BaseChatModel
 from langchain.embeddings import Embeddings
 from pydantic import BaseModel
 
+import config
 from constants import (
     AGENT_NODE_NAME,
     MEMORY_CREATE_NODE_NAME,
@@ -76,30 +77,63 @@ class DialogGraphBuilder(GraphBuilder):
         self,
         user_id: str,
         response_format: Optional[Type[BaseModel]] = None,
+        model_name: Optional[str] = None,
         **kwargs,
     ) -> CompiledStateGraph:
         """
-        Build a workflow of the specified type.
+        Build a dialog workflow.
 
-        Simple delegation to workflow factory with error handling.
+        When *model_name* is provided (typically resolved at the router / service
+        layer), the builder looks up that specific model on the runners.  When
+        it is ``None``, the builder falls back to the first available
+        ``TEXTTOTEXT`` model — this is the same default path the router uses
+        when the client sends ``"model": "default"``.
 
         Args:
-            workflow_type: Type of workflow to build
             user_id: User identifier
-            use_cache: Whether to use caching
+            response_format: Optional response format constraint
+            model_name: Resolved model name (from router or service layer).
+                When ``None``, falls back to the default ``TEXTTOTEXT`` model.
             **kwargs: Additional workflow parameters
 
         Returns:
             Compiled workflow ready for execution
         """
         try:
-            primary_model_def = await runner_client.model_by_task(ModelTask.TEXTTOTEXT)
+            # Resolve the primary model: prefer an explicit model_name (already
+            # resolved at the router/service layer), fall back to the default
+            # TEXTTOTEXT model when none was specified.
+            if model_name:
+                all_models = await runner_client.list_models()
+                primary_model_def = next(
+                    (
+                        m
+                        for m in all_models
+                        if m.name == model_name or m.id == model_name
+                    ),
+                    None,
+                )
+                if not primary_model_def:
+                    # Requested model not on any runner — fall back to user's default
+                    model_name = await self.resolve_model(model_name, user_id)
+                    primary_model_def = next(
+                        (
+                            m
+                            for m in all_models
+                            if m.name == model_name or m.id == model_name
+                        ),
+                        None,
+                    )
+                    if not primary_model_def:
+                        raise RuntimeError(f"Model '{model_name}' not found")
+            else:
+                primary_model_def = await runner_client.model_by_task(ModelTask.TEXTTOTEXT)
+                if not primary_model_def:
+                    raise RuntimeError("No TextToText model available")
+
             embedding_model_def = await runner_client.model_by_task(
                 ModelTask.TEXTTOEMBEDDINGS
             )
-
-            if not primary_model_def:
-                raise RuntimeError("No TextToText model available")
             if not embedding_model_def:
                 raise RuntimeError("No TextToEmbeddings model available")
 
@@ -117,7 +151,7 @@ class DialogGraphBuilder(GraphBuilder):
                 api_key=SecretStr("none"),
                 model=primary_model_def.name,
                 stream_usage=True,
-                max_retries=0,
+                max_retries=config.CHAT_OPENAI_MAX_RETRIES,  # retry transient 503 (slots busy) errors
             )
             embedding_model = OpenAIEmbeddings(
                 base_url=embedding_handle.base_url,

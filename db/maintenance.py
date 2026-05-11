@@ -86,11 +86,23 @@ class DatabaseMaintenanceService:
         return success
 
     async def _run_vacuum_analyze(self) -> None:
-        """Run VACUUM ANALYZE on a raw connection (no transaction)."""
+        """Run VACUUM ANALYZE on a raw connection in autocommit mode.
+
+        PostgreSQL's VACUUM cannot execute inside a transaction block.
+        SQLAlchemy's async engine wraps connections in an implicit
+        transaction by default, so we must set isolation_level=AUTOCOMMIT
+        to disable the transaction wrapper.
+
+        Note: execution_options() returns a NEW connection object with the
+        modified options — we must use that returned object, not the original.
+        """
         logger.info("Running VACUUM ANALYZE...")
         try:
             async with self.engine.connect() as conn:
-                await conn.execute(text("VACUUM ANALYZE"))
+                autocommit_conn = await conn.execution_options(
+                    isolation_level="AUTOCOMMIT"
+                )
+                await autocommit_conn.execute(text("VACUUM ANALYZE"))
             logger.info("VACUUM ANALYZE completed successfully")
         except Exception as e:
             logger.error(f"Failed to run VACUUM ANALYZE: {str(e)}")
@@ -134,21 +146,27 @@ class DatabaseMaintenanceService:
             return False
 
     async def _run_reindex(self) -> bool:
-        """Run REINDEX using a dedicated session."""
+        """Run REINDEX on a raw connection (no transaction).
+
+        REINDEX CONCURRENTLY cannot run inside a transaction block,
+        so we use a raw engine connection in autocommit mode — same
+        pattern as _run_vacuum_analyze().
+        """
         logger.info(
             "Running REINDEX on database (DB_REINDEX_ON_MAINTENANCE=true)..."
         )
         try:
-            async with self.session_factory() as session:
-                db_name_row = await session.execute(
-                    text("SELECT current_database() as db_name")
+            async with self.engine.connect() as conn:
+                autocommit_conn = await conn.execution_options(
+                    isolation_level="AUTOCOMMIT"
                 )
-                db_name = db_name_row.mappings()["db_name"]  # type: ignore[index]
+                db_name = (await autocommit_conn.execute(
+                    text("SELECT current_database()")
+                )).scalar()
 
-                await session.execute(
+                await autocommit_conn.execute(
                     text(f"REINDEX (VERBOSE, CONCURRENTLY) DATABASE {db_name}")
                 )
-                await session.commit()
             logger.info(f"REINDEX completed successfully on database '{db_name}'")
 
             # Flush statement caches across pool connections
@@ -305,21 +323,25 @@ class DatabaseMaintenanceService:
             return False
 
     async def _flush_pool_caches(self) -> None:
-        """Cycle through session connections and clear prepared statements/schema cache.
+        """Dispose and recreate the connection pool after REINDEX.
 
-        This prevents errors like 'could not open relation with OID ...' after REINDEX or DDL.
+        REINDEX assigns new OIDs to indexes, so any connection with cached
+        prepared statements referencing the old OID will fail with
+        'could not open relation with OID' until the connection is reset.
+
+        Flushing individual connections with DISCARD ALL is unreliable because
+        connections in active use won't be flushed. Disposing the entire pool
+        guarantees all connections are recreated fresh, at the cost of a brief
+        moment where new connections must be established.
         """
         if not self.engine:
             return
 
         try:
-            # Use DISCARD ALL on raw connections from the underlying pool
-            async with self.engine.connect() as conn:
-                await conn.execute(text("DISCARD ALL;"))
-                await conn.commit()
-        except Exception:
-            # Some connections may not have any statements; ignore
-            pass
+            await self.engine.dispose()
+            logger.info("Connection pool disposed after REINDEX (stale OID prevention)")
+        except Exception as e:
+            logger.warning(f"Failed to dispose pool after REINDEX: {e}")
 
 
 # Create singleton instance
