@@ -141,7 +141,7 @@ Copy `.env.example` to `.env` and set the required values. See `config.py` for d
 - `services/` — Business logic (completion, token, tool)
 - `runner/` — Model execution pipelines
 - `composer_init.py` — Workflow orchestration API
-- `agents/` — Agent implementations
+- `agents/` — Agent implementations (see [agents/README.md](agents/README.md))
 - `core/` — Core composer components
 - `graph/` — LangGraph workflow builder, nodes, state
 - `tools/` — Tool registry and static tools
