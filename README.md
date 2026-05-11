@@ -133,6 +133,7 @@ Copy `.env.example` to `.env` and set the required values. See `config.py` for d
 | `HF_TOKEN` | HuggingFace token for model downloads |
 | `SEARX_HOST` | SearXNG instance URL for web search |
 | `CUDA_VISIBLE_DEVICES` | GPU devices for inference |
+| `STALE_SERVER_RETRIES` | Retries on stale server handle (default: 1, set 0 to disable) |
 
 ## Project Structure
 
