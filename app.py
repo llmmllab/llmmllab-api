@@ -154,15 +154,40 @@ async def lifespan(_: FastAPI):
             priority_queue,
         )  # pylint: disable=import-outside-toplevel
 
+        _active_sessions: set[str] = set()
+
         async def _can_proceed(metadata):
             if not metadata.model_id:
                 return True
+            # Serialize scheduled/system requests per model to prevent
+            # multiple cron jobs from competing for the same server.
+            try:
+                from models.request_priority_metadata import (  # pylint: disable=import-outside-toplevel
+                    RequestSource,
+                )
+            except Exception:
+                RequestSource = None
+            if (
+                RequestSource
+                and metadata.source in (RequestSource.SCHEDULED, RequestSource.SYSTEM)
+                and metadata.model_id in _active_sessions
+            ):
+                return False
             try:
                 return await _runner_client.check_slot_availability(metadata.model_id)
             except Exception:
                 return True  # Never block on check failure
 
+        def _on_release(metadata):
+            if metadata.model_id:
+                _active_sessions.add(metadata.model_id)
+
+        def _on_complete(metadata):
+            if metadata.model_id:
+                _active_sessions.discard(metadata.model_id)
+
         priority_queue.set_can_proceed_callback(_can_proceed)
+        priority_queue.set_session_callbacks(_on_release, _on_complete)
         logger.info("Resource-aware priority queue callback wired up")
     except Exception as e:
         logger.warning(f"Failed to wire up queue resource callback: {e}")

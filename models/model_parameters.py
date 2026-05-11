@@ -174,5 +174,15 @@ class ModelParameters(BaseModel):
         ),
     ] = None
     """Number of parallel request slots (llama.cpp --parallel). Defaults to 1 for large context models."""
+    ctx_size_reduction_limit: Annotated[
+        Optional[float],
+        Field(
+            default=0.5,
+            description="Minimum fraction of num_ctx that llama.cpp --fit is allowed to auto-reduce to (0.0-1.0). Default 0.5 means context can shrink to 50% of requested.",
+            ge=0.0,
+            le=1.0,
+        ),
+    ] = 0.5
+    """Minimum fraction of num_ctx that llama.cpp --fit is allowed to auto-reduce to (0.0-1.0). Default 0.5 means context can shrink to 50% of requested."""
 
     model_config = ConfigDict(extra="ignore")

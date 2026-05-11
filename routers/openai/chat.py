@@ -4,12 +4,13 @@ import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Literal, TypeAlias, Union
+from wsgiref import headers
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from middleware.auth import get_user_id
-from models.request_priority_metadata import Priority
+from models.request_priority_metadata import Priority, RequestSource
 from services import CompletionService, model_service
 from graph.state import ServerToolEvent
 from models.openai.chat_completion_deleted import ChatCompletionDeleted
@@ -336,6 +337,8 @@ async def stream_chat_completion(
     tool_choice: str | None = None,
     priority: Priority | None = None,
     max_queue_wait: float | None = None,
+    source: RequestSource | None = None,
+    session_id: str | None = None,
 ) -> AsyncIterator[str]:
     """Stream composer events as OpenAI SSE chat completion chunks.
 
@@ -378,6 +381,8 @@ async def stream_chat_completion(
             tool_choice=tool_choice,
             priority=priority,
             max_queue_wait=max_queue_wait,
+            source=source,
+            session_id=session_id,
         ):
             # Skip ServerToolEvents for OpenAI-compatible clients
 
@@ -548,6 +553,11 @@ async def createChatCompletion(
     if not user_id:
         raise HTTPException(status_code=401, detail="User ID not found in request")
 
+    logger.debug(
+        "Headers received in createChatCompletion",
+        extra={"headers": dict(request.headers)},
+    )
+
     internal_messages = messages_from_openai(body.messages)
 
     # Resolve model: fall back to user's default_model if unavailable
@@ -583,6 +593,10 @@ async def createChatCompletion(
     max_queue_wait = (
         getattr(_priority_meta, "max_queue_wait", None) if _priority_meta else None
     )
+    req_source = getattr(_priority_meta, "source", None) if _priority_meta else None
+    req_session_id = (
+        getattr(_priority_meta, "session_id", None) if _priority_meta else None
+    )
 
     if body.stream:
         # Only pass tool kwargs when they have actual values to avoid
@@ -600,6 +614,8 @@ async def createChatCompletion(
                 body.model,
                 priority=priority,
                 max_queue_wait=max_queue_wait,
+                source=req_source,
+                session_id=req_session_id,
                 **stream_kwargs,
             ),
             media_type="text/event-stream",
@@ -620,6 +636,8 @@ async def createChatCompletion(
             tool_choice=tool_choice,
             priority=priority,
             max_queue_wait=max_queue_wait,
+            source=req_source,
+            session_id=req_session_id,
         )
     except Exception as e:
         error_msg = str(e).lower()
@@ -636,9 +654,14 @@ async def createChatCompletion(
     if result.chat_response is None or (
         not result.has_content and not result.has_tool_calls
     ):
+        if getattr(result, "context_overflow", False):
+            raise HTTPException(
+                status_code=507,
+                detail="Context window exceeded. Please reduce conversation length or use a model with larger context.",
+            )
         raise HTTPException(
             status_code=503,
-            detail="Model returned empty response after all retries. Context may be too large.",
+            detail="Model returned an empty response.",
         )
     return openai_response_from_chat_response(result.chat_response, model=body.model)
 

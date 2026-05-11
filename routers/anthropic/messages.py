@@ -10,7 +10,7 @@ from pydantic import ValidationError
 import regex
 
 from middleware.auth import get_user_id
-from models.request_priority_metadata import Priority
+from models.request_priority_metadata import Priority, RequestSource
 from services import (
     CompletionService,
     StreamAccumulator,
@@ -309,6 +309,8 @@ async def stream_message(
     tool_choice: str | None = None,
     priority: Priority | None = None,
     max_queue_wait: float | None = None,
+    source: RequestSource | None = None,
+    session_id: str | None = None,
 ) -> AsyncIterator[str]:
     """Stream composer events as Anthropic SSE message chunks.
 
@@ -380,6 +382,8 @@ async def stream_message(
             server_tool_names=server_tool_names or None,
             priority=priority,
             max_queue_wait=max_queue_wait,
+            source=source,
+            session_id=session_id,
         ):
             # ---- ServerToolEvent → emit as standard text content blocks ----
             if isinstance(event, ServerToolEvent):
@@ -619,6 +623,12 @@ async def createMessage(
         max_queue_wait = (
             getattr(_priority_meta, "max_queue_wait", None) if _priority_meta else None
         )
+        req_source = (
+            getattr(_priority_meta, "source", None) if _priority_meta else None
+        )
+        req_session_id = (
+            getattr(_priority_meta, "session_id", None) if _priority_meta else None
+        )
 
         # Resolve model: fall back to user's default_model if unavailable
         resolved_model = await model_service.resolve_default_model(body.model, user_id)
@@ -662,6 +672,8 @@ async def createMessage(
                     tool_choice=tool_choice,
                     priority=priority,
                     max_queue_wait=max_queue_wait,
+                    source=req_source,
+                    session_id=req_session_id,
                 ),
                 media_type="text/event-stream",
                 headers={
@@ -683,6 +695,8 @@ async def createMessage(
                 server_tool_names=prepared.server_tool_names or None,
                 priority=priority,
                 max_queue_wait=max_queue_wait,
+                source=req_source,
+                session_id=req_session_id,
             )
         except Exception as e:
             error_msg = str(e).lower()
@@ -699,10 +713,15 @@ async def createMessage(
         if result.chat_response is None or (
             not result.has_content and not result.has_tool_calls
         ):
-            raise HTTPException(
-                status_code=503,
-                detail="Model returned empty response after all retries. Context may be too large.",
+            if getattr(result, "context_overflow", False):
+                raise HTTPException(
+                status_code=507,
+                detail="Context window exceeded. Please reduce conversation length or use a model with larger context.",
             )
+        raise HTTPException(
+            status_code=503,
+            detail="Model returned an empty response.",
+        )
 
         stop_reason_map: dict[str | None, str] = {
             "stop": "end_turn",

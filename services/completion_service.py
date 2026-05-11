@@ -183,6 +183,7 @@ class CompletionResult:
 
     chat_response: Optional[ChatResponse] = None
     output_tokens: int = 0
+    context_overflow: bool = False
 
     @property
     def has_content(self) -> bool:
@@ -222,6 +223,7 @@ class StreamAccumulator:
     final_content: str = ""
     output_tokens: int = 0
     input_tokens: int = 0
+    context_overflow: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -417,6 +419,8 @@ class CompletionService:
         server_tool_names: set[str] | None = None,
         priority: Priority | None = None,
         max_queue_wait: float | None = None,
+        source: RequestSource | None = None,
+        session_id: str | None = None,
     ) -> AsyncIterator[tuple[Union[ChatResponse, ServerToolEvent], StreamAccumulator]]:
         """Execute a workflow and yield ``(event, accumulator)`` pairs.
 
@@ -438,11 +442,12 @@ class CompletionService:
         _queue_ctx = None
         if PRIORITY_QUEUE_ENABLED:
             _meta = RequestPriorityMetadata(
-                source=RequestSource.USER,
+                source=source or RequestSource.USER,
                 priority=_effective_priority,
                 user_id=user_id,
                 model_id=model_name,
                 max_queue_wait=max_queue_wait,
+                session_id=session_id,
             )
             _queue_ctx = await priority_queue.enqueue(_meta)
         try:
@@ -649,6 +654,7 @@ class CompletionService:
                     acc.output_tokens,
                     model_num_ctx=_model_num_ctx,
                 ):
+                    acc.context_overflow = True
                     logger.warning(
                         "Skipping retry — context likely exceeds model window",
                         extra={
@@ -778,6 +784,8 @@ class CompletionService:
         server_tool_names: set[str] | None = None,
         priority: Priority | None = None,
         max_queue_wait: float | None = None,
+        source: RequestSource | None = None,
+        session_id: str | None = None,
     ) -> CompletionResult:
         """Execute a workflow and return the final accumulated result.
 
@@ -794,11 +802,12 @@ class CompletionService:
         _queue_ctx = None
         if PRIORITY_QUEUE_ENABLED:
             _meta = RequestPriorityMetadata(
-                source=RequestSource.USER,
+                source=source or RequestSource.USER,
                 priority=_effective_priority,
                 user_id=user_id,
                 model_id=model_name,
                 max_queue_wait=max_queue_wait,
+                session_id=session_id,
             )
             _queue_ctx = await priority_queue.enqueue(_meta)
 
@@ -1006,6 +1015,7 @@ class CompletionService:
                     _primary_output_tokens,
                     model_num_ctx=_model_num_ctx,
                 ):
+                    result.context_overflow = True
                     logger.warning(
                         "Non-streaming: skipping retry — context likely exceeds model window",
                         extra={

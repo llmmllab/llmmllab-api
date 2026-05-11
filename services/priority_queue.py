@@ -6,7 +6,7 @@ import asyncio
 import time
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional, Union
 
 from models.request_priority_metadata import Priority, RequestPriorityMetadata
 from services.queue_exceptions import QueueFullError, QueueTimeoutError
@@ -105,6 +105,12 @@ class AsyncPriorityQueue:
         max_size: int = 100,
         timeout_sec: float = 300,
         age_threshold_sec: float = 60,
+        on_release: Optional[
+            Callable[[RequestPriorityMetadata], Any]
+        ] = None,
+        on_complete: Optional[
+            Callable[[RequestPriorityMetadata], Any]
+        ] = None,
     ) -> None:
         self._max_size = max_size
         self._timeout_sec = timeout_sec
@@ -118,6 +124,17 @@ class AsyncPriorityQueue:
         ] = None
         self._recheck_task: Optional[asyncio.Task] = None
         self._recheck_interval = 5.0
+        self._on_release = on_release
+        self._on_complete = on_complete
+
+    def set_session_callbacks(
+        self,
+        on_release: Optional[Callable[[RequestPriorityMetadata], Any]],
+        on_complete: Optional[Callable[[RequestPriorityMetadata], Any]],
+    ) -> None:
+        """Set or clear session lifecycle callbacks."""
+        self._on_release = on_release
+        self._on_complete = on_complete
 
     async def enqueue(
         self,
@@ -213,6 +230,7 @@ class AsyncPriorityQueue:
         by the ``_can_proceed`` callback). Items that can't proceed stay
         blocked in the queue.
         """
+        released_meta: Optional[RequestPriorityMetadata] = None
         async with self._lock:
             if not self._queue:
                 return None
@@ -238,6 +256,7 @@ class AsyncPriorityQueue:
             # No callback — release next item unconditionally (original behavior)
             if self._can_proceed is None:
                 self._queue[0].event.set()
+                released_meta = self._queue[0].metadata
                 return item.metadata
 
             # Collect metadata for all pending items to check outside lock
@@ -255,10 +274,30 @@ class AsyncPriorityQueue:
                         and self._queue[idx].metadata is metadata
                         and not self._queue[idx].event.is_set()
                     ):
+                        # Priority preemption: don't release LOW if HIGH waits
+                        if self._has_higher_priority_waiting(idx):
+                            break
                         self._queue[idx].event.set()
+                        released_meta = metadata
                 break
 
+        if self._on_release and released_meta is not None:
+            self._on_release(released_meta)
+        if self._on_complete:
+            self._on_complete(item.metadata)
         return item.metadata
+
+    def _has_higher_priority_waiting(self, released_idx: int) -> bool:
+        """Check if any higher-priority item waits behind the released item.
+
+        Must be called while holding self._lock.
+        """
+        released_priority = self._queue[released_idx].metadata.priority
+        if released_priority == Priority.LOW:
+            for i in range(released_idx + 1, len(self._queue)):
+                if self._queue[i].metadata.priority == Priority.HIGH:
+                    return True
+        return False
 
     async def _remove_item(self, item: _QueueItem) -> None:
         """Remove a specific item (e.g., on timeout)."""
@@ -280,6 +319,8 @@ class AsyncPriorityQueue:
             # No callback — release unconditionally
             if self._can_proceed is None:
                 self._queue[0].event.set()
+                if self._on_release:
+                    self._on_release(self._queue[0].metadata)
                 return
 
             # Collect pending items to check outside lock
@@ -296,7 +337,10 @@ class AsyncPriorityQueue:
                         and self._queue[idx].metadata is metadata
                         and not self._queue[idx].event.is_set()
                     ):
-                        self._queue[idx].event.set()
+                        if not self._has_higher_priority_waiting(idx):
+                            self._queue[idx].event.set()
+                            if self._on_release:
+                                self._on_release(metadata)
                 break
 
     async def _age_item(
@@ -356,6 +400,8 @@ class AsyncPriorityQueue:
                             and not self._queue[idx].event.is_set()
                         ):
                             self._queue[idx].event.set()
+                            if self._on_release:
+                                self._on_release(metadata)
                     break
 
     def _update_gauges(self) -> None:
