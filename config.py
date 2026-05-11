@@ -107,6 +107,8 @@ PRIORITY_QUEUE_MAX_WAIT_MAX_SEC = int(
 # ── Completion / Retry ─────────────────────────────────────────────────
 RUNNER_RETRIES = int(os.environ.get("RUNNER_RETRIES", "2"))
 RUNNER_RETRY_BACKOFF_BASE = int(os.environ.get("RUNNER_RETRY_BACKOFF_BASE", "1"))
-# Number of retries when a stale server handle is detected (default 1).
-STALE_SERVER_RETRIES = int(os.environ.get("STALE_SERVER_RETRIES", "1"))
+# Stale server recovery retry count.
+# When a llama.cpp server handle is evicted by the runner, the service
+# releases the stale handle, refreshes the model map, and retries the
+# workflow with a fresh server. Set to 0 to disable retries entirely.
 STALE_SERVER_RETRIES = int(os.environ.get("STALE_SERVER_RETRIES", "1"))
