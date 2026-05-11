@@ -1,5 +1,6 @@
 """
-Unit tests for agents/base.py — retry logic for transient API errors.
+Unit tests for agents/base.py — retry logic for transient API errors and
+context-size-exceeded recovery.
 
 The retry block in BaseAgent.run() catches:
 - openai.APIConnectionError (connection drops)
@@ -7,7 +8,10 @@ The retry block in BaseAgent.run() catches:
 
 and retries up to 10 times (11 total attempts) with exponential backoff capped at 60 s.
 
-Non-transient errors (e.g. ValueError, 400 Bad Request) propagate immediately.
+On exceed_context_size_error (400), the agent truncates the oldest messages
+and retries — up to 3 truncation attempts.
+
+Non-transient errors (e.g. ValueError, other 400s) propagate immediately.
 """
 
 import pytest
@@ -357,3 +361,118 @@ class TestAgentRunStructured:
         assert isinstance(result, Greeting)
         assert result.name == "World"
         assert call_count[0] == 2
+
+
+# ── Context size exceeded (exceed_context_size_error) ────────────────────
+
+def _make_context_size_error():
+    """Create a 400 error that mimics exceed_context_size_error."""
+    resp = MagicMock()
+    resp.status_code = 400
+    resp.headers = {}
+    body = {
+        "error": {
+            "code": 400,
+            "message": "request (27495 tokens) exceeds the available context size (25088 tokens), try increasing it",
+            "type": "exceed_context_size_error",
+            "n_prompt_tokens": 27495,
+            "n_ctx": 25088,
+        }
+    }
+    return APIStatusError("context exceeded", response=resp, body=body)
+
+
+class TestAgentContextSizeExceeded:
+    """When the LLM rejects a request for exceeding context size,
+    the agent should truncate oldest messages and retry."""
+
+    @pytest.mark.asyncio
+    async def test_truncates_and_retries_on_context_size_error(self):
+        """A single truncation should allow the request to succeed."""
+        agent = _make_base_agent()
+        call_count = [0]
+
+        async def flaky_ainvoke(*a, **kw):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise _make_context_size_error()
+            return MagicMock(content="OK after truncation", role="ai")
+
+        mock_lc_agent = AsyncMock()
+        mock_lc_agent.ainvoke = flaky_ainvoke
+        agent._get_or_create_agent = AsyncMock(return_value=mock_lc_agent)
+
+        response = await agent.run("Hi there")
+
+        assert response.done is True
+        assert call_count[0] == 2
+
+    @pytest.mark.asyncio
+    async def test_truncation_logs_warning(self, caplog):
+        agent = _make_base_agent()
+        call_count = [0]
+
+        async def flaky_ainvoke(*a, **kw):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise _make_context_size_error()
+            return MagicMock(content="OK", role="ai")
+
+        mock_lc_agent = AsyncMock()
+        mock_lc_agent.ainvoke = flaky_ainvoke
+        agent._get_or_create_agent = AsyncMock(return_value=mock_lc_agent)
+
+        await agent.run("Hi there")
+
+        warning_messages = [r.msg for r in caplog.records if r.levelname == "WARNING"]
+        assert any("Context size exceeded" in str(m) for m in warning_messages)
+
+    @pytest.mark.asyncio
+    async def test_multiple_truncations(self):
+        """Should retry with truncation up to 3 times."""
+        agent = _make_base_agent()
+        call_count = [0]
+
+        async def flaky_ainvoke(*a, **kw):
+            call_count[0] += 1
+            if call_count[0] <= 3:
+                raise _make_context_size_error()
+            return MagicMock(content="OK after 3 truncations", role="ai")
+
+        mock_lc_agent = AsyncMock()
+        mock_lc_agent.ainvoke = flaky_ainvoke
+        agent._get_or_create_agent = AsyncMock(return_value=mock_lc_agent)
+
+        response = await agent.run("Hi there")
+
+        assert response.done is True
+        assert call_count[0] == 4
+
+    @pytest.mark.asyncio
+    async def test_truncation_exhaustion_propagates(self):
+        """After 3 truncation attempts, the error should propagate."""
+        agent = _make_base_agent()
+        mock_lc_agent = AsyncMock()
+        mock_lc_agent.ainvoke.side_effect = _make_context_size_error()
+        agent._get_or_create_agent = AsyncMock(return_value=mock_lc_agent)
+
+        response = await agent.run("Hi there")
+
+        # After 3 truncations, the error propagates to the outer handler
+        assert response.done is True
+        text = response.message.content[0].text
+        assert "context" in text.lower()
+
+    @pytest.mark.asyncio
+    async def test_other_400_not_truncated(self):
+        """A 400 error that is NOT exceed_context_size_error should not trigger truncation."""
+        agent = _make_base_agent()
+        mock_lc_agent = AsyncMock()
+        mock_lc_agent.ainvoke.side_effect = _make_api_status_error(400, "Some other error")
+        agent._get_or_create_agent = AsyncMock(return_value=mock_lc_agent)
+
+        response = await agent.run("Hi there")
+
+        assert response.done is True
+        # Should not retry — only 1 call
+        assert mock_lc_agent.ainvoke.call_count == 1

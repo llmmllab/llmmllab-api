@@ -35,6 +35,7 @@ from utils.message_conversion import (
     MessageInput,
     extract_text_from_message,
 )
+from utils.token_estimation import estimate_tokens
 from utils.grammar_generator import parse_structured_output
 
 # Get the 'asyncio' logger
@@ -361,16 +362,48 @@ The current date is {current_date}."""
             normalized_messages = messages_to_lc_messages(convo)
             self.logger.debug(f"Running agent with {len(normalized_messages)} messages")
 
+            # Proactively trim messages if estimated token count exceeds context window.
+            # This prevents wasteful 400 exceed_context_size_error responses from the LLM.
+            _OUTPUT_TOKEN_RESERVE = 4096  # tokens reserved for model output
+            _TRIM_SAFETY_FACTOR = 1.15   # over-estimate by 15% to account for estimation error
+            if self.num_ctx is not None:
+                system_tokens = estimate_tokens(system_prompt)
+                messages_tokens = sum(
+                    estimate_tokens(extract_text_from_message(m)) + 15
+                    for m in convo
+                )
+                estimated_total = int((system_tokens + messages_tokens) * _TRIM_SAFETY_FACTOR)
+                max_input_tokens = self.num_ctx - _OUTPUT_TOKEN_RESERVE
+
+                if estimated_total > max_input_tokens and len(convo) > 1:
+                    # Trim oldest messages until we fit, keeping at least the last message
+                    while estimated_total > max_input_tokens and len(convo) > 1:
+                        removed = convo.pop(0)
+                        removed_tokens = int(
+                            (estimate_tokens(extract_text_from_message(removed)) + 15)
+                            * _TRIM_SAFETY_FACTOR
+                        )
+                        estimated_total -= removed_tokens
+                    normalized_messages = messages_to_lc_messages(convo)
+                    self.logger.info(
+                        f"Proactively trimmed conversation to fit context window: "
+                        f"estimated {estimated_total} tokens / {max_input_tokens} max input "
+                        f"(num_ctx={self.num_ctx}, messages={len(convo)})"
+                    )
+
             # Retry transient errors (connection errors + 5xx status errors like 503)
             # up to 10 times with exponential backoff.
             # Early retries use short delays (2s, 4s, 8s); later retries
             # use longer delays (16s, 32s, 60s, 60s, 60s, 60s) to allow
             # time for the runner/API to recover.
+            # On exceed_context_size_error (400), truncate oldest messages
+            # and retry — up to 3 truncation attempts.
             # Non-transient errors propagate immediately.
             from openai import APIConnectionError as _APIConnectionError
             from openai import APIStatusError as _APIStatusError
 
             _TRANSIENT_STATUS_CODES = frozenset({502, 503, 504})
+            _MAX_TRUNCATION_ATTEMPTS = 3
 
             def _is_transient_error(e: Exception) -> bool:
                 if isinstance(e, _APIConnectionError):
@@ -379,13 +412,37 @@ The current date is {current_date}."""
                     return True
                 return False
 
+            def _is_context_size_error(e: Exception) -> bool:
+                """Check if error is an exceed_context_size_error (400)."""
+                if isinstance(e, _APIStatusError) and e.status_code == 400:
+                    body = str(e.body) if hasattr(e, "body") and e.body else ""
+                    if not body:
+                        body = str(e)
+                    return "exceed_context_size_error" in body
+                return False
+
             last_error = None
             max_attempts = 11
+            truncation_attempts = 0
             for attempt in range(max_attempts):
                 try:
                     result = await agent.ainvoke({"messages": normalized_messages})  # type: ignore
                     break
                 except Exception as e:
+                    # Context size exceeded: truncate oldest messages and retry
+                    if _is_context_size_error(e) and truncation_attempts < _MAX_TRUNCATION_ATTEMPTS:
+                        truncation_attempts += 1
+                        # Remove oldest messages (up to 25% of convo, min 2)
+                        remove_count = max(2, len(convo) // 4)
+                        self.logger.warning(
+                            f"Context size exceeded, truncating {remove_count} oldest messages "
+                            f"(truncation attempt {truncation_attempts}/{_MAX_TRUNCATION_ATTEMPTS})",
+                            extra={"error": str(e)},
+                        )
+                        convo = convo[remove_count:]
+                        normalized_messages = messages_to_lc_messages(convo)
+                        continue
+
                     if not _is_transient_error(e):
                         raise
                     last_error = e
@@ -507,12 +564,42 @@ The current date is {current_date}."""
             normalized_messages = messages_to_lc_messages(convo)
             self.logger.debug(f"Running agent with {len(normalized_messages)} messages")
 
+            # Proactively trim messages if estimated token count exceeds context window.
+            _OUTPUT_TOKEN_RESERVE = 4096
+            _TRIM_SAFETY_FACTOR = 1.15
+            if self.num_ctx is not None:
+                system_tokens = estimate_tokens(system_prompt)
+                messages_tokens = sum(
+                    estimate_tokens(extract_text_from_message(m)) + 15
+                    for m in convo
+                )
+                estimated_total = int((system_tokens + messages_tokens) * _TRIM_SAFETY_FACTOR)
+                max_input_tokens = self.num_ctx - _OUTPUT_TOKEN_RESERVE
+
+                if estimated_total > max_input_tokens and len(convo) > 1:
+                    while estimated_total > max_input_tokens and len(convo) > 1:
+                        removed = convo.pop(0)
+                        removed_tokens = int(
+                            (estimate_tokens(extract_text_from_message(removed)) + 15)
+                            * _TRIM_SAFETY_FACTOR
+                        )
+                        estimated_total -= removed_tokens
+                    normalized_messages = messages_to_lc_messages(convo)
+                    self.logger.info(
+                        f"Proactively trimmed conversation to fit context window: "
+                        f"estimated {estimated_total} tokens / {max_input_tokens} max input "
+                        f"(num_ctx={self.num_ctx}, messages={len(convo)})"
+                    )
+
             # Retry transient errors (connection errors + 5xx status errors like 503)
             # up to 10 times with exponential backoff.
+            # On exceed_context_size_error (400), truncate oldest messages
+            # and retry — up to 3 truncation attempts.
             from openai import APIConnectionError as _APIConnectionError
             from openai import APIStatusError as _APIStatusError
 
             _TRANSIENT_STATUS_CODES = frozenset({502, 503, 504})
+            _MAX_TRUNCATION_ATTEMPTS = 3
 
             def _is_transient_error(e: Exception) -> bool:
                 if isinstance(e, _APIConnectionError):
@@ -521,13 +608,36 @@ The current date is {current_date}."""
                     return True
                 return False
 
+            def _is_context_size_error(e: Exception) -> bool:
+                """Check if error is an exceed_context_size_error (400)."""
+                if isinstance(e, _APIStatusError) and e.status_code == 400:
+                    body = str(e.body) if hasattr(e, "body") and e.body else ""
+                    if not body:
+                        body = str(e)
+                    return "exceed_context_size_error" in body
+                return False
+
             last_error = None
             max_attempts = 11
+            truncation_attempts = 0
             for attempt in range(max_attempts):
                 try:
                     result = await agent.ainvoke({"messages": normalized_messages})  # type: ignore
                     break
                 except Exception as e:
+                    # Context size exceeded: truncate oldest messages and retry
+                    if _is_context_size_error(e) and truncation_attempts < _MAX_TRUNCATION_ATTEMPTS:
+                        truncation_attempts += 1
+                        remove_count = max(2, len(convo) // 4)
+                        self.logger.warning(
+                            f"Context size exceeded, truncating {remove_count} oldest messages "
+                            f"(truncation attempt {truncation_attempts}/{_MAX_TRUNCATION_ATTEMPTS})",
+                            extra={"error": str(e)},
+                        )
+                        convo = convo[remove_count:]
+                        normalized_messages = messages_to_lc_messages(convo)
+                        continue
+
                     if not _is_transient_error(e):
                         raise
                     last_error = e
