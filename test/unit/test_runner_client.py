@@ -506,6 +506,7 @@ class TestRunnerClientAcquireWithMap:
         assert handle.runner_host == "http://r2:8001"
 
 
+
 class TestRunnerClientCircuitBreaker:
     """Tests for circuit breaker behavior on acquire failures."""
 
@@ -709,3 +710,114 @@ class TestRunnerClientCircuitBreaker:
 
         assert "http://r1:8000" not in client._healthy
         assert client._is_circuit_open("http://r1:8000")
+
+
+class TestRunnerClientStaleDetection:
+    """Tests for _is_stale_server_error — the static helper that detects
+    evicted llama.cpp servers from HTTP 404 responses."""
+
+    def test_detects_stale_server_404(self):
+        """A 404 with 'server' and 'not found' in body is stale."""
+        resp = MagicMock()
+        resp.status_code = 404
+        resp.text = "Server abc123 not found"
+        assert RunnerClient._is_stale_server_error(resp) is True
+
+    def test_detects_stale_server_case_insensitive(self):
+        """Detection is case-insensitive."""
+        resp = MagicMock()
+        resp.status_code = 404
+        resp.text = "SERVER ABC123 NOT FOUND"
+        assert RunnerClient._is_stale_server_error(resp) is True
+
+    def test_non_404_is_not_stale(self):
+        """A 500 with 'server not found' text is NOT stale (wrong status)."""
+        resp = MagicMock()
+        resp.status_code = 500
+        resp.text = "Server abc123 not found"
+        assert RunnerClient._is_stale_server_error(resp) is False
+
+    def test_404_without_server_text_is_not_stale(self):
+        """A 404 without 'server' keyword is not stale."""
+        resp = MagicMock()
+        resp.status_code = 404
+        resp.text = "Resource not found"
+        assert RunnerClient._is_stale_server_error(resp) is False
+
+    def test_404_without_not_found_is_not_stale(self):
+        """A 404 with 'server' but no 'not found' is not stale."""
+        resp = MagicMock()
+        resp.status_code = 404
+        resp.text = "Server abc123 is busy"
+        assert RunnerClient._is_stale_server_error(resp) is False
+
+    def test_404_with_empty_body_is_not_stale(self):
+        """A 404 with an empty body is not stale."""
+        resp = MagicMock()
+        resp.status_code = 404
+        resp.text = ""
+        assert RunnerClient._is_stale_server_error(resp) is False
+
+    def test_404_with_json_body_containing_keywords(self):
+        """A 404 JSON response with the right keywords is stale."""
+        resp = MagicMock()
+        resp.status_code = 404
+        resp.text = '{"error": "server abc123 not found"}'
+        assert RunnerClient._is_stale_server_error(resp) is True
+
+
+class TestRunnerClientValidateServerHandle:
+    """Tests for validate_server_handle — checks if a server handle is alive."""
+
+    @pytest.mark.asyncio
+    async def test_valid_handle_returns_true(self):
+        """A handle whose /health returns 200 is valid."""
+        mock_health = MagicMock()
+        mock_health.status_code = 200
+        mock = _mock_client(get=AsyncMock(return_value=mock_health))
+
+        client = RunnerClient(endpoints=["http://runner1:8000"])
+        client._client = mock
+        handle = ServerHandle(
+            base_url="http://runner1:8000/v1/server/abc123",
+            server_id="abc123",
+            runner_host="http://runner1:8000",
+        )
+        result = await client.validate_server_handle(handle)
+        assert result is True
+        mock.get.assert_called_once_with(
+            "http://runner1:8000/v1/server/abc123/health",
+            timeout=httpx.Timeout(3.0),
+        )
+
+    @pytest.mark.asyncio
+    async def test_dead_handle_returns_false(self):
+        """A handle whose /health returns 404 is invalid."""
+        mock_health = MagicMock()
+        mock_health.status_code = 404
+        mock = _mock_client(get=AsyncMock(return_value=mock_health))
+
+        client = RunnerClient(endpoints=["http://runner1:8000"])
+        client._client = mock
+        handle = ServerHandle(
+            base_url="http://runner1:8000/v1/server/abc123",
+            server_id="abc123",
+            runner_host="http://runner1:8000",
+        )
+        result = await client.validate_server_handle(handle)
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_connection_error_returns_false(self):
+        """A handle whose /health raises an exception is invalid."""
+        mock = _mock_client(get=AsyncMock(side_effect=Exception("connection refused")))
+
+        client = RunnerClient(endpoints=["http://runner1:8000"])
+        client._client = mock
+        handle = ServerHandle(
+            base_url="http://runner1:8000/v1/server/abc123",
+            server_id="abc123",
+            runner_host="http://runner1:8000",
+        )
+        result = await client.validate_server_handle(handle)
+        assert result is False
