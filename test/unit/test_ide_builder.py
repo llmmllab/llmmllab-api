@@ -219,11 +219,12 @@ class TestIdeGraphBuilderModelResolution:
                 )
 
     @pytest.mark.asyncio
-    async def test_model_not_found_and_fallback_also_missing_raises(
+    async def test_model_not_found_and_fallback_also_missing_falls_back_to_texttotext(
         self, mock_storage, user_config
     ):
-        """When model and fallback are both missing, RuntimeError is raised."""
+        """When model and fallback are both missing, falls back to any available TextToText model."""
         other_model = _make_model("other-model", "other-model")
+        handle = _make_server_handle()
 
         with patch("graph.workflows.ide.builder.runner_client") as mock_rc:
             mock_rc.list_models = AsyncMock(return_value=[other_model])
