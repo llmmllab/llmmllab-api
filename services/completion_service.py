@@ -284,8 +284,12 @@ class CompletionService:
     ) -> AsyncIterator[Union[ChatResponse, ServerToolEvent]]:
         """Build a composer workflow and yield its events.
 
-        When a ``StaleServerError`` is raised (server handle was evicted),
-        automatically re-acquires a fresh server and retries (up to 1 retry).
+        When a ``StaleServerError`` is raised (server handle was evicted by
+        the runner), the stale handle is released, the model map is refreshed,
+        and the workflow is retried with a fresh server. The number of retries
+        is controlled by :data:`config.STALE_SERVER_RETRIES` (default: 1).
+
+        Non-stale errors propagate immediately without retry.
         """
         from graph.errors import StaleServerError
 

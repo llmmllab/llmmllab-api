@@ -84,5 +84,8 @@ RUNNER_ENDPOINTS = os.environ.get("RUNNER_ENDPOINTS", "http://localhost:9000").s
 
 MODEL_CACHE_REFRESH_SEC = int(os.environ.get("MODEL_CACHE_REFRESH_SEC", "60"))
 
-# Number of retries when a stale server handle is detected (default 1).
+# Stale server recovery retry count.
+# When a llama.cpp server handle is evicted by the runner, the service
+# releases the stale handle, refreshes the model map, and retries the
+# workflow with a fresh server. Set to 0 to disable retries entirely.
 STALE_SERVER_RETRIES = int(os.environ.get("STALE_SERVER_RETRIES", "1"))

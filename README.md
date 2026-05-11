@@ -46,6 +46,7 @@ Copy `.env.example` to `.env` and set the required values:
 | `PORT` | Server port (default: 8000) |
 | `LOG_LEVEL` | Logging verbosity (debug, info, warning, error) |
 | `CUDA_VISIBLE_DEVICES` | GPU devices for inference |
+| `STALE_SERVER_RETRIES` | Retries on stale server handle (default: 1, set 0 to disable) |
 
 ## Project Structure
 
