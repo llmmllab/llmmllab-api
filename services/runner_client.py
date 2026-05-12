@@ -582,7 +582,15 @@ class RunnerClient:
                 try:
                     resp = await client.get(f"{ep}/v1/models")
                     if resp.status_code == 200:
-                        return [(m["id"], ep) for m in resp.json() if "id" in m]
+                        # Index by id, name, and model fields so lookups by
+                        # any of these identifiers succeed.
+                        pairs = []
+                        for m in resp.json():
+                            for key in ("id", "name", "model"):
+                                val = m.get(key)
+                                if val:
+                                    pairs.append((val, ep))
+                        return pairs
                 except Exception as e:
                     logger.warning(f"Failed to list models from {ep}: {e}")
                 return []

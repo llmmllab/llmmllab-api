@@ -125,6 +125,27 @@ class DialogGraphBuilder(GraphBuilder):
                         None,
                     )
                     if not primary_model_def:
+                        # Last resort: try prefix matching (handles truncated
+                        # model names like "claude-haiku-4-5-_" from clients).
+                        primary_model_def = next(
+                            (
+                                m
+                                for m in all_models
+                                if (m.name and m.name.startswith(model_name))
+                                or (m.id and m.id.startswith(model_name))
+                            ),
+                            None,
+                        )
+                        if primary_model_def:
+                            self.logger.info(
+                                "Matched truncated model name via prefix",
+                                extra={
+                                    "requested": model_name,
+                                    "matched_id": primary_model_def.id,
+                                    "matched_name": primary_model_def.name,
+                                },
+                            )
+                    if not primary_model_def:
                         raise RuntimeError(f"Model '{model_name}' not found")
             else:
                 primary_model_def = await runner_client.model_by_task(ModelTask.TEXTTOTEXT)
