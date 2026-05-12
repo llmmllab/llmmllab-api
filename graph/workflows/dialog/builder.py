@@ -125,7 +125,21 @@ class DialogGraphBuilder(GraphBuilder):
                         None,
                     )
                     if not primary_model_def:
-                        raise RuntimeError(f"Model '{model_name}' not found")
+                        # Fallback model also not found — use any available TextToText model
+                        self.logger.warning(
+                            "Resolved model not found on runners, using default "
+                            "TextToText model",
+                            user_id=user_id,
+                            resolved=model_name,
+                        )
+                        primary_model_def = await runner_client.model_by_task(
+                            ModelTask.TEXTTOTEXT
+                        )
+                        if not primary_model_def:
+                            raise RuntimeError(
+                                f"Model '{model_name}' not found and no "
+                                "TextToText model available"
+                            )
             else:
                 primary_model_def = await runner_client.model_by_task(ModelTask.TEXTTOTEXT)
                 if not primary_model_def:
