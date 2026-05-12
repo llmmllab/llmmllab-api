@@ -80,6 +80,7 @@ Copy `.env.example` to `.env` and set the required values. See `config.py` for d
 | `MODEL_CACHE_REFRESH_SEC` | Model map refresh interval (default: 60) |
 | `CONTEXT_USAGE_SAFETY_MARGIN` | Fraction of `num_ctx` reserved for conversation input (default: 0.85) |
 | `CONTEXT_MINIMUM_RATIO` | Min ratio of actual to requested context before rejecting a server (default: 0.80) |
+| `STALE_SERVER_RETRIES` | Retries on stale server handle (default: 1, set 0 to disable) |
 
 ### Priority Queue
 
@@ -141,7 +142,7 @@ Copy `.env.example` to `.env` and set the required values. See `config.py` for d
 - `services/` — Business logic (completion, token, tool)
 - `runner/` — Model execution pipelines
 - `composer_init.py` — Workflow orchestration API
-- `agents/` — Agent implementations (see [agents/README.md](agents/README.md))
+- `agents/` — Agent implementations
 - `core/` — Core composer components
 - `graph/` — LangGraph workflow builder, nodes, state
 - `tools/` — Tool registry and static tools
