@@ -431,6 +431,37 @@ The current date is {current_date}."""
 
             if isinstance(e, (APITimeoutError, TimeoutError)):
                 raise
+
+            # Detect API-level context-size overflow errors.
+            # The pre-check (_ensure_context_fits) uses a rough token estimate
+            # that can be inaccurate; the API may still reject the request.
+            # Treat these the same as ContextOverflowError: return a clear
+            # user-facing message rather than a generic error.
+            error_str = str(e).lower()
+            if "context" in error_str and ("exceed" in error_str or "size" in error_str or "limit" in error_str):
+                self.logger.warning(
+                    "API-level context overflow detected",
+                    error=str(e),
+                    error_type=type(e).__name__,
+                )
+                return ChatResponse(
+                    done=True,
+                    message=Message(
+                        role=MessageRole.ASSISTANT,
+                        content=[
+                            MessageContent(
+                                type=MessageContentType.TEXT,
+                                text=(
+                                    "The conversation is too long for the current model's "
+                                    "context window. Try starting a new conversation or "
+                                    "using a model with a larger context."
+                                ),
+                            )
+                        ],
+                    ),
+                    metadata=self._node_metadata,
+                )
+
             return ChatResponse(
                 done=True,
                 message=Message(
@@ -526,4 +557,12 @@ The current date is {current_date}."""
                 e,
                 message_count=get_message_count(message_input),
             )
+            # Detect API-level context-size overflow errors.
+            # Re-raise as RuntimeError with a clear context-overflow message.
+            error_str = str(e).lower()
+            if "context" in error_str and ("exceed" in error_str or "size" in error_str or "limit" in error_str):
+                raise RuntimeError(
+                    f"Context size exceeded: the conversation is too long for the "
+                    f"current model's context window. {e}"
+                ) from e
             raise RuntimeError(f"Structured agent execution failed: {e}") from e
