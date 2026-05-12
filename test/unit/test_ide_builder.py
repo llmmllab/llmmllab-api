@@ -191,18 +191,18 @@ class TestIdeGraphBuilderModelResolution:
                 )
 
     @pytest.mark.asyncio
-    async def test_model_not_found_and_fallback_falls_back_to_texttotext(
+    async def test_model_not_found_and_fallback_falls_back_to_default_model(
         self, mock_storage, user_config
     ):
-        """When model and fallback are both missing but a TextToText model
+        """When model and fallback are both missing but a default TextToText model
         exists, the builder falls back to it instead of raising."""
         other_model = _make_model("other-model", "other-model")
-        fallback_model = _make_model("fallback-t2t", "fallback-t2t")
+        default_model = _make_model("default-t2t", "default-t2t")
         handle = _make_server_handle()
 
         with patch("graph.workflows.ide.builder.runner_client") as mock_rc:
             mock_rc.list_models = AsyncMock(return_value=[other_model])
-            mock_rc.model_by_task = AsyncMock(return_value=fallback_model)
+            mock_rc.default_model_by_task = AsyncMock(return_value=default_model)
             mock_rc.acquire_server = AsyncMock(return_value=handle)
 
             from graph.workflows.ide.builder import IdeGraphBuilder
@@ -213,9 +213,9 @@ class TestIdeGraphBuilderModelResolution:
                     user_id="user-1", model_name="missing-model"
                 )
                 assert workflow is not None
-                mock_rc.model_by_task.assert_called_with(ModelTask.TEXTTOTEXT)
+                mock_rc.default_model_by_task.assert_called_with(ModelTask.TEXTTOTEXT)
                 mock_rc.acquire_server.assert_called_with(
-                    model_id="fallback-t2t", num_ctx=90000, task=ModelTask.TEXTTOTEXT
+                    model_id="default-t2t", num_ctx=90000, task=ModelTask.TEXTTOTEXT
                 )
 
     @pytest.mark.asyncio
@@ -227,7 +227,7 @@ class TestIdeGraphBuilderModelResolution:
 
         with patch("graph.workflows.ide.builder.runner_client") as mock_rc:
             mock_rc.list_models = AsyncMock(return_value=[other_model])
-            mock_rc.model_by_task = AsyncMock(return_value=None)
+            mock_rc.default_model_by_task = AsyncMock(return_value=None)
 
             from graph.workflows.ide.builder import IdeGraphBuilder
 

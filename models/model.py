@@ -43,5 +43,7 @@ class Model(BaseModel):
     """Image generation settings (for image models)"""
     draft_model: Annotated[Optional[str], Field(default=None, description="Optional draft model for speculative decoding")] = None
     """Optional draft model for speculative decoding"""
+    is_default: Annotated[Optional[bool], Field(default=False, description="Whether this model is the global default for its task")] = False
+    """Whether this model is the global default for its task"""
 
     model_config = ConfigDict(extra="ignore")

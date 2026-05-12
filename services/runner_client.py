@@ -750,6 +750,27 @@ class RunnerClient:
                 continue
         return None
 
+    async def default_model_by_task(self, task: ModelTask) -> Optional[Model]:
+        """Find the default model for the given task across all runners.
+
+        Uses the runner's /v1/models/default endpoint which returns the
+        model marked with `default: true` in .models.yaml.
+        Falls back to model_by_task() if no default is configured.
+        """
+        client = self._get_client()
+        for endpoint in self._endpoints:
+            try:
+                resp = await client.get(
+                    f"{endpoint}/v1/models/default", params={"task": task.value}
+                )
+                if resp.status_code == 200:
+                    return Model(**resp.json())
+            except Exception as e:
+                logger.warning(f"Failed to query default model from {endpoint}: {e}")
+                continue
+        # Fallback: if no default configured, return any model matching the task
+        return await self.model_by_task(task)
+
 
 # Module-level singleton
 runner_client = RunnerClient()

@@ -190,6 +190,7 @@ class TestDialogGraphBuilderModelResolution:
         with patch("graph.workflows.dialog.builder.runner_client") as mock_rc:
             mock_rc.list_models = AsyncMock(return_value=[other_model, embedding])
             mock_rc.model_by_task = AsyncMock(side_effect=lambda t: embedding if t == ModelTask.TEXTTOEMBEDDINGS else None)
+            mock_rc.default_model_by_task = AsyncMock(return_value=None)
 
             from graph.workflows.dialog.builder import DialogGraphBuilder
 

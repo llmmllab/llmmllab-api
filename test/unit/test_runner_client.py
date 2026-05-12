@@ -460,6 +460,87 @@ class TestRunnerClientHandleLifecycle:
         assert "num_ctx" not in captured_payload
 
 
+class TestRunnerClientDefaultModel:
+    """Tests for default_model_by_task() — uses /v1/models/default endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_default_model_by_task_returns_default(self):
+        """GET /v1/models/default returns the configured default model."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "id": "Qwen3_6_27B",
+            "name": "Qwen3.6-27B",
+            "model": "Qwen3.6-27B",
+            "task": "TextToText",
+            "modified_at": "2026-04-22",
+            "digest": "abc123",
+            "provider": "llama_cpp",
+            "is_default": True,
+            "details": {"format": "gguf", "family": "qwen", "families": ["qwen"], "parameter_size": "26.9B", "size": 35325163744, "original_ctx": 2048},
+        }
+
+        mock = _mock_client(get=AsyncMock(return_value=mock_response))
+        client = RunnerClient(endpoints=["http://runner1:8000"])
+        client._client = mock
+        result = await client.default_model_by_task(ModelTask.TEXTTOTEXT)
+
+        assert result is not None
+        assert result.id == "Qwen3_6_27B"
+        assert result.is_default is True
+
+        # Verify the /v1/models/default endpoint was called
+        call_args = mock.get.call_args
+        assert "/v1/models/default" in call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_default_model_falls_back_to_model_by_task_on_404(self):
+        """If /v1/models/default returns 404, falls back to model_by_task."""
+        call_count = [0]
+
+        async def mock_get(url, **kw):
+            call_count[0] += 1
+            if "/v1/models/default" in url:
+                r = MagicMock()
+                r.status_code = 404
+                return r
+            else:
+                r = MagicMock()
+                r.status_code = 200
+                r.json.return_value = [
+                    {
+                        "id": "fallback-model",
+                        "name": "Fallback",
+                        "model": "fallback",
+                        "task": "TextToText",
+                        "modified_at": "2026-01-01",
+                        "digest": "def456",
+                        "provider": "llama_cpp",
+                        "details": {"format": "gguf", "family": "llama", "families": ["llama"], "parameter_size": "8B", "size": 4e9, "original_ctx": 8192},
+                    },
+                ]
+                return r
+
+        mock = _mock_client(get=AsyncMock(side_effect=mock_get))
+        client = RunnerClient(endpoints=["http://runner1:8000"])
+        client._client = mock
+        result = await client.default_model_by_task(ModelTask.TEXTTOTEXT)
+
+        assert result is not None
+        assert result.id == "fallback-model"
+        # Should have tried /v1/models/default first, then /v1/models
+        assert call_count[0] == 2
+
+    @pytest.mark.asyncio
+    async def test_default_model_returns_none_when_all_runners_fail(self):
+        """If all runners fail, returns None."""
+        mock = _mock_client(get=AsyncMock(side_effect=Exception("connection refused")))
+        client = RunnerClient(endpoints=["http://runner1:8000"])
+        client._client = mock
+        result = await client.default_model_by_task(ModelTask.TEXTTOTEXT)
+        assert result is None
+
+
 class TestRunnerClientConfig:
 
     def test_default_refresh_interval(self):

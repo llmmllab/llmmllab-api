@@ -125,14 +125,14 @@ class DialogGraphBuilder(GraphBuilder):
                         None,
                     )
                     if not primary_model_def:
-                        # Fallback model also not found — use any available TextToText model
+                        # Fallback model also not found — use the configured default TextToText model
                         self.logger.warning(
                             "Resolved model not found on runners, using default "
                             "TextToText model",
                             user_id=user_id,
                             resolved=model_name,
                         )
-                        primary_model_def = await runner_client.model_by_task(
+                        primary_model_def = await runner_client.default_model_by_task(
                             ModelTask.TEXTTOTEXT
                         )
                         if not primary_model_def:
