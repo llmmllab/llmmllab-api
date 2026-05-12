@@ -60,3 +60,5 @@ htmlcov/
 Thumbs.db
 .playwright*
 .copilot*
+
+settings.local.json
