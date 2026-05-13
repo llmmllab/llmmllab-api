@@ -125,7 +125,12 @@ class DialogGraphBuilder(GraphBuilder):
                         None,
                     )
                     if not primary_model_def:
-                        raise RuntimeError(f"Model '{model_name}' not found")
+                        # Fallback model also not found — use any available TextToText model
+                        primary_model_def = await runner_client.model_by_task(
+                            ModelTask.TEXTTOTEXT
+                        )
+                        if not primary_model_def:
+                            raise RuntimeError(f"Model '{model_name}' not found")
             else:
                 primary_model_def = await runner_client.model_by_task(ModelTask.TEXTTOTEXT)
                 if not primary_model_def:
@@ -139,6 +144,11 @@ class DialogGraphBuilder(GraphBuilder):
 
             primary_handle = await runner_client.acquire_server(
                 model_id=primary_model_def.id,
+                num_ctx=(
+                    primary_model_def.parameters.num_ctx
+                    if primary_model_def.parameters
+                    else 90000
+                ),
                 task=primary_model_def.task,
             )
             embedding_handle = await runner_client.acquire_server(

@@ -177,6 +177,11 @@ class IdeGraphBuilder(GraphBuilder):
 
             server_handle = await runner_client.acquire_server(
                 model_id=model_def.id,
+                num_ctx=(
+                    model_def.parameters.num_ctx
+                    if model_def.parameters
+                    else 90000
+                ),
                 task=model_def.task,
             )
 

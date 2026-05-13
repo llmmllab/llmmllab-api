@@ -298,6 +298,168 @@ class TestRunnerClientModels:
         assert call_args[1].get("params", {}).get("task") == "TextToEmbeddings"
 
 
+class TestRunnerClientHandleLifecycle:
+    """Handle registry: acquire registers, release/shutdown unregister, aclose shuts down all."""
+
+    @pytest.mark.asyncio
+    async def test_acquire_registers_handle(self):
+        """acquire_server() auto-registers the returned handle."""
+        mock_create = MagicMock()
+        mock_create.status_code = 201
+        mock_create.json.return_value = {
+            "server_id": "abc", "base_url": "http://r1:8000/v1/server/abc", "model": "m"
+        }
+        mock_create.raise_for_status = MagicMock()
+        mock = _mock_client(post=AsyncMock(return_value=mock_create))
+        client = RunnerClient(endpoints=["http://r1:8000"])
+        client._client = mock
+        client._model_map = {"m": ["http://r1:8000"]}
+        handle = await client.acquire_server("m")
+        assert handle in client._active_handles
+
+    @pytest.mark.asyncio
+    async def test_release_unregisters_handle(self):
+        """release_server() removes the handle from the registry."""
+        mock_release = MagicMock()
+        mock_release.status_code = 200
+        mock_release.raise_for_status = MagicMock()
+        mock = _mock_client(post=AsyncMock(return_value=mock_release))
+        client = RunnerClient(endpoints=["http://r1:8000"])
+        client._client = mock
+        handle = ServerHandle(
+            base_url="http://r1:8000/v1/server/abc",
+            server_id="abc",
+            runner_host="http://r1:8000",
+        )
+        client.register_handle(handle)
+        assert handle in client._active_handles
+        await client.release_server(handle)
+        assert handle not in client._active_handles
+
+    @pytest.mark.asyncio
+    async def test_shutdown_unregisters_handle(self):
+        """shutdown_server() removes the handle from the registry."""
+        mock_shutdown = MagicMock()
+        mock_shutdown.status_code = 200
+        mock_shutdown.raise_for_status = MagicMock()
+        mock = _mock_client(delete=AsyncMock(return_value=mock_shutdown))
+        client = RunnerClient(endpoints=["http://r1:8000"])
+        client._client = mock
+        handle = ServerHandle(
+            base_url="http://r1:8000/v1/server/abc",
+            server_id="abc",
+            runner_host="http://r1:8000",
+        )
+        client.register_handle(handle)
+        await client.shutdown_server(handle)
+        assert handle not in client._active_handles
+
+    @pytest.mark.asyncio
+    async def test_shutdown_all_handles_on_aclose(self):
+        """aclose() calls shutdown_server for each registered handle."""
+        shutdown_calls = []
+
+        async def mock_delete(url, **kw):
+            shutdown_calls.append(url)
+            r = MagicMock()
+            r.status_code = 200
+            r.raise_for_status = MagicMock()
+            return r
+
+        mock = _mock_client(delete=AsyncMock(side_effect=mock_delete))
+        client = RunnerClient(endpoints=["http://r1:8000"])
+        client._client = mock
+
+        # Register two handles
+        for sid in ["h1", "h2"]:
+            client.register_handle(ServerHandle(
+                base_url=f"http://r1:8000/v1/server/{sid}",
+                server_id=sid,
+                runner_host="http://r1:8000",
+            ))
+
+        await client.aclose()
+
+        assert len(shutdown_calls) == 2
+        assert any("h1" in u for u in shutdown_calls)
+        assert any("h2" in u for u in shutdown_calls)
+        assert client._active_handles == set()
+
+    @pytest.mark.asyncio
+    async def test_shutdown_all_handles_skips_on_error(self):
+        """If one handle fails to shutdown, others are still cleaned up."""
+        call_count = [0]
+
+        async def mock_delete(url, **kw):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise Exception("connection refused")
+            r = MagicMock()
+            r.status_code = 200
+            r.raise_for_status = MagicMock()
+            return r
+
+        mock = _mock_client(delete=AsyncMock(side_effect=mock_delete))
+        client = RunnerClient(endpoints=["http://r1:8000"])
+        client._client = mock
+
+        for sid in ["h1", "h2"]:
+            client.register_handle(ServerHandle(
+                base_url=f"http://r1:8000/v1/server/{sid}",
+                server_id=sid,
+                runner_host="http://r1:8000",
+            ))
+
+        await client.aclose()
+
+        # Both handles attempted
+        assert call_count[0] == 2
+
+    @pytest.mark.asyncio
+    async def test_acquire_passes_num_ctx(self):
+        """acquire_server() forwards num_ctx in the POST payload."""
+        captured_payload = {}
+
+        async def mock_post(url, json=None, **kw):
+            captured_payload.update(json or {})
+            r = MagicMock()
+            r.status_code = 201
+            r.json.return_value = {
+                "server_id": "abc", "base_url": "http://r1:8000/v1/server/abc", "model": "m"
+            }
+            r.raise_for_status = MagicMock()
+            return r
+
+        mock = _mock_client(post=AsyncMock(side_effect=mock_post))
+        client = RunnerClient(endpoints=["http://r1:8000"])
+        client._client = mock
+        client._model_map = {"m": ["http://r1:8000"]}
+        await client.acquire_server("m", num_ctx=128000)
+        assert captured_payload["num_ctx"] == 128000
+
+    @pytest.mark.asyncio
+    async def test_acquire_without_num_ctx(self):
+        """acquire_server() omits num_ctx when not provided."""
+        captured_payload = {}
+
+        async def mock_post(url, json=None, **kw):
+            captured_payload.update(json or {})
+            r = MagicMock()
+            r.status_code = 201
+            r.json.return_value = {
+                "server_id": "abc", "base_url": "http://r1:8000/v1/server/abc", "model": "m"
+            }
+            r.raise_for_status = MagicMock()
+            return r
+
+        mock = _mock_client(post=AsyncMock(side_effect=mock_post))
+        client = RunnerClient(endpoints=["http://r1:8000"])
+        client._client = mock
+        client._model_map = {"m": ["http://r1:8000"]}
+        await client.acquire_server("m")
+        assert "num_ctx" not in captured_payload
+
+
 class TestRunnerClientConfig:
 
     def test_default_refresh_interval(self):

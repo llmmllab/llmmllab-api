@@ -113,7 +113,7 @@ class TestDialogGraphBuilderModelResolution:
                 mock_rc.list_models.assert_called_once()
                 assert mock_rc.acquire_server.call_count == 2
                 mock_rc.acquire_server.assert_any_call(
-                    model_id="llama-3-8b", task=ModelTask.TEXTTOTEXT
+                    model_id="llama-3-8b", num_ctx=90000, task=ModelTask.TEXTTOTEXT
                 )
 
     @pytest.mark.asyncio
@@ -176,20 +176,56 @@ class TestDialogGraphBuilderModelResolution:
                     mock_resolve.assert_called_once_with("missing-model", "user-1")
                     assert mock_rc.list_models.call_count == 1
                     mock_rc.acquire_server.assert_any_call(
-                        model_id="default-model", task=ModelTask.TEXTTOTEXT
+                        model_id="default-model", num_ctx=90000, task=ModelTask.TEXTTOTEXT
                     )
 
     @pytest.mark.asyncio
-    async def test_model_not_found_and_fallback_also_missing_raises(
+    async def test_model_not_found_and_fallback_falls_back_to_texttotext(
         self, mock_storage, user_config
     ):
-        """When model and fallback are both missing, RuntimeError is raised."""
+        """When model and fallback are both missing, falls back to any available TextToText model."""
+        other_model = _make_model("other-model", "other-model")
+        embedding = _make_model("embed-model", "embed-model", task=ModelTask.TEXTTOEMBEDDINGS)
+        handle_p = _make_server_handle()
+        handle_e = _make_server_handle()
+
+        with patch("graph.workflows.dialog.builder.runner_client") as mock_rc:
+            mock_rc.list_models = AsyncMock(return_value=[other_model, embedding])
+            mock_rc.model_by_task = AsyncMock(
+                side_effect=lambda t: other_model if t == ModelTask.TEXTTOTEXT else embedding
+            )
+            mock_rc.acquire_server = AsyncMock(side_effect=[handle_p, handle_e])
+
+            with patch("graph.workflows.dialog.builder.registry_manager") as mock_rm:
+                mock_rm.get_user_registry = AsyncMock(return_value=MagicMock(
+                    get_all_executable_tools=MagicMock(return_value=[])
+                ))
+
+                from graph.workflows.dialog.builder import DialogGraphBuilder
+
+                builder = DialogGraphBuilder(mock_storage, user_config)
+                with patch.object(builder, "resolve_model", new=AsyncMock(return_value="also-missing")):
+                    workflow = await builder.build_workflow(
+                        user_id="user-1", model_name="missing-model"
+                    )
+                    # Should fall back to the available TextToText model
+                    mock_rc.acquire_server.assert_any_call(
+                        model_id="other-model", task=ModelTask.TEXTTOTEXT
+                    )
+
+    @pytest.mark.asyncio
+    async def test_model_not_found_and_fallback_missing_and_no_texttotext_raises(
+        self, mock_storage, user_config
+    ):
+        """When model, fallback, and no TextToText model exist, RuntimeError is raised."""
         other_model = _make_model("other-model", "other-model")
         embedding = _make_model("embed-model", "embed-model", task=ModelTask.TEXTTOEMBEDDINGS)
 
         with patch("graph.workflows.dialog.builder.runner_client") as mock_rc:
             mock_rc.list_models = AsyncMock(return_value=[other_model, embedding])
-            mock_rc.model_by_task = AsyncMock(side_effect=lambda t: embedding if t == ModelTask.TEXTTOEMBEDDINGS else None)
+            mock_rc.model_by_task = AsyncMock(
+                side_effect=lambda t: embedding if t == ModelTask.TEXTTOEMBEDDINGS else None
+            )
 
             from graph.workflows.dialog.builder import DialogGraphBuilder
 
@@ -227,7 +263,7 @@ class TestDialogGraphBuilderModelResolution:
                 mock_rc.model_by_task.assert_any_call(ModelTask.TEXTTOTEXT)
                 mock_rc.model_by_task.assert_any_call(ModelTask.TEXTTOEMBEDDINGS)
                 mock_rc.acquire_server.assert_any_call(
-                    model_id="default-t2t", task=ModelTask.TEXTTOTEXT
+                    model_id="default-t2t", num_ctx=90000, task=ModelTask.TEXTTOTEXT
                 )
 
     @pytest.mark.asyncio

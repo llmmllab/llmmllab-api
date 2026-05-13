@@ -108,7 +108,7 @@ class TestIdeGraphBuilderModelResolution:
             mock_rc.list_models.assert_called_once()
             # acquire_server was called with the right model id
             mock_rc.acquire_server.assert_called_once_with(
-                model_id="llama-3-8b", task=ModelTask.TEXTTOTEXT
+                model_id="llama-3-8b", num_ctx=90000, task=ModelTask.TEXTTOTEXT
             )
 
     @pytest.mark.asyncio
@@ -154,7 +154,7 @@ class TestIdeGraphBuilderModelResolution:
 
             mock_rc.list_models.assert_called_once()
             mock_rc.acquire_server.assert_called_once_with(
-                model_id="model-id-123", task=ModelTask.TEXTTOTEXT
+                model_id="model-id-123", num_ctx=90000, task=ModelTask.TEXTTOTEXT
             )
 
     @pytest.mark.asyncio
@@ -187,7 +187,7 @@ class TestIdeGraphBuilderModelResolution:
                 assert mock_rc.list_models.call_count == 1
                 # acquire_server called with the fallback model
                 mock_rc.acquire_server.assert_called_once_with(
-                    model_id="default-model", task=ModelTask.TEXTTOTEXT
+                    model_id="default-model", num_ctx=90000, task=ModelTask.TEXTTOTEXT
                 )
 
     @pytest.mark.asyncio
@@ -199,7 +199,7 @@ class TestIdeGraphBuilderModelResolution:
 
         with patch("graph.workflows.ide.builder.runner_client") as mock_rc:
             mock_rc.list_models = AsyncMock(return_value=[other_model])
-            mock_rc.model_by_task = AsyncMock()
+            mock_rc.model_by_task = AsyncMock(return_value=None)
 
             from graph.workflows.ide.builder import IdeGraphBuilder
 
@@ -227,7 +227,7 @@ class TestIdeGraphBuilderModelResolution:
 
             mock_rc.model_by_task.assert_called_once_with(ModelTask.TEXTTOTEXT)
             mock_rc.acquire_server.assert_called_once_with(
-                model_id="default-t2t", task=ModelTask.TEXTTOTEXT
+                model_id="default-t2t", num_ctx=90000, task=ModelTask.TEXTTOTEXT
             )
 
     @pytest.mark.asyncio
