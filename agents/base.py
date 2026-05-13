@@ -37,35 +37,6 @@ from utils.message_conversion import (
 )
 from utils.grammar_generator import parse_structured_output
 
-# Safety margin: fraction of num_ctx reserved for conversation input.
-# Configurable via CONTEXT_USAGE_SAFETY_MARGIN env var (default 0.85 = 85%).
-# The runner enforces CONTEXT_MINIMUM_RATIO server-side; the API only
-# needs the safety margin for client-side context trimming.
-from config import CONTEXT_USAGE_SAFETY_MARGIN
-
-
-class ContextOverflowError(Exception):
-    """Raised when the conversation context exceeds the model's capacity.
-
-    This error is raised when trimming cannot reduce the context enough to
-    fit, or when the model's effective context window is too small (e.g.,
-    the runner auto-reduced n_ctx due to memory pressure).
-
-    Attributes:
-        message: Human-readable explanation for the user.
-        suggested_context_size: A larger context size the user could request.
-    """
-
-    def __init__(
-        self,
-        message: str,
-        suggested_context_size: int | None = None,
-    ):
-        self.message = message
-        self.suggested_context_size = suggested_context_size
-        super().__init__(message)
-
-# Get the 'asyncio' logger
 asyncio_logger = logging.getLogger("asyncio")
 # Set the logging level to WARNING or higher (e.g., ERROR, CRITICAL)
 # This will prevent INFO and DEBUG messages from being displayed when run_sync is used.
@@ -318,96 +289,6 @@ The current date is {current_date}."""
 
         return system_prompt, convo
 
-    async def _ensure_context_fits(
-        self, messages: list[BaseMessage], system_prompt: str
-    ) -> list[BaseMessage]:
-        """Trim conversation messages to fit within the model's context window.
-
-        Estimates token usage for system prompt + conversation messages. If the
-        total exceeds the model's num_ctx (with a safety margin for output),
-        progressively removes the oldest user-assistant message pairs until the
-        context fits.
-
-        Raises ``ContextOverflowError`` when even after aggressive trimming
-        the context still does not fit — this typically means the runner
-        auto-reduced ``n_ctx`` due to memory pressure.
-
-        Args:
-            messages: Conversation messages (without system message).
-            system_prompt: The system prompt text.
-
-        Returns:
-            Trimmed message list that should fit within the context window.
-
-        Raises:
-            ContextOverflowError: When the context cannot be reduced enough
-                to fit, suggesting the server's effective context is too small.
-        """
-        if self.num_ctx is None or self.num_ctx <= 0:
-            return messages
-
-        # Rough token estimate: ~3 chars per token
-        system_tokens = len(system_prompt) // 3
-        max_convo_tokens = int(self.num_ctx * CONTEXT_USAGE_SAFETY_MARGIN) - system_tokens
-        if max_convo_tokens <= 0:
-            # System prompt alone is too large; return just the last message
-            return messages[-1:] if messages else messages
-
-        # Estimate total conversation tokens
-        total_tokens = sum(
-            len(m.content) // 3 if isinstance(m.content, str) else 0
-            for m in messages
-        )
-
-        if total_tokens <= max_convo_tokens:
-            return messages
-
-        self.logger.warning(
-            f"Context overflow detected: estimated {total_tokens} tokens "
-            f"(system: {system_tokens}, convo: {total_tokens}) exceeds "
-            f"budget {max_convo_tokens} (num_ctx={self.num_ctx}). "
-            f"Trimming {len(messages)} messages..."
-        )
-
-        # Keep the last message (the user's most recent input) and progressively
-        # remove oldest user-assistant pairs until we fit.
-        # Always keep at least the last 2 messages (user + assistant or system + user).
-        min_keep = 2
-        trimmed = list(messages)
-        while len(trimmed) > min_keep and total_tokens > max_convo_tokens:
-            removed = trimmed.pop(0)
-            removed_tokens = (
-                len(removed.content) // 3 if isinstance(removed.content, str) else 0
-            )
-            total_tokens -= removed_tokens
-
-        self.logger.info(
-            f"Trimmed to {len(trimmed)} messages "
-            f"(estimated {total_tokens} tokens, budget {max_convo_tokens})"
-        )
-
-        # If we still can't fit even after aggressive trimming, the server's
-        # effective context is likely too small (runner auto-reduced n_ctx).
-        # Raise a clear error so the caller can retry on another runner or
-        # suggest a smaller context to the user.
-        if total_tokens > max_convo_tokens:
-            remaining_ratio = max_convo_tokens / max(total_tokens, 1)
-            self.logger.error(
-                f"Context still overflows after trimming: {total_tokens} tokens "
-                f"vs budget {max_convo_tokens} (ratio={remaining_ratio:.2f}). "
-                f"Server context likely reduced by runner."
-            )
-            suggested = int(self.num_ctx / remaining_ratio) if remaining_ratio > 0 else self.num_ctx * 2
-            raise ContextOverflowError(
-                message=(
-                    f"The conversation is too long for the current model's context "
-                    f"window ({self.num_ctx} tokens). The server may not have enough "
-                    f"memory for the full context. Try again later when resources are "
-                    f"available, or use a model with a larger context window."
-                ),
-                suggested_context_size=suggested,
-            )
-
         return trimmed
 
     async def run(
@@ -480,14 +361,6 @@ The current date is {current_date}."""
             # Convert messages to LangChain format
             normalized_messages = messages_to_lc_messages(convo)
 
-            # Guard against context overflow before invoking the model.
-            # If the estimated token count exceeds the model's context window,
-            # trim older messages to avoid a 400 exceed_context_size_error.
-            normalized_messages = await self._ensure_context_fits(
-                normalized_messages, system_prompt
-            )
-
-            self.logger.debug(f"Running agent with {len(normalized_messages)} messages")
 
             # Retry transient connection errors (e.g., APIConnectionError)
             # up to 10 times with exponential backoff.
@@ -544,27 +417,6 @@ The current date is {current_date}."""
 
             return response
 
-        except ContextOverflowError as e:
-            # Context overflow is a user-facing error — return a clear message
-            # rather than re-raise (the caller can handle retries at a higher level).
-            self.logger.warning(
-                "Context overflow in agent run",
-                message_count=get_message_count(messages),
-                suggested_context_size=e.suggested_context_size,
-            )
-            return ChatResponse(
-                done=True,
-                message=Message(
-                    role=MessageRole.ASSISTANT,
-                    content=[
-                        MessageContent(
-                            type=MessageContentType.TEXT,
-                            text=e.message,
-                        )
-                    ],
-                ),
-                metadata=self._node_metadata,
-            )
         except Exception as e:
             self._handle_node_error(
                 "create_agent_run",
@@ -644,11 +496,6 @@ The current date is {current_date}."""
             normalized_messages = messages_to_lc_messages(convo)
 
             # Guard against context overflow
-            normalized_messages = await self._ensure_context_fits(
-                normalized_messages, system_prompt
-            )
-
-            self.logger.debug(f"Running agent with {len(normalized_messages)} messages")
             result = await agent.ainvoke({"messages": normalized_messages})  # type: ignore
             self.logger.debug(
                 f"Agent run result ({type(result)}): {serialize_event_data(result)}"
@@ -675,9 +522,6 @@ The current date is {current_date}."""
             msg = lc_message_to_message(result)
             return parse_structured_output(extract_text_from_message(msg), grammar)
 
-        except ContextOverflowError:
-            # Re-raise so the caller knows the context is genuinely too large.
-            raise
         except Exception as e:
             self._handle_node_error(
                 "create_agent_run",
