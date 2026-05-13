@@ -210,7 +210,7 @@ class TestDialogGraphBuilderModelResolution:
                     )
                     # Should fall back to the available TextToText model
                     mock_rc.acquire_server.assert_any_call(
-                        model_id="other-model", task=ModelTask.TEXTTOTEXT
+                        model_id="other-model", num_ctx=90000, task=ModelTask.TEXTTOTEXT
                     )
 
     @pytest.mark.asyncio
