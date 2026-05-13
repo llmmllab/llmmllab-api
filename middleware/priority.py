@@ -90,11 +90,17 @@ def _classify_request(request: Request) -> RequestPriorityMetadata:
         request.headers.get("X-Max-Queue-Wait", "")
     )
 
+    # Session ID: check multiple header sources
+    session_id = (
+        request.headers.get("X-Session-ID")
+        or request.headers.get("X-Claude-Code-Session-ID")
+    )
+
     return RequestPriorityMetadata(
         source=source,
         priority=priority,
         user_id=user_id,
-        session_id=request.headers.get("X-Session-ID"),
+        session_id=session_id,
         max_queue_wait=max_queue_wait,
     )
 
