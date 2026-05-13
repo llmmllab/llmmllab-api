@@ -229,7 +229,8 @@ class TestDispatchBodyFallback:
             "X-Request-Priority": "low",
         }
         req.body = AsyncMock(return_value=body)
-        req.state = MagicMock()
+        req.state = MagicMock(spec=["user_id"])
+        req.state.user_id = None
 
         response = MagicMock()
         response.headers = {}
@@ -254,7 +255,8 @@ class TestDispatchBodyFallback:
             "X-OpenClaw-Session-ID": "sess-header",
         }
         req.body = AsyncMock(return_value=body)
-        req.state = MagicMock()
+        req.state = MagicMock(spec=["user_id"])
+        req.state.user_id = None
 
         response = MagicMock()
         response.headers = {}
@@ -267,12 +269,13 @@ class TestDispatchBodyFallback:
 
     @pytest.mark.asyncio
     async def test_non_completion_endpoint_skips_body_extraction(self):
+        from types import SimpleNamespace
         from middleware.priority import PriorityMiddleware
 
         req = MagicMock()
         req.url.path = "/v1/models"
         req.headers = {}
-        req.state = MagicMock()
+        req.state = SimpleNamespace()
 
         response = MagicMock()
         response.headers = {}

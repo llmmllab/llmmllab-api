@@ -247,6 +247,38 @@ class RunnerClient:
 
         self._active_handles.clear()
 
+    @staticmethod
+    def _is_stale_server_error(response: httpx.Response) -> bool:
+        """Check if a 404 response indicates a stale server handle.
+
+        Returns ``True`` when the response is 404 and the body mentions
+        a server not being found, meaning the llama.cpp server was
+        evicted from the runner.
+        """
+        if response.status_code != 404:
+            return False
+        try:
+            body = response.text.lower()
+            return "server" in body and "not found" in body
+        except Exception:
+            return False
+
+    async def validate_server_handle(self, handle: ServerHandle) -> bool:
+        """Check if a server handle is still valid by hitting the server's /health.
+
+        Returns ``True`` if the llama.cpp server behind the handle responds
+        with HTTP 200, ``False`` otherwise.
+        """
+        try:
+            client = self._get_client()
+            resp = await client.get(
+                f"{handle.base_url}/health",
+                timeout=httpx.Timeout(3.0),
+            )
+            return resp.status_code == 200
+        except Exception:
+            return False
+
     async def aclose(self) -> None:
         """Close the shared HTTP client and release active servers.  Call during app shutdown."""
         # Shut down all active server handles before closing the client
