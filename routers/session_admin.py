@@ -24,6 +24,7 @@ async def cancel_session(request: Request, session_id: str):
     queued_cancelled = 0
     try:
         from services.priority_queue import priority_queue
+
         queued_cancelled = await priority_queue.cancel_by_session_id(session_id)
     except Exception:
         pass
@@ -31,6 +32,7 @@ async def cancel_session(request: Request, session_id: str):
     in_flight_cancelled = False
     try:
         from services.completion_service import cancel_session as cancel_in_flight
+
         in_flight_cancelled = await cancel_in_flight(session_id)
     except Exception:
         pass
@@ -39,6 +41,7 @@ async def cancel_session(request: Request, session_id: str):
     state = None
     try:
         from services.session_registry import remove_session
+
         state = remove_session(session_id)
         session_removed = state is not None
     except Exception:
@@ -47,8 +50,10 @@ async def cancel_session(request: Request, session_id: str):
     if session_removed and state:
         try:
             from middleware.api_metrics import active_sessions
+
             active_sessions.labels(
-                model_id=state.model_id, source=state.source,
+                model_id=state.model_id,
+                source=state.source,
             ).dec()
         except Exception:
             pass

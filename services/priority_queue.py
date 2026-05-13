@@ -90,12 +90,8 @@ class AsyncPriorityQueue:
         max_size: int = 100,
         timeout_sec: float = 300,
         age_threshold_sec: float = 60,
-        on_release: Optional[
-            Callable[[RequestPriorityMetadata], Any]
-        ] = None,
-        on_complete: Optional[
-            Callable[[RequestPriorityMetadata], Any]
-        ] = None,
+        on_release: Optional[Callable[[RequestPriorityMetadata], Any]] = None,
+        on_complete: Optional[Callable[[RequestPriorityMetadata], Any]] = None,
     ) -> None:
         self._max_size = max_size
         self._timeout_sec = timeout_sec
@@ -220,7 +216,8 @@ class AsyncPriorityQueue:
             self._recheck_task = None
 
     async def dequeue(
-        self, item: Optional[_QueueItem] = None,
+        self,
+        item: Optional[_QueueItem] = None,
     ) -> Optional[RequestPriorityMetadata]:
         """Remove the finishing request and let the next eligible one through.
 
@@ -250,7 +247,9 @@ class AsyncPriorityQueue:
                     self._sizes[compacted.metadata.priority] = max(
                         0, self._sizes[compacted.metadata.priority] - 1
                     )
-                    _inc_dequeued(compacted.metadata.priority, compacted.metadata.source.value)
+                    _inc_dequeued(
+                        compacted.metadata.priority, compacted.metadata.source.value
+                    )
                     _observe_wait(
                         compacted.metadata.wait_time,
                         compacted.metadata.priority,
@@ -263,9 +262,13 @@ class AsyncPriorityQueue:
                 finished_item = self._queue.pop(0)
                 finished_meta = finished_item.metadata
                 self._sizes[finished_item.metadata.priority] = sum(
-                    1 for i in self._queue if i.metadata.priority == finished_item.metadata.priority
+                    1
+                    for i in self._queue
+                    if i.metadata.priority == finished_item.metadata.priority
                 )
-                _inc_dequeued(finished_item.metadata.priority, finished_item.metadata.source.value)
+                _inc_dequeued(
+                    finished_item.metadata.priority, finished_item.metadata.source.value
+                )
                 _observe_wait(
                     finished_item.metadata.wait_time,
                     finished_item.metadata.priority,
@@ -281,7 +284,8 @@ class AsyncPriorityQueue:
 
             # Collect pending items to check outside lock
             pending: list[tuple[int, RequestPriorityMetadata]] = [
-                (i, m.metadata) for i, m in enumerate(self._queue)
+                (i, m.metadata)
+                for i, m in enumerate(self._queue)
                 if not m.event.is_set() and not m.completed
             ]
 
@@ -292,6 +296,7 @@ class AsyncPriorityQueue:
 
         # Group pending items by priority for session round-robin
         from collections import defaultdict as _dd
+
         by_priority: dict[int, list[tuple[int, RequestPriorityMetadata]]] = _dd(list)
         for idx, metadata in pending:
             by_priority[metadata.priority.value].append((idx, metadata))
@@ -368,7 +373,8 @@ class AsyncPriorityQueue:
         return False
 
     def _select_by_session_rr(
-        self, candidates: list[tuple[int, RequestPriorityMetadata]],
+        self,
+        candidates: list[tuple[int, RequestPriorityMetadata]],
     ) -> int:
         """Select the candidate from the least-recently-served session."""
         if len(candidates) <= 1:
@@ -397,9 +403,7 @@ class AsyncPriorityQueue:
             was_first = item is self._queue[0]
             self._queue.remove(item)
             self._sizes[item.metadata.priority] = sum(
-                1
-                for i in self._queue
-                if i.metadata.priority == item.metadata.priority
+                1 for i in self._queue if i.metadata.priority == item.metadata.priority
             )
             self._update_gauges()
 
@@ -482,7 +486,10 @@ class AsyncPriorityQueue:
 
             # Group by priority for session round-robin
             from collections import defaultdict as _dd
-            by_priority: dict[int, list[tuple[int, RequestPriorityMetadata]]] = _dd(list)
+
+            by_priority: dict[int, list[tuple[int, RequestPriorityMetadata]]] = _dd(
+                list
+            )
             for idx, metadata in pending:
                 by_priority[metadata.priority.value].append((idx, metadata))
 
@@ -541,7 +548,9 @@ class AsyncPriorityQueue:
                 if self._on_release:
                     self._on_release(released_meta)
                 if released_meta.session_id:
-                    self._session_last_served[released_meta.session_id] = time.monotonic()
+                    self._session_last_served[released_meta.session_id] = (
+                        time.monotonic()
+                    )
 
     def _update_gauges(self) -> None:
         """Update all queue size gauges (by priority, model, source, cross-tab)."""
@@ -587,12 +596,42 @@ class AsyncPriorityQueue:
                     item.cancelled = True
                     item.event.set()
                     cancelled += 1
-            self._queue = [i for i in self._queue if i.metadata.session_id != session_id]
+            self._queue = [
+                i for i in self._queue if i.metadata.session_id != session_id
+            ]
             self._update_gauges()
             for p in Priority:
-                self._sizes[p] = sum(
-                    1 for i in self._queue if i.metadata.priority == p
-                )
+                self._sizes[p] = sum(1 for i in self._queue if i.metadata.priority == p)
+        return cancelled
+
+    @staticmethod
+    async def ensure_model_available(model_id: str, user_id: str | None) -> str:
+        """Check if model is available on any runner. If not, resolve default.
+
+        Returns the (possibly resolved) model_id.
+        """
+        try:
+            from services.model_service import model_service
+
+            return await model_service.resolve_default_model(
+                model_id, user_id or "anonymous"
+            )
+        except Exception:
+            return model_id
+
+    def cancel_by_session_id(self, session_id: str) -> int:
+        """Cancel all queued items matching a session_id.
+
+        Returns the number of items cancelled.
+        """
+        cancelled = 0
+        for item in self._queue:
+            if item.metadata.session_id == session_id:
+                item.cancelled = True
+                item.event.set()
+                cancelled += 1
+        self._queue = [i for i in self._queue if i.metadata.session_id != session_id]
+        self._update_gauges()
         return cancelled
 
     @staticmethod

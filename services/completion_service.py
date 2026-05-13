@@ -377,6 +377,7 @@ class CompletionService:
             if builder.server_handle:
                 try:
                     from services.runner_client import runner_client
+
                     await runner_client.release_server(builder.server_handle)
                 except Exception as release_err:
                     logger.debug(
@@ -384,6 +385,7 @@ class CompletionService:
                     )
             # Force model map refresh so stale endpoints are cleared
             from services.runner_client import runner_client
+
             await runner_client.refresh_model_map()
             # Retry with a fresh server handle
             async for event in CompletionService._build_and_run(
@@ -905,6 +907,12 @@ class CompletionService:
                 session_id=session_id,
             )
             _queue_item, _queue_ctx = await priority_queue.enqueue(_meta)
+
+            if session_id:
+                try:
+                    _in_flight_tasks[session_id] = asyncio.current_task()
+                except RuntimeError:
+                    pass
 
             if session_id:
                 try:
