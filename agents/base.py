@@ -254,9 +254,7 @@ class BaseAgent:
         """
         self._log_operation_error(operation, error, **context)
 
-    _SYSTEM_PROMPT_STRIP_RE = re.compile(
-        r"^[^*\n]*Co-Authored-By:.*$\n?", re.MULTILINE
-    )
+    _SYSTEM_PROMPT_STRIP_RE = re.compile(r"^[^*\n]*Co-Authored-By:.*$\n?", re.MULTILINE)
 
     def _separate_system_prompt(
         self, messages: MessageInput
@@ -442,11 +440,14 @@ The current date is {current_date}."""
             def _is_transient_error(e: Exception) -> bool:
                 if isinstance(e, _APIConnectionError):
                     return True
-                if isinstance(e, _APIStatusError) and e.status_code in _TRANSIENT_STATUS_CODES:
+                if (
+                    isinstance(e, _APIStatusError)
+                    and e.status_code in _TRANSIENT_STATUS_CODES
+                ):
                     return True
                 return False
 
-            last_error = None
+            result = None
             max_attempts = 11
             for attempt in range(max_attempts):
                 try:
@@ -516,11 +517,15 @@ The current date is {current_date}."""
             # as StaleServerError so the CompletionService can re-acquire
             # a fresh server and retry.
             error_body = str(e).lower()
-            if ("404" in error_body or "not found" in error_body) and "server" in error_body:
+            if (
+                "404" in error_body or "not found" in error_body
+            ) and "server" in error_body:
                 import re
+
                 m = re.search(r"server\s+([a-f0-9]+)", str(e), re.IGNORECASE)
                 server_id = m.group(1) if m else "unknown"
                 from graph.errors import StaleServerError
+
                 raise StaleServerError(server_id, e) from e
 
             return ChatResponse(
@@ -600,7 +605,10 @@ The current date is {current_date}."""
             def _is_transient_error(e: Exception) -> bool:
                 if isinstance(e, _APIConnectionError):
                     return True
-                if isinstance(e, _APIStatusError) and e.status_code in _TRANSIENT_STATUS_CODES:
+                if (
+                    isinstance(e, _APIStatusError)
+                    and e.status_code in _TRANSIENT_STATUS_CODES
+                ):
                     return True
                 return False
 
