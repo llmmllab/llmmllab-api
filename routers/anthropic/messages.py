@@ -614,6 +614,8 @@ async def createMessage(
     if not user_id:
         raise HTTPException(status_code=401, detail="User ID not found in request")
 
+    logger.debug("Anthropic headers", extra={"headers": dict(request.headers)})
+
     try:
         req_body = _strip_server_tool_blocks(req_body)
         body = CreateMessageRequest.model_validate(req_body)
@@ -623,9 +625,7 @@ async def createMessage(
         max_queue_wait = (
             getattr(_priority_meta, "max_queue_wait", None) if _priority_meta else None
         )
-        req_source = (
-            getattr(_priority_meta, "source", None) if _priority_meta else None
-        )
+        req_source = getattr(_priority_meta, "source", None) if _priority_meta else None
         req_session_id = (
             getattr(_priority_meta, "session_id", None) if _priority_meta else None
         )
@@ -715,9 +715,9 @@ async def createMessage(
         ):
             if getattr(result, "context_overflow", False):
                 raise HTTPException(
-                status_code=507,
-                detail="Context window exceeded. Please reduce conversation length or use a model with larger context.",
-            )
+                    status_code=507,
+                    detail="Context window exceeded. Please reduce conversation length or use a model with larger context.",
+                )
         raise HTTPException(
             status_code=503,
             detail="Model returned an empty response.",
