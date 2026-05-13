@@ -708,6 +708,11 @@ async def createMessage(
                     status_code=503,
                     detail="Runner service is temporarily unavailable. Please retry.",
                 ) from e
+            if "model" in error_msg and "not found" in error_msg:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Requested model '{body.model}' is not available. Please use a model that is available on a runner.",
+                ) from e
             raise
 
         if result.chat_response is None or (

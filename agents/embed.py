@@ -14,7 +14,7 @@ from typing import (
 import numpy as np
 
 from langchain.agents.middleware import AgentMiddleware
-from langchain.chat_models import BaseChatModel
+from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.embeddings import Embeddings
 
 from models import (
