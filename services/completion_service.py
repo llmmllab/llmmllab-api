@@ -84,6 +84,7 @@ async def _resolve_model(model_name: str, user_id: str) -> str:
         # If model_service is unavailable, return the original name
         return model_name
 
+
 _CONTINUATION_PROMPT = (
     "You described using a tool but did not actually call one. "
     "Call the appropriate tool now. Do not describe what you will do — invoke the tool directly."
@@ -329,7 +330,11 @@ class CompletionService:
         from graph.errors import StaleServerError
 
         from config import STALE_SERVER_RETRIES
+
         max_retries = STALE_SERVER_RETRIES
+
+        # Resolve model name — fall back to user's default if unavailable
+        model_name = await _resolve_model(model_name, user_id)
         try:
             workflow, builder, _server_url = await CompletionService.build_workflow(
                 user_id,
@@ -359,6 +364,7 @@ class CompletionService:
             if builder.server_handle:
                 try:
                     from services.runner_client import runner_client
+
                     await runner_client.release_server(builder.server_handle)
                 except Exception as release_err:
                     logger.debug(
@@ -366,6 +372,7 @@ class CompletionService:
                     )
             # Force model map refresh so stale endpoints are cleared
             from services.runner_client import runner_client
+
             await runner_client.refresh_model_map()
             # Retry with a fresh server handle
             async for event in CompletionService._build_and_run(
