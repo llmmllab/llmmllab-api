@@ -158,8 +158,13 @@ async def lifespan(_: FastAPI):
         _active_counts: dict[str, int] = defaultdict(int)
         _SCHEDULED_CAP = 3  # --parallel (4) - 1 reserved for USER
 
-        # Per-session tracking: session_id -> {model_id, source, start_time, turn_count}
-        _session_state: dict[str, dict] = {}
+        # Per-session tracking: use centralized registry
+        from services.session_registry import (
+            get_session_state,
+            get_session,
+            remove_session,
+            SessionState as _SessionState,
+        )
 
         async def _can_proceed(metadata):
             if not metadata.model_id:
@@ -185,18 +190,20 @@ async def lifespan(_: FastAPI):
 
             if metadata.session_id:
                 import time
-                if metadata.session_id not in _session_state:
-                    _session_state[metadata.session_id] = {
-                        "model_id": metadata.model_id or "unknown",
-                        "source": metadata.source.value if metadata.source else "user",
-                        "start_time": time.monotonic(),
-                        "turn_count": 0,
-                    }
-                _session_state[metadata.session_id]["turn_count"] += 1
-                state = _session_state[metadata.session_id]
+                state = get_session(metadata.session_id)
+                if state is None:
+                    from services.session_registry import get_session_state
+                    states = get_session_state()
+                    state = _SessionState()
+                    state.model_id = metadata.model_id or "unknown"
+                    state.source = metadata.source.value if metadata.source else "user"
+                    state.start_time = time.monotonic()
+                    state.turn_count = 0
+                    states[metadata.session_id] = state
+                state.turn_count += 1
                 active_sessions.labels(
-                    model_id=state["model_id"],
-                    source=state["source"],
+                    model_id=state.model_id,
+                    source=state.source,
                 ).inc()
 
         def _on_complete(metadata):
@@ -204,11 +211,11 @@ async def lifespan(_: FastAPI):
                 _active_counts[metadata.model_id] -= 1
 
             if metadata.session_id:
-                state = _session_state.get(metadata.session_id)
+                state = get_session(metadata.session_id)
                 if state:
                     active_sessions.labels(
-                        model_id=state["model_id"],
-                        source=state["source"],
+                        model_id=state.model_id,
+                        source=state.source,
                     ).dec()
 
         priority_queue.set_can_proceed_callback(_can_proceed)
@@ -233,23 +240,24 @@ async def lifespan(_: FastAPI):
             while True:
                 await asyncio.sleep(30)
                 now = time.monotonic()
+                all_states = get_session_state()
                 stale_ids = [
-                    sid for sid, state in _session_state.items()
-                    if now - state["start_time"] > stale_timeout
-                    and state["turn_count"] > 0
+                    sid for sid, state in all_states.items()
+                    if now - state.start_time > stale_timeout
+                    and state.turn_count > 0
                 ]
                 for sid in stale_ids:
-                    state = _session_state.pop(sid)
-                    if session_duration_seconds:
+                    state = remove_session(sid)
+                    if state and session_duration_seconds:
                         session_duration_seconds.labels(
-                            model_id=state["model_id"],
-                            source=state["source"],
-                        ).observe(now - state["start_time"])
-                    if session_turns_total:
+                            model_id=state.model_id,
+                            source=state.source,
+                        ).observe(now - state.start_time)
+                    if state and session_turns_total:
                         session_turns_total.labels(
-                            model_id=state["model_id"],
-                            source=state["source"],
-                        ).observe(state["turn_count"])
+                            model_id=state.model_id,
+                            source=state.source,
+                        ).observe(state.turn_count)
 
         asyncio.create_task(_cleanup_stale_sessions())
     except Exception as e:
@@ -570,6 +578,13 @@ for router in COMMON_ROUTERS:
 # Include API key management endpoints
 app.include_router(api_key.router)
 app.include_router(metrics_router.router)
+
+# Include session admin endpoints
+try:
+    from routers import session_admin
+    app.include_router(session_admin.router)
+except ImportError:
+    pass
 
 # Initialize distributed tracing
 setup_tracing("llmmllab-api", app)

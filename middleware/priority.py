@@ -24,7 +24,7 @@ from models.request_priority_metadata import (
     RequestPriorityMetadata,
     RequestSource,
 )
-from utils.logging import llmmllogger
+from utils.logging import llmmllogger, set_session_id_ctx, reset_session_id_ctx
 
 logger = llmmllogger.bind(component="priority_middleware")
 
@@ -168,8 +168,12 @@ class PriorityMiddleware(BaseHTTPMiddleware):
 
         request.state.request_priority_metadata = metadata
 
-        response = await call_next(request)
-        response.headers["X-Queue-Priority"] = metadata.priority.name.lower()
-        effective_wait = metadata.max_queue_wait or PRIORITY_QUEUE_TIMEOUT_SEC
-        response.headers["X-Queue-Max-Wait"] = str(int(effective_wait))
-        return response
+        token = set_session_id_ctx(metadata.session_id)
+        try:
+            response = await call_next(request)
+            response.headers["X-Queue-Priority"] = metadata.priority.name.lower()
+            effective_wait = metadata.max_queue_wait or PRIORITY_QUEUE_TIMEOUT_SEC
+            response.headers["X-Queue-Max-Wait"] = str(int(effective_wait))
+            return response
+        finally:
+            reset_session_id_ctx(token)

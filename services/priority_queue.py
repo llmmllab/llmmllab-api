@@ -66,6 +66,7 @@ class _QueueItem:
     sort_key: tuple = field(compare=True)
     metadata: RequestPriorityMetadata = field(compare=False)
     event: asyncio.Event = field(compare=False, default_factory=asyncio.Event)
+    cancelled: bool = field(compare=False, default=False)
 
     @classmethod
     def create(cls, metadata: RequestPriorityMetadata) -> _QueueItem:
@@ -175,6 +176,12 @@ class AsyncPriorityQueue:
                 },
             )
             await self._remove_item(item)
+            raise QueueTimeoutError(
+                max_wait_sec=effective_timeout,
+                actual_wait_sec=metadata.wait_time,
+            ) from None
+
+        if item.cancelled:
             raise QueueTimeoutError(
                 max_wait_sec=effective_timeout,
                 actual_wait_sec=metadata.wait_time,
@@ -412,6 +419,36 @@ class AsyncPriorityQueue:
             queue_size_by_source.labels(source=src).set(count)
         for (mid, src), count in model_source_counts.items():
             queue_size_by_model_source.labels(model_id=mid, source=src).set(count)
+
+    def cancel_by_session_id(self, session_id: str) -> int:
+        """Cancel all queued items matching a session_id.
+
+        Returns the number of items cancelled.
+        """
+        cancelled = 0
+        for item in self._queue:
+            if item.metadata.session_id == session_id:
+                item.cancelled = True
+                item.event.set()
+                cancelled += 1
+        self._queue = [i for i in self._queue if i.metadata.session_id != session_id]
+        self._update_gauges()
+        return cancelled
+
+    @staticmethod
+    async def ensure_model_available(model_id: str, user_id: str | None) -> str:
+        """Check if model is available on any runner. If not, resolve default.
+
+        Returns the (possibly resolved) model_id.
+        """
+        try:
+            from services.model_service import model_service
+
+            return await model_service.resolve_default_model(
+                model_id, user_id or "anonymous"
+            )
+        except Exception:
+            return model_id
 
     @property
     def size(self) -> int:
