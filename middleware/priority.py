@@ -7,6 +7,7 @@ headers, falls back to sensible defaults.  Attaches ``RequestMetadata`` to
 
 from __future__ import annotations
 
+import json
 from typing import Optional
 
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -26,6 +27,36 @@ from models.request_priority_metadata import (
 from utils.logging import llmmllogger
 
 logger = llmmllogger.bind(component="priority_middleware")
+
+
+class _BodyFields:
+    __slots__ = ("session_id", "model_id")
+    session_id: Optional[str]
+    model_id: Optional[str]
+
+
+async def _extract_body_fields(request: Request) -> Optional[_BodyFields]:
+    """Extract session_id and model_id from the request body.
+
+    OpenClaw sets compat.supportsPromptCacheKey=true which causes it to pass
+    the session ID as ``prompt_cache_key`` in the JSON body.  This is the
+    only way to receive session IDs from OpenClaw for ``openai-completions``
+    providers, since ``resolveTransportTurnState`` doesn't fire for that
+    transport path.
+    """
+    content_type = request.headers.get("content-type", "")
+    if "application/json" not in content_type:
+        return None
+    try:
+        body = await request.body()
+        data = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError, Exception):
+        return None
+
+    fields = _BodyFields()
+    fields.session_id = data.get("prompt_cache_key") or None
+    fields.model_id = data.get("model") or None
+    return fields
 
 
 def _parse_max_queue_wait(header_value: str) -> Optional[float]:
@@ -124,6 +155,17 @@ class PriorityMiddleware(BaseHTTPMiddleware):
             return response
 
         metadata = _classify_request(request)
+
+        # Fallback: extract session_id and model_id from request body
+        # OpenClaw sets compat.supportsPromptCacheKey=true which passes
+        # session ID as ``prompt_cache_key`` in the JSON body.
+        body_fields = await _extract_body_fields(request)
+        if body_fields:
+            if not metadata.session_id:
+                metadata.session_id = body_fields.session_id
+            if not getattr(metadata, "model_id", None):
+                metadata.model_id = body_fields.model_id
+
         request.state.request_priority_metadata = metadata
 
         response = await call_next(request)
