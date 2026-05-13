@@ -289,8 +289,6 @@ The current date is {current_date}."""
 
         return system_prompt, convo
 
-        return trimmed
-
     async def run(
         self,
         messages: MessageInput,
