@@ -141,5 +141,9 @@ spec:
               value: "http://tempo.llmmllab.svc.cluster.local:4317"
             - name: CHAT_OPENAI_MAX_RETRIES
               value: "2"
+            - name: CONTEXT_USAGE_SAFETY_MARGIN
+              value: "0.85"
+            - name: CONTEXT_MINIMUM_RATIO
+              value: "0.80"
   strategy:
     type: Recreate

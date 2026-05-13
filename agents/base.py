@@ -37,7 +37,6 @@ from utils.message_conversion import (
 )
 from utils.grammar_generator import parse_structured_output
 
-# Get the 'asyncio' logger
 asyncio_logger = logging.getLogger("asyncio")
 # Set the logging level to WARNING or higher (e.g., ERROR, CRITICAL)
 # This will prevent INFO and DEBUG messages from being displayed when run_sync is used.
@@ -359,7 +358,7 @@ The current date is {current_date}."""
 
             # Convert messages to LangChain format
             normalized_messages = messages_to_lc_messages(convo)
-            self.logger.debug(f"Running agent with {len(normalized_messages)} messages")
+
 
             # Retry transient connection errors (e.g., APIConnectionError)
             # up to 10 times with exponential backoff.
@@ -493,7 +492,8 @@ The current date is {current_date}."""
 
             # Convert messages to LangChain format
             normalized_messages = messages_to_lc_messages(convo)
-            self.logger.debug(f"Running agent with {len(normalized_messages)} messages")
+
+            # Guard against context overflow
             result = await agent.ainvoke({"messages": normalized_messages})  # type: ignore
             self.logger.debug(
                 f"Agent run result ({type(result)}): {serialize_event_data(result)}"

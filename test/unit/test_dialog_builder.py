@@ -113,7 +113,7 @@ class TestDialogGraphBuilderModelResolution:
                 mock_rc.list_models.assert_called_once()
                 assert mock_rc.acquire_server.call_count == 2
                 mock_rc.acquire_server.assert_any_call(
-                    model_id="llama-3-8b", task=ModelTask.TEXTTOTEXT
+                    model_id="llama-3-8b", num_ctx=90000, task=ModelTask.TEXTTOTEXT
                 )
 
     @pytest.mark.asyncio
@@ -176,7 +176,7 @@ class TestDialogGraphBuilderModelResolution:
                     mock_resolve.assert_called_once_with("missing-model", "user-1")
                     assert mock_rc.list_models.call_count == 1
                     mock_rc.acquire_server.assert_any_call(
-                        model_id="default-model", task=ModelTask.TEXTTOTEXT
+                        model_id="default-model", num_ctx=90000, task=ModelTask.TEXTTOTEXT
                     )
 
     @pytest.mark.asyncio
@@ -190,6 +190,7 @@ class TestDialogGraphBuilderModelResolution:
         with patch("graph.workflows.dialog.builder.runner_client") as mock_rc:
             mock_rc.list_models = AsyncMock(return_value=[other_model, embedding])
             mock_rc.model_by_task = AsyncMock(side_effect=lambda t: embedding if t == ModelTask.TEXTTOEMBEDDINGS else None)
+            mock_rc.default_model_by_task = AsyncMock(return_value=None)
 
             from graph.workflows.dialog.builder import DialogGraphBuilder
 
@@ -227,7 +228,7 @@ class TestDialogGraphBuilderModelResolution:
                 mock_rc.model_by_task.assert_any_call(ModelTask.TEXTTOTEXT)
                 mock_rc.model_by_task.assert_any_call(ModelTask.TEXTTOEMBEDDINGS)
                 mock_rc.acquire_server.assert_any_call(
-                    model_id="default-t2t", task=ModelTask.TEXTTOTEXT
+                    model_id="default-t2t", num_ctx=90000, task=ModelTask.TEXTTOTEXT
                 )
 
     @pytest.mark.asyncio
