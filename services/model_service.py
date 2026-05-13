@@ -78,6 +78,16 @@ class ModelService:
                 return fallback
 
             # No fallback configured — return original so downstream can error
+            # Detect truncated/corrupted model names (ending with underscore)
+            if requested_model and requested_model.endswith('_'):
+                logger.warning(
+                    "Truncated or corrupted model name detected",
+                    extra={
+                        "user_id": user_id,
+                        "requested": requested_model,
+                        "reason": "Model name ends with underscore, likely truncated",
+                    },
+                )
             logger.warning(
                 "Requested model not available and no default_model configured",
                 extra={"user_id": user_id, "requested": requested_model},
