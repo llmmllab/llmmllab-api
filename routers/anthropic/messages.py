@@ -328,6 +328,19 @@ async def stream_message(
 
     msg_id = f"msg_{uuid.uuid4().hex[:24]}"
 
+    # Resolve model name before building workflow to handle unavailable models.
+    # This ensures we use a fallback model if the requested model is not found.
+    resolved_model = await model_service.resolve_default_model(model_name, user_id)
+    if resolved_model:
+        model_name = resolved_model
+        logger.info(
+            "Resolved model name",
+            extra={
+                "original": model_name,
+                "resolved": resolved_model,
+            },
+        )
+
     # Build workflow first so we have a server for accurate token counting.
     # The workflow is cached, so stream_completion's internal build will
     # hit the cache and return immediately.
