@@ -106,8 +106,8 @@ Copy `.env.example` to `.env` and set the required values. See `config.py` for d
 
 ### Database
 
-| Variable | Description |
-|----------|-------------|
+| Variable | Default | Description |
+|----------|---------|-------------|
 | `DB_HOST` | `localhost` | PostgreSQL host |
 | `DB_PORT` | `5432` | PostgreSQL port |
 | `DB_USER` | `postgres` | PostgreSQL username |
