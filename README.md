@@ -117,25 +117,12 @@ Copy `.env.example` to `.env` and set the required values. See `config.py` for d
 | `HF_TOKEN` | *(empty)* | HuggingFace token for model downloads |
 | `SEARX_HOST` | *(empty)* | SearXNG instance URL for web search tool |
 
-### Summarization
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MESSAGES_BEFORE_SUMMARY` | `6` | Messages before triggering summary |
-| `SUMMARIES_BEFORE_CONSOLIDATION` | `3` | Summaries before consolidation |
-| `SUMMARY_MODEL` | `qwen3:0.6b` | Model used for summarization |
-| `SUMMARY_SYSTEM_PROMPT` | *(see `.env.example`)* | System prompt for summarization |
-| `MAX_SUMMARY_LEVELS` | `3` | Max nested summary levels |
-| `SUMMARY_WEIGHT_COEFFICIENT` | `1` | Weight for summary importance |
-
 ### Images
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `IMAGE_GENERATION_ENABLED` | `true` | Enable image generation (`true`/`false`) |
 | `IMAGE_DIR` | `/root/images` | Directory for generated images |
 | `IMAGE_RETENTION_HOURS` | `24` | Hours to retain generated images before cleanup |
-| `MAX_IMAGE_SIZE` | `2048` | Max image dimension |
 | `CONFIG_DIR` | `/app/config` | Directory for runtime config files |
 | `HF_HOME` | `/root/.cache/huggingface` | HuggingFace cache directory |
 
@@ -143,8 +130,6 @@ Copy `.env.example` to `.env` and set the required values. See `config.py` for d
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PORT` | `9999` | Server port (passed via Makefile to uvicorn) |
-| `API_VERSION` | `v1` | API version prefix |
 | `LOG_LEVEL` | `WARNING` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
 | `LOG_FORMAT` | `console` | Log format (`console` for human-readable, `json` for structured) |
 | `FORCE_COLOR` | `0` | Force colored output even without TTY (`1` to enable) |
