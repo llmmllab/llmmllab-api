@@ -179,3 +179,11 @@ Deployments are automated via GitHub Actions on merges to `main`. Images are tag
 
 <!-- trigger self-hosted deploy -->
 
+## Priority Queue Rules
+
+- items must be sorted in order of priority
+- items with the SAME priority are sorted by active session (tracking session-id) such that an session which has been active longer takes priority over a new session with the same model
+- items in queue will be elevated in priority if they remain in queue for long enough
+- items may be dequeued if the model has a server which has ANY idle slots. for example if there are 4 total slots available for a server (denoted by the `parallel` flag), and three are processing, but one is idle, an item for that server may be dequeued so long as it meets the rest of this criteria
+- SYSTEM or SCHEDULED items may only take up all but 1 available slots. i.e. - if there are 4 slots, 3 processing and 1 idle, a SYSTEM or SCHEDULED item must remain in queue until there are at least 2 idle slots on that server
+- if resources allow, an additional server may be spun up for SAME model if there is a backlog of requests for that model in the queue, but only if there are no idle servers for that model. i.e. - if there are 4 slots available across 2 servers for a model, and all 4 are processing, and there are 2 items in the queue for that model, an additional server may be spun up to accommodate the backlog, but if there is even 1 idle slot across those servers, no additional server may be spun up until that slot is filled
