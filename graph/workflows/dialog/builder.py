@@ -151,15 +151,68 @@ class DialogGraphBuilder(GraphBuilder):
             if not embedding_model_def:
                 raise RuntimeError("No TextToEmbeddings model available")
 
-            primary_handle = await runner_client.acquire_server(
-                model_id=primary_model_def.id,
-                num_ctx=(
-                    primary_model_def.parameters.num_ctx
-                    if primary_model_def.parameters
-                    else 90000
-                ),
-                task=primary_model_def.task,
+            # Determine initial context window size for primary model
+            primary_num_ctx = (
+                primary_model_def.parameters.num_ctx
+                if primary_model_def.parameters
+                else 90000
             )
+            
+            # Try to acquire primary server with requested context window
+            # If all runners refuse to start (507), fall back to smaller context
+            primary_handle = None
+            for attempt in range(3):
+                try:
+                    primary_handle = await runner_client.acquire_server(
+                        model_id=primary_model_def.id,
+                        num_ctx=primary_num_ctx,
+                        task=primary_model_def.task,
+                    )
+                    break
+                except RuntimeError as e:
+                    error_msg = str(e)
+                    if "No healthy runner available" in error_msg:
+                        if attempt == 0:
+                            # First attempt failed - try with reduced context window
+                            reduced_ctx = max(4096, primary_num_ctx // 2)
+                            logger.warning(
+                                f"Primary server acquisition failed with num_ctx={primary_num_ctx}, "
+                                f"trying reduced context {reduced_ctx}",
+                                extra={
+                                    "model": primary_model_def.name,
+                                    "original_ctx": primary_num_ctx,
+                                    "reduced_ctx": reduced_ctx,
+                                    "error": error_msg,
+                                },
+                            )
+                            primary_num_ctx = reduced_ctx
+                        else:
+                            # Second attempt also failed - try even smaller
+                            reduced_ctx = max(2048, primary_num_ctx // 2)
+                            logger.warning(
+                                f"Primary server acquisition failed with num_ctx={primary_num_ctx}, "
+                                f"trying reduced context {reduced_ctx}",
+                                extra={
+                                    "model": primary_model_def.name,
+                                    "original_ctx": primary_num_ctx,
+                                    "reduced_ctx": reduced_ctx,
+                                    "error": error_msg,
+                                },
+                            )
+                            primary_num_ctx = reduced_ctx
+                    else:
+                        # Different error - re-raise
+                        raise
+
+            if primary_handle is None:
+                raise RuntimeError(
+                    f"Failed to acquire primary server for model {primary_model_def.name} "
+                    f"even with reduced context window. "
+                    f"Last attempt used num_ctx={primary_num_ctx}. "
+                    f"Error: {error_msg}"
+                )
+
+            # Embedding model doesn't need context window - just acquire normally
             embedding_handle = await runner_client.acquire_server(
                 model_id=embedding_model_def.id,
                 task=embedding_model_def.task,

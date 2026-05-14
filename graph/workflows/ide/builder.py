@@ -189,14 +189,68 @@ class IdeGraphBuilder(GraphBuilder):
 
             assert model_def.id is not None, "Model definition must have an ID"
 
-            server_handle = await runner_client.acquire_server(
-                model_id=model_def.id,
-                num_ctx=(
-                    model_def.parameters.num_ctx
-                    if model_def.parameters
-                    else 90000
-                ),
-                task=model_def.task,
+            # Determine initial context window size
+            num_ctx = model_def.parameters.num_ctx if model_def.parameters else 90000
+            
+            # Try to acquire server with requested context window
+            # If all runners refuse to start (507), fall back to smaller context
+            server_handle = None
+            for attempt in range(3):
+                try:
+                    server_handle = await runner_client.acquire_server(
+                        model_id=model_def.id,
+                        num_ctx=num_ctx,
+                        task=model_def.task,
+                    )
+                    break
+                except RuntimeError as e:
+                    error_msg = str(e)
+                    if "No healthy runner available" in error_msg:
+                        if attempt == 0:
+                            # First attempt failed - try with reduced context window
+                            reduced_ctx = max(4096, num_ctx // 2)
+                            logger.warning(
+                                f"Server acquisition failed with num_ctx={num_ctx}, "
+                                f"trying reduced context {reduced_ctx}",
+                                extra={
+                                    "model": model_def.name,
+                                    "original_ctx": num_ctx,
+                                    "reduced_ctx": reduced_ctx,
+                                    "error": error_msg,
+                                },
+                            )
+                            num_ctx = reduced_ctx
+                        else:
+                            # Second attempt also failed - try even smaller
+                            reduced_ctx = max(2048, num_ctx // 2)
+                            logger.warning(
+                                f"Server acquisition failed with num_ctx={num_ctx}, "
+                                f"trying reduced context {reduced_ctx}",
+                                extra={
+                                    "model": model_def.name,
+                                    "original_ctx": num_ctx,
+                                    "reduced_ctx": reduced_ctx,
+                                    "error": error_msg,
+                                },
+                            )
+                            num_ctx = reduced_ctx
+                    else:
+                        # Different error - re-raise
+                        raise
+
+            if server_handle is None:
+                raise RuntimeError(
+                    f"Failed to acquire server for model {model_def.name} "
+                    f"even with reduced context window. "
+                    f"Last attempt used num_ctx={num_ctx}. "
+                    f"Error: {error_msg}"
+                )
+
+            self.logger.debug(
+                "Acquired server",
+                user_id=user_id,
+                model=model_def.name,
+                num_ctx=num_ctx,
             )
 
             primary_model = ChatOpenAI(
