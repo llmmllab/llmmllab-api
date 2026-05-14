@@ -48,8 +48,14 @@ from graph.nodes.memory import (
     MemoryCreationNode,
     MemoryStorageNode,
 )
+from utils.logging import _session_id_ctx
 from tools.registry import registry_manager
 from graph.state import WorkflowState, assemble_context_messages
+
+
+def _get_session_id_header():
+    sid = _session_id_ctx.get()
+    return {"X-Session-ID": sid} if sid else None
 
 
 class DialogGraphBuilder(GraphBuilder):
@@ -170,7 +176,8 @@ class DialogGraphBuilder(GraphBuilder):
                 api_key=SecretStr("none"),
                 model=primary_model_def.name,
                 stream_usage=True,
-                max_retries=config.CHAT_OPENAI_MAX_RETRIES,  # retry transient 503 (slots busy) errors
+                max_retries=config.CHAT_OPENAI_MAX_RETRIES,
+                default_headers=_get_session_id_header(),
             )
             embedding_model = OpenAIEmbeddings(
                 base_url=embedding_handle.base_url,

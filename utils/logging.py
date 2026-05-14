@@ -8,12 +8,33 @@ from datetime import datetime
 import os
 import sys
 from typing import Dict, Any, Optional
+import contextvars
 import json
 from pydantic import BaseModel
 import structlog
 import structlog.typing
 import structlog.stdlib
 import structlog.processors
+
+
+_session_id_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "session_id", default=None
+)
+
+
+def set_session_id_ctx(session_id: str | None) -> contextvars.Token[str | None]:
+    return _session_id_ctx.set(session_id)
+
+
+def reset_session_id_ctx(token: contextvars.Token[str | None]) -> None:
+    _session_id_ctx.reset(token)
+
+
+def _add_session_id_to_logs(_, __, event_dict):
+    sid = _session_id_ctx.get()
+    if sid:
+        event_dict["session_id"] = sid
+    return event_dict
 
 
 def serialize_event_data(
@@ -142,6 +163,7 @@ class LlmmlLogger:
             structlog.processors.TimeStamper(fmt="iso"),
             structlog.processors.StackInfoRenderer(),
             structlog.processors.UnicodeDecoder(),
+            _add_session_id_to_logs,
         ]
 
         # Select renderer based on LOG_FORMAT

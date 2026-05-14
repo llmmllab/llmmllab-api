@@ -39,6 +39,7 @@ from pydantic import SecretStr
 from agents.chat import ChatAgent
 from graph.workflows.base import GraphBuilder, should_continue_tool_calls
 from graph.nodes.agent import AgentNode
+from utils.logging import _session_id_ctx
 from graph.nodes.server_tools import (
     ServerToolNode,
     make_should_continue_server_tools,
@@ -81,6 +82,11 @@ next message. Use that result to inform your next step.
    behavioral instructions in `<system-reminder>` tags. Follow those
    instructions while using your tools to accomplish the requested work.
 """
+
+
+def _get_session_id_header():
+    sid = _session_id_ctx.get()
+    return {"X-Session-ID": sid} if sid else None
 
 
 class IdeGraphBuilder(GraphBuilder):
@@ -204,7 +210,8 @@ class IdeGraphBuilder(GraphBuilder):
                 api_key=SecretStr("none"),
                 model=model_def.name,
                 stream_usage=True,
-                max_retries=2,  # retry transient 503 (slots busy) errors
+                max_retries=2,
+                default_headers=_get_session_id_header(),
             )
             self.server_handle = server_handle
 

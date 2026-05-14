@@ -45,6 +45,19 @@ logger = llmmllogger.bind(component="completion_service")
 # These should trigger a server-handle refresh, not an empty-response retry.
 _CONNECTION_ERRORS = (RemoteProtocolError, ConnectError)
 
+# In-flight task registry for session cancellation
+_in_flight_tasks: dict[str, asyncio.Task] = {}
+
+
+async def cancel_session(session_id: str) -> bool:
+    """Cancel an in-flight task by session_id. Returns True if found."""
+    task = _in_flight_tasks.pop(session_id, None)
+    if task and not task.done():
+        task.cancel()
+        return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Metrics
 # ---------------------------------------------------------------------------
@@ -489,8 +502,19 @@ class CompletionService:
         from services.priority_queue import priority_queue
 
         _effective_priority = priority if priority is not None else Priority.HIGH
+        _queue_item = None
         _queue_ctx = None
         if PRIORITY_QUEUE_ENABLED:
+            resolved_model = await priority_queue.ensure_model_available(
+                model_name, user_id
+            )
+            if resolved_model != model_name:
+                logger.info(
+                    "Model resolved before enqueue",
+                    extra={"original": model_name, "resolved": resolved_model},
+                )
+                model_name = resolved_model
+
             _meta = RequestPriorityMetadata(
                 source=source or RequestSource.USER,
                 priority=_effective_priority,
@@ -499,7 +523,13 @@ class CompletionService:
                 max_queue_wait=max_queue_wait,
                 session_id=session_id,
             )
-            _queue_ctx = await priority_queue.enqueue(_meta)
+            _queue_item, _queue_ctx = await priority_queue.enqueue(_meta)
+
+            if session_id:
+                try:
+                    _in_flight_tasks[session_id] = asyncio.current_task()
+                except RuntimeError:
+                    pass
         try:
             # ---------- primary pass (with connection-error retry) ----------
             async for event in CompletionService._build_and_run_with_retry(
@@ -813,10 +843,14 @@ class CompletionService:
 
         except asyncio.CancelledError:
             logger.warning("Stream cancelled (client disconnect) — stopping retries")
+            if session_id:
+                _in_flight_tasks.pop(session_id, None)
             return
         finally:
-            if _queue_ctx is not None:
-                await priority_queue.dequeue()
+            if session_id:
+                _in_flight_tasks.pop(session_id, None)
+            if _queue_item is not None:
+                await priority_queue.dequeue(_queue_item)
 
     # ------------------------------------------------------------------
     # Non-streaming path
@@ -849,8 +883,19 @@ class CompletionService:
         from services.priority_queue import priority_queue
 
         _effective_priority = priority if priority is not None else Priority.HIGH
+        _queue_item = None
         _queue_ctx = None
         if PRIORITY_QUEUE_ENABLED:
+            resolved_model = await priority_queue.ensure_model_available(
+                model_name, user_id
+            )
+            if resolved_model != model_name:
+                logger.info(
+                    "Model resolved before enqueue",
+                    extra={"original": model_name, "resolved": resolved_model},
+                )
+                model_name = resolved_model
+
             _meta = RequestPriorityMetadata(
                 source=source or RequestSource.USER,
                 priority=_effective_priority,
@@ -859,7 +904,13 @@ class CompletionService:
                 max_queue_wait=max_queue_wait,
                 session_id=session_id,
             )
-            _queue_ctx = await priority_queue.enqueue(_meta)
+            _queue_item, _queue_ctx = await priority_queue.enqueue(_meta)
+
+            if session_id:
+                try:
+                    _in_flight_tasks[session_id] = asyncio.current_task()
+                except RuntimeError:
+                    pass
 
         try:
 
@@ -1130,5 +1181,7 @@ class CompletionService:
 
             return result
         finally:
-            if _queue_ctx is not None:
-                await priority_queue.dequeue()
+            if session_id:
+                _in_flight_tasks.pop(session_id, None)
+            if _queue_item is not None:
+                await priority_queue.dequeue(_queue_item)

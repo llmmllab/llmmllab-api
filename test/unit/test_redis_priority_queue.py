@@ -43,7 +43,7 @@ class TestFallbackToInMemory:
         event_task = asyncio.create_task(q.enqueue(meta))
         await asyncio.sleep(0.01)
         result = await q.dequeue()
-        event = await event_task
+        _, event = await event_task
         assert result is not None
         assert result.priority == Priority.HIGH
         assert event.is_set()
