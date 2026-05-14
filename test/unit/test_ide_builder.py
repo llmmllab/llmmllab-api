@@ -199,7 +199,7 @@ class TestIdeGraphBuilderModelResolution:
 
         with patch("graph.workflows.ide.builder.runner_client") as mock_rc:
             mock_rc.list_models = AsyncMock(return_value=[other_model])
-            mock_rc.model_by_task = AsyncMock()
+            mock_rc.model_by_task = AsyncMock(return_value=None)
 
             from graph.workflows.ide.builder import IdeGraphBuilder
 
