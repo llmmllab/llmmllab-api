@@ -15,48 +15,38 @@ from utils.logging import llmmllogger
 logger = llmmllogger.bind(component="priority_queue")
 
 # Prometheus metrics (imported from centralized registry)
-try:
-    from middleware.api_metrics import (
-        queue_enqueued_total,
-        queue_dequeued_total,
-        queue_wait_time_seconds,
-        queue_size as _queue_size_gauge,
-        queue_aged_total,
-        queue_size_by_model,
-        queue_size_by_source,
-        queue_size_by_model_source,
-    )
-
-    _HAS_PROMETHEUS = True
-except ImportError:
-    _HAS_PROMETHEUS = False
+from middleware.api_metrics import (
+    queue_enqueued_total,
+    queue_dequeued_total,
+    queue_wait_time_seconds,
+    queue_size as _queue_size_gauge,
+    queue_aged_total,
+    queue_size_by_model,
+    queue_size_by_source,
+    queue_size_by_model_source,
+)
 
 
 def _inc_enqueued(priority: Priority, source: str) -> None:
-    if _HAS_PROMETHEUS:
-        queue_enqueued_total.labels(priority=priority.name, source=source).inc()
+    queue_enqueued_total.labels(priority=priority.name, source=source).inc()
 
 
 def _inc_dequeued(priority: Priority, source: str) -> None:
-    if _HAS_PROMETHEUS:
-        queue_dequeued_total.labels(priority=priority.name, source=source).inc()
+    queue_dequeued_total.labels(priority=priority.name, source=source).inc()
 
 
 def _observe_wait(seconds: float, priority: Priority, source: str) -> None:
-    if _HAS_PROMETHEUS:
-        queue_wait_time_seconds.labels(priority=priority.name, source=source).observe(
-            seconds
-        )
+    queue_wait_time_seconds.labels(priority=priority.name, source=source).observe(
+        seconds
+    )
 
 
 def _set_size(priority: Priority, size: int) -> None:
-    if _HAS_PROMETHEUS:
-        _queue_size_gauge.labels(priority=priority.name).set(size)
+    _queue_size_gauge.labels(priority=priority.name).set(size)
 
 
 def _inc_aged(from_p: Priority, to_p: Priority) -> None:
-    if _HAS_PROMETHEUS:
-        queue_aged_total.labels(from_priority=from_p.name, to_priority=to_p.name).inc()
+    queue_aged_total.labels(from_priority=from_p.name, to_priority=to_p.name).inc()
 
 
 @dataclass(order=True)
@@ -557,9 +547,6 @@ class AsyncPriorityQueue:
         for p in Priority:
             _set_size(p, self._sizes.get(p, 0))
 
-        if not _HAS_PROMETHEUS:
-            return
-
         model_counts: dict[str, int] = {}
         source_counts: dict[str, int] = {}
         model_source_counts: dict[tuple[str, str], int] = {}
@@ -602,36 +589,6 @@ class AsyncPriorityQueue:
             self._update_gauges()
             for p in Priority:
                 self._sizes[p] = sum(1 for i in self._queue if i.metadata.priority == p)
-        return cancelled
-
-    @staticmethod
-    async def ensure_model_available(model_id: str, user_id: str | None) -> str:
-        """Check if model is available on any runner. If not, resolve default.
-
-        Returns the (possibly resolved) model_id.
-        """
-        try:
-            from services.model_service import model_service
-
-            return await model_service.resolve_default_model(
-                model_id, user_id or "anonymous"
-            )
-        except Exception:
-            return model_id
-
-    def cancel_by_session_id(self, session_id: str) -> int:
-        """Cancel all queued items matching a session_id.
-
-        Returns the number of items cancelled.
-        """
-        cancelled = 0
-        for item in self._queue:
-            if item.metadata.session_id == session_id:
-                item.cancelled = True
-                item.event.set()
-                cancelled += 1
-        self._queue = [i for i in self._queue if i.metadata.session_id != session_id]
-        self._update_gauges()
         return cancelled
 
     @staticmethod
