@@ -638,3 +638,32 @@ class TestRunnerClientContextReduction:
             await client.acquire_server("small-model")
         # Should have only 1 call (no retries)
         assert mock.post.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_acquire_passes_num_ctx_in_initial_payload(self):
+        """When num_ctx is provided, it should be included in the initial payload."""
+        calls = []
+
+        async def mock_post(url, **kw):
+            body = kw.get("json", {})
+            calls.append(body)
+            # First attempt succeeds with provided num_ctx
+            r = MagicMock()
+            r.status_code = 201
+            r.json.return_value = {
+                "server_id": "test-server",
+                "base_url": "http://r1:8000/v1/server/test-server",
+                "model": "test-model",
+            }
+            r.raise_for_status = MagicMock()
+            return r
+
+        mock = _mock_client(post=AsyncMock(side_effect=mock_post))
+        client = RunnerClient(endpoints=["http://r1:8000"])
+        client._client = mock
+        client._model_map = {"test-model": ["http://r1:8000"]}
+
+        handle = await client.acquire_server("test-model", num_ctx=40960)
+        assert handle.server_id == "test-server"
+        # Should have tried with num_ctx=40960 in the first attempt
+        assert calls[0].get("num_ctx") == 40960

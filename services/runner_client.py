@@ -360,9 +360,9 @@ class RunnerClient:
         context attempts), this method automatically retries with a
         progressively smaller ``num_ctx`` before giving up.
 
-        Extra kwargs are accepted for forward compatibility with callers
-        that pass task/config_override. config_override is forwarded to
-        the runner if present.
+        Extra kwargs are forwarded to the runner:
+        - ``config_override``: Override runner config (if present)
+        - ``num_ctx``: Context window size (if present)
 
         Returns:
             ServerHandle with connection details for the allocated server.
@@ -374,6 +374,9 @@ class RunnerClient:
         config_override = kwargs.get("config_override")
         if config_override:
             payload["config_override"] = config_override
+        num_ctx = kwargs.get("num_ctx")
+        if num_ctx is not None:
+            payload["num_ctx"] = num_ctx
 
         # Fast path: use cached model map
         mapped_endpoints = self._model_map.get(model_id)
