@@ -39,8 +39,8 @@ Copy `.env.example` to `.env` and set the required values. See `config.py` for d
 
 ### Database
 
-| Variable | Description |
-|----------|-------------|
+| Variable | Default | Description |
+|----------|---------|-------------|
 | `DB_HOST` | `localhost` | PostgreSQL host |
 | `DB_PORT` | `5432` | PostgreSQL port |
 | `DB_USER` | `postgres` | PostgreSQL username |
@@ -54,8 +54,6 @@ Copy `.env.example` to `.env` and set the required values. See `config.py` for d
 
 ### Redis (Optional)
 
-| Variable | Description |
-|----------|-------------|
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `REDIS_ENABLED` | `true` | Enable Redis caching (`true`/`false`) |
@@ -72,8 +70,6 @@ Copy `.env.example` to `.env` and set the required values. See `config.py` for d
 
 ### Authentication
 
-| Variable | Description |
-|----------|-------------|
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `AUTH_ISSUER` | `https://auth.longstorymedia.com` | JWT issuer URL |
@@ -85,8 +81,6 @@ Copy `.env.example` to `.env` and set the required values. See `config.py` for d
 
 ### Runner / Inference
 
-| Variable | Description |
-|----------|-------------|
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `RUNNER_ENDPOINTS` | `http://localhost:9000` | Comma-separated runner service URLs |
@@ -103,8 +97,6 @@ Copy `.env.example` to `.env` and set the required values. See `config.py` for d
 
 ### Priority Queue
 
-| Variable | Description |
-|----------|-------------|
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PRIORITY_QUEUE_ENABLED` | `true` | Enable request priority queuing (`true`/`false`) |
@@ -116,8 +108,6 @@ Copy `.env.example` to `.env` and set the required values. See `config.py` for d
 
 ### Chat / LLM
 
-| Variable | Description |
-|----------|-------------|
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CHAT_OPENAI_MAX_RETRIES` | `2` | Max retries for OpenAI-compatible chat completions |
@@ -129,8 +119,6 @@ Copy `.env.example` to `.env` and set the required values. See `config.py` for d
 
 ### Summarization
 
-| Variable | Description |
-|----------|-------------|
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MESSAGES_BEFORE_SUMMARY` | `6` | Messages before triggering summary |
@@ -142,8 +130,6 @@ Copy `.env.example` to `.env` and set the required values. See `config.py` for d
 
 ### Images
 
-| Variable | Description |
-|----------|-------------|
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `IMAGE_GENERATION_ENABLED` | `true` | Enable image generation (`true`/`false`) |
@@ -155,8 +141,6 @@ Copy `.env.example` to `.env` and set the required values. See `config.py` for d
 
 ### General
 
-| Variable | Description |
-|----------|-------------|
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `9999` | Server port (passed via Makefile to uvicorn) |
