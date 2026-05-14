@@ -99,6 +99,7 @@ class BaseAgent:
         self.model = model
         self.system_prompt = system_prompt
         self.num_ctx = num_ctx
+        self._num_ctx_set = num_ctx is not None
 
         self.agent_id = f"{id(self):x}"
         # Middleware list passed to create_agent for behaviors like TodoListMiddleware

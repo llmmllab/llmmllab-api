@@ -56,7 +56,10 @@ class SummarizationMiddleware(AgentMiddleware):
         super().__init__()
 
         self.agent = agent
-        self.max_tokens_before_summary = max_tokens_before_summary or 100000
+        self.max_tokens_before_summary = max_tokens_before_summary or 50000
+        # For models with limited contexts (< 32K), be even more aggressive
+        if self.agent.num_ctx and self.agent.num_ctx < 32000:
+            self.max_tokens_before_summary = min(self.max_tokens_before_summary, self.agent.num_ctx - 2000)
         self.percent_to_keep = percent_to_keep
         self.token_counter = token_counter
         self.messages_to_keep = min_messages_to_keep
@@ -84,6 +87,7 @@ class SummarizationMiddleware(AgentMiddleware):
             f"({self.max_tokens_before_summary}), summarizing..."
             f" Keeping last {self.percent_to_keep}% of messages."
             f" Total messages: {len(messages)}"
+            f" Agent num_ctx: {self.agent.num_ctx}"
         )
 
         cutoff_index = self._find_safe_cutoff(messages)
