@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from langchain.agents.structured_output import ProviderStrategy
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
-from langchain.chat_models import BaseChatModel
+from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.tools import BaseTool
 from langchain_core.messages import BaseMessage, AIMessage
 
@@ -36,8 +36,8 @@ from utils.message_conversion import (
     extract_text_from_message,
 )
 from utils.grammar_generator import parse_structured_output
+from utils.token_estimation import estimate_tokens, estimate_message_tokens
 
-# Get the 'asyncio' logger
 asyncio_logger = logging.getLogger("asyncio")
 # Set the logging level to WARNING or higher (e.g., ERROR, CRITICAL)
 # This will prevent INFO and DEBUG messages from being displayed when run_sync is used.
@@ -290,6 +290,70 @@ The current date is {current_date}."""
 
         return system_prompt, convo
 
+    def _trim_messages_to_context(
+        self, messages: List[Message], system_prompt: str
+    ) -> List[Message]:
+        """
+        Trim conversation messages so total tokens fit within the model context window.
+
+        Keeps the most recent messages and drops the oldest ones first, ensuring
+        the combined system prompt + conversation stays under the context limit.
+        Leaves a 10% headroom for the model's response tokens.
+
+        Args:
+            messages: Conversation messages (without system messages)
+            system_prompt: The system prompt text
+
+        Returns:
+            Trimmed message list that fits within context window
+        """
+        if not self.num_ctx or self.num_ctx <= 0:
+            return messages
+
+        # Reserve 10% of context for the model's response
+        headroom_ratio = 0.10
+        max_input_tokens = int(self.num_ctx * (1 - headroom_ratio))
+
+        # Estimate system prompt tokens
+        system_tokens = estimate_tokens(system_prompt)
+
+        # Calculate total conversation tokens
+        total_tokens = system_tokens
+        per_message_tokens = []
+        for msg in messages:
+            msg_tokens = estimate_message_tokens(msg)
+            per_message_tokens.append(msg_tokens)
+            total_tokens += msg_tokens
+
+        if total_tokens <= max_input_tokens:
+            return messages
+
+        # Trim from the front (oldest messages first)
+        self.logger.warning(
+            "Conversation exceeds context window, trimming messages",
+            total_tokens=total_tokens,
+            max_input_tokens=max_input_tokens,
+            num_ctx=self.num_ctx,
+            message_count=len(messages),
+        )
+
+        trimmed = list(messages)  # copy
+        remaining_tokens = total_tokens
+
+        while remaining_tokens > max_input_tokens and len(trimmed) > 1:
+            removed_tokens = per_message_tokens.pop(0)
+            trimmed.pop(0)
+            remaining_tokens -= removed_tokens
+
+        self.logger.info(
+            "Trimmed conversation to fit context window",
+            original_count=len(messages),
+            trimmed_count=len(trimmed),
+            remaining_tokens=remaining_tokens,
+            max_input_tokens=max_input_tokens,
+        )
+        return trimmed
+
     async def run(
         self,
         messages: MessageInput,
@@ -357,17 +421,30 @@ The current date is {current_date}."""
                 self.logger.error("🚨 Agent is None after _get_or_create_agent call!")
                 raise ValueError("Agent creation failed - agent is None")
 
+            # Trim conversation to fit within context window before sending
+            convo = self._trim_messages_to_context(convo, system_prompt)
+
             # Convert messages to LangChain format
             normalized_messages = messages_to_lc_messages(convo)
             self.logger.debug(f"Running agent with {len(normalized_messages)} messages")
 
-            # Retry transient connection errors (e.g., APIConnectionError)
+            # Retry transient errors (connection errors + 5xx status errors like 503)
             # up to 10 times with exponential backoff.
             # Early retries use short delays (2s, 4s, 8s); later retries
             # use longer delays (16s, 32s, 60s, 60s, 60s, 60s) to allow
             # time for the runner/API to recover.
             # Non-transient errors propagate immediately.
             from openai import APIConnectionError as _APIConnectionError
+            from openai import APIStatusError as _APIStatusError
+
+            _TRANSIENT_STATUS_CODES = frozenset({502, 503, 504})
+
+            def _is_transient_error(e: Exception) -> bool:
+                if isinstance(e, _APIConnectionError):
+                    return True
+                if isinstance(e, _APIStatusError) and e.status_code in _TRANSIENT_STATUS_CODES:
+                    return True
+                return False
 
             last_error = None
             max_attempts = 11
@@ -375,13 +452,15 @@ The current date is {current_date}."""
                 try:
                     result = await agent.ainvoke({"messages": normalized_messages})  # type: ignore
                     break
-                except _APIConnectionError as e:
+                except Exception as e:
+                    if not _is_transient_error(e):
+                        raise
                     last_error = e
                     if attempt < max_attempts - 1:
                         # Exponential backoff capped at 60s
                         backoff = min(2 ** (attempt + 1), 60)
                         self.logger.warning(
-                            f"Transient connection error, retrying in {backoff}s "
+                            f"Transient error ({type(e).__name__}), retrying in {backoff}s "
                             f"(attempt {attempt + 1}/{max_attempts})",
                             extra={"error": str(e)},
                         )
@@ -431,6 +510,19 @@ The current date is {current_date}."""
 
             if isinstance(e, (APITimeoutError, TimeoutError)):
                 raise
+
+            # Detect stale server handles: 404 "Server X not found" means
+            # the llama.cpp server was evicted from the runner.  Re-raise
+            # as StaleServerError so the CompletionService can re-acquire
+            # a fresh server and retry.
+            error_body = str(e).lower()
+            if ("404" in error_body or "not found" in error_body) and "server" in error_body:
+                import re
+                m = re.search(r"server\s+([a-f0-9]+)", str(e), re.IGNORECASE)
+                server_id = m.group(1) if m else "unknown"
+                from graph.errors import StaleServerError
+                raise StaleServerError(server_id, e) from e
+
             return ChatResponse(
                 done=True,
                 message=Message(
@@ -491,10 +583,49 @@ The current date is {current_date}."""
                 self.logger.error("🚨 Agent is None after _get_or_create_agent call!")
                 raise ValueError("Agent creation failed - agent is None")
 
+            # Trim conversation to fit within context window before sending
+            convo = self._trim_messages_to_context(convo, system_prompt)
+
             # Convert messages to LangChain format
             normalized_messages = messages_to_lc_messages(convo)
             self.logger.debug(f"Running agent with {len(normalized_messages)} messages")
-            result = await agent.ainvoke({"messages": normalized_messages})  # type: ignore
+
+            # Retry transient errors (connection errors + 5xx status errors like 503)
+            # up to 10 times with exponential backoff.
+            from openai import APIConnectionError as _APIConnectionError
+            from openai import APIStatusError as _APIStatusError
+
+            _TRANSIENT_STATUS_CODES = frozenset({502, 503, 504})
+
+            def _is_transient_error(e: Exception) -> bool:
+                if isinstance(e, _APIConnectionError):
+                    return True
+                if isinstance(e, _APIStatusError) and e.status_code in _TRANSIENT_STATUS_CODES:
+                    return True
+                return False
+
+            last_error = None
+            max_attempts = 11
+            for attempt in range(max_attempts):
+                try:
+                    result = await agent.ainvoke({"messages": normalized_messages})  # type: ignore
+                    break
+                except Exception as e:
+                    if not _is_transient_error(e):
+                        raise
+                    last_error = e
+                    if attempt < max_attempts - 1:
+                        backoff = min(2 ** (attempt + 1), 60)
+                        self.logger.warning(
+                            f"Transient error ({type(e).__name__}), retrying in {backoff}s "
+                            f"(attempt {attempt + 1}/{max_attempts})",
+                            extra={"error": str(e)},
+                        )
+                        import asyncio as _asyncio
+
+                        await _asyncio.sleep(backoff)
+                    else:
+                        raise
             self.logger.debug(
                 f"Agent run result ({type(result)}): {serialize_event_data(result)}"
             )

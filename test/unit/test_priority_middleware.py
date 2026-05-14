@@ -5,7 +5,7 @@ Tests _classify_request logic from middleware/priority.py using
 mocked Starlette requests.
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -154,3 +154,134 @@ class TestMaxQueueWaitHeader:
         req = _make_request(headers={"X-Max-Queue-Wait": "99999"})
         meta = _classify_request(req)
         assert meta.max_queue_wait == float(PRIORITY_QUEUE_MAX_WAIT_MAX_SEC)
+
+
+class TestExtractBodyFields:
+    """Body field extraction for session_id and model_id from request body."""
+
+    @pytest.mark.asyncio
+    async def test_prompt_cache_key_extracted_as_session_id(self):
+        from middleware.priority import _extract_body_fields
+
+        body = b'{"model": "Qwen3_6_27B", "prompt_cache_key": "sess-from-body"}'
+        req = MagicMock()
+        req.headers = {"content-type": "application/json"}
+        req.body = AsyncMock(return_value=body)
+        fields = await _extract_body_fields(req)
+        assert fields.session_id == "sess-from-body"
+        assert fields.model_id == "Qwen3_6_27B"
+
+    @pytest.mark.asyncio
+    async def test_no_prompt_cache_key_returns_none_session_id(self):
+        from middleware.priority import _extract_body_fields
+
+        body = b'{"model": "Qwen3_6_27B"}'
+        req = MagicMock()
+        req.headers = {"content-type": "application/json"}
+        req.body = AsyncMock(return_value=body)
+        fields = await _extract_body_fields(req)
+        assert fields.session_id is None
+        assert fields.model_id == "Qwen3_6_27B"
+
+    @pytest.mark.asyncio
+    async def test_non_json_content_type_returns_none(self):
+        from middleware.priority import _extract_body_fields
+
+        req = MagicMock()
+        req.headers = {"content-type": "text/plain"}
+        fields = await _extract_body_fields(req)
+        assert fields is None
+
+    @pytest.mark.asyncio
+    async def test_invalid_json_returns_none(self):
+        from middleware.priority import _extract_body_fields
+
+        req = MagicMock()
+        req.headers = {"content-type": "application/json"}
+        req.body = AsyncMock(return_value=b"not json")
+        fields = await _extract_body_fields(req)
+        assert fields is None
+
+    @pytest.mark.asyncio
+    async def test_empty_prompt_cache_key_treated_as_none(self):
+        from middleware.priority import _extract_body_fields
+
+        body = b'{"model": "Qwen3_6_27B", "prompt_cache_key": ""}'
+        req = MagicMock()
+        req.headers = {"content-type": "application/json"}
+        req.body = AsyncMock(return_value=body)
+        fields = await _extract_body_fields(req)
+        assert fields.session_id is None
+
+
+class TestDispatchBodyFallback:
+    """PriorityMiddleware dispatch falls back to body fields when headers are missing."""
+
+    @pytest.mark.asyncio
+    async def test_session_id_from_body_when_no_header(self):
+        from middleware.priority import PriorityMiddleware
+
+        body = b'{"model": "Qwen3_6_27B", "prompt_cache_key": "sess-body-123"}'
+        req = MagicMock()
+        req.url.path = "/v1/chat/completions"
+        req.headers = {
+            "content-type": "application/json",
+            "X-Request-Priority": "low",
+        }
+        req.body = AsyncMock(return_value=body)
+        req.state = MagicMock(spec=["user_id"])
+        req.state.user_id = None
+
+        response = MagicMock()
+        response.headers = {}
+        call_next = AsyncMock(return_value=response)
+
+        middleware = PriorityMiddleware(app=MagicMock())
+        result = await middleware.dispatch(req, call_next)
+
+        assert req.state.request_priority_metadata.session_id == "sess-body-123"
+        assert req.state.request_priority_metadata.model_id == "Qwen3_6_27B"
+
+    @pytest.mark.asyncio
+    async def test_header_session_id_takes_precedence_over_body(self):
+        from middleware.priority import PriorityMiddleware
+
+        body = b'{"model": "Qwen3_6_27B", "prompt_cache_key": "sess-body"}'
+        req = MagicMock()
+        req.url.path = "/v1/chat/completions"
+        req.headers = {
+            "content-type": "application/json",
+            "X-Request-Priority": "low",
+            "X-OpenClaw-Session-ID": "sess-header",
+        }
+        req.body = AsyncMock(return_value=body)
+        req.state = MagicMock(spec=["user_id"])
+        req.state.user_id = None
+
+        response = MagicMock()
+        response.headers = {}
+        call_next = AsyncMock(return_value=response)
+
+        middleware = PriorityMiddleware(app=MagicMock())
+        await middleware.dispatch(req, call_next)
+
+        assert req.state.request_priority_metadata.session_id == "sess-header"
+
+    @pytest.mark.asyncio
+    async def test_non_completion_endpoint_skips_body_extraction(self):
+        from types import SimpleNamespace
+        from middleware.priority import PriorityMiddleware
+
+        req = MagicMock()
+        req.url.path = "/v1/models"
+        req.headers = {}
+        req.state = SimpleNamespace()
+
+        response = MagicMock()
+        response.headers = {}
+        call_next = AsyncMock(return_value=response)
+
+        middleware = PriorityMiddleware(app=MagicMock())
+        await middleware.dispatch(req, call_next)
+
+        assert not hasattr(req.state, "request_priority_metadata")

@@ -71,6 +71,8 @@ HTTP Request → Auth Middleware → Router → CompletionService → Composer �
 
 **LangGraph Workflows**: `graph/workflows/ide/builder.py` and `graph/workflows/dialog/builder.py` build StateGraphs with nodes for agent execution, tool calling, memory search/store, and web search. `graph/executor.py` streams workflow events.
 
+**Context Overflow Guard**: `agents/base.py::_ensure_context_fits()` estimates token usage and trims old messages when the conversation exceeds the model's context window (with a configurable safety margin). If trimming can't help (e.g., runner auto-reduced `n_ctx` due to memory pressure), a `ContextOverflowError` is raised and converted to a user-friendly message. The `num_ctx` is passed to the runner on `acquire_server()` so the runner can refuse to start undersized servers.
+
 **Tool System**: `tools/registry.py` manages tool discovery. `tools/static/` contains built-in tools (web search, web reader, memory retrieval, todo). `graph/nodes/server_tools.py` handles server-side tool execution within the workflow.
 
 **Multi-Tier Storage**: `db/__init__.py` exposes a `storage` singleton with 15+ storage components (conversation, message, memory, search, summary, thought, tool_call, document, todo, image, model, api_key, checkpoint, user_config, cache). Schema managed by Alembic, runs automatically on startup. Raw SQL stored in `db/sql/`.
@@ -90,6 +92,8 @@ All config is environment-based (`config.py`). Key variables:
 - `HF_TOKEN` — HuggingFace model downloads
 - Cache eviction is controlled by the runner via `CACHE_TIMEOUT_MIN` and `EVICTION_TIMEOUT_MIN` env vars
 - `ENABLE_TOOL_CONTINUATION` — force tool call if model describes but doesn't invoke (default true)
+- `CONTEXT_USAGE_SAFETY_MARGIN` — fraction of num_ctx reserved for conversation input (default 0.85)
+- `CONTEXT_MINIMUM_RATIO` — reject runner servers with less than this fraction of requested context (default 0.80)
 
 ### Project Structure
 

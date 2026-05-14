@@ -14,34 +14,17 @@ from utils.logging import llmmllogger
 
 logger = llmmllogger.bind(component="priority_queue")
 
-# Prometheus metrics
+# Prometheus metrics (imported from centralized registry)
 try:
-    from prometheus_client import Counter, Histogram, Gauge
-
-    _queue_enqueued_total = Counter(
-        "llmmllab_api_queue_enqueued_total",
-        "Total requests enqueued by priority",
-        ["priority", "source"],
-    )
-    _queue_dequeued_total = Counter(
-        "llmmllab_api_queue_dequeued_total",
-        "Total requests dequeued by priority",
-        ["priority", "source"],
-    )
-    _queue_wait_time_seconds = Histogram(
-        "llmmllab_api_queue_wait_time_seconds",
-        "Time spent waiting in queue by priority",
-        ["priority", "source"],
-    )
-    _queue_size = Gauge(
-        "llmmllab_api_queue_size",
-        "Current queue size by priority",
-        ["priority"],
-    )
-    _queue_aged_total = Counter(
-        "llmmllab_api_queue_aged_total",
-        "Total requests promoted due to aging",
-        ["from_priority", "to_priority"],
+    from middleware.api_metrics import (
+        queue_enqueued_total,
+        queue_dequeued_total,
+        queue_wait_time_seconds,
+        queue_size as _queue_size_gauge,
+        queue_aged_total,
+        queue_size_by_model,
+        queue_size_by_source,
+        queue_size_by_model_source,
     )
 
     _HAS_PROMETHEUS = True
@@ -51,29 +34,29 @@ except ImportError:
 
 def _inc_enqueued(priority: Priority, source: str) -> None:
     if _HAS_PROMETHEUS:
-        _queue_enqueued_total.labels(priority=priority.name, source=source).inc()
+        queue_enqueued_total.labels(priority=priority.name, source=source).inc()
 
 
 def _inc_dequeued(priority: Priority, source: str) -> None:
     if _HAS_PROMETHEUS:
-        _queue_dequeued_total.labels(priority=priority.name, source=source).inc()
+        queue_dequeued_total.labels(priority=priority.name, source=source).inc()
 
 
 def _observe_wait(seconds: float, priority: Priority, source: str) -> None:
     if _HAS_PROMETHEUS:
-        _queue_wait_time_seconds.labels(priority=priority.name, source=source).observe(
+        queue_wait_time_seconds.labels(priority=priority.name, source=source).observe(
             seconds
         )
 
 
 def _set_size(priority: Priority, size: int) -> None:
     if _HAS_PROMETHEUS:
-        _queue_size.labels(priority=priority.name).set(size)
+        _queue_size_gauge.labels(priority=priority.name).set(size)
 
 
 def _inc_aged(from_p: Priority, to_p: Priority) -> None:
     if _HAS_PROMETHEUS:
-        _queue_aged_total.labels(from_priority=from_p.name, to_priority=to_p.name).inc()
+        queue_aged_total.labels(from_priority=from_p.name, to_priority=to_p.name).inc()
 
 
 @dataclass(order=True)
@@ -405,8 +388,30 @@ class AsyncPriorityQueue:
                     break
 
     def _update_gauges(self) -> None:
+        """Update all queue size gauges (by priority, model, source, cross-tab)."""
         for p in Priority:
             _set_size(p, self._sizes.get(p, 0))
+
+        if not _HAS_PROMETHEUS:
+            return
+
+        model_counts = {}
+        source_counts = {}
+        model_source_counts = {}
+
+        for item in self._queue:
+            mid = item.metadata.model_id or "unknown"
+            src = item.metadata.source.value
+            model_counts[mid] = model_counts.get(mid, 0) + 1
+            source_counts[src] = source_counts.get(src, 0) + 1
+            model_source_counts[(mid, src)] = model_source_counts.get((mid, src), 0) + 1
+
+        for mid, count in model_counts.items():
+            queue_size_by_model.labels(model_id=mid).set(count)
+        for src, count in source_counts.items():
+            queue_size_by_source.labels(source=src).set(count)
+        for (mid, src), count in model_source_counts.items():
+            queue_size_by_model_source.labels(model_id=mid, source=src).set(count)
 
     @property
     def size(self) -> int:

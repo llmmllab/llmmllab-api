@@ -16,7 +16,7 @@ import uuid
 from langgraph.graph.state import CompiledStateGraph, StateGraph, END, START
 from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.memory import InMemorySaver
-from langchain.chat_models import BaseChatModel
+from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel
 
@@ -160,10 +160,21 @@ class IdeGraphBuilder(GraphBuilder):
                         None,
                     )
                     if not model_def:
-                        # Fallback model also not found — try to get a model by task
-                        model_def = await runner_client.model_by_task(ModelTask.TEXTTOTEXT)
+                        # Fallback model also not found — use the configured default TextToText model
+                        self.logger.warning(
+                            "Resolved model not found on runners, using default "
+                            "TextToText model",
+                            user_id=user_id,
+                            resolved=model_name,
+                        )
+                        model_def = await runner_client.default_model_by_task(
+                            ModelTask.TEXTTOTEXT
+                        )
                         if not model_def:
-                            raise RuntimeError(f"Model '{model_name}' not found")
+                            raise RuntimeError(
+                                f"Model '{model_name}' not found and no "
+                                "TextToText model available"
+                            )
             else:
                 model_def = await runner_client.model_by_task(ModelTask.TEXTTOTEXT)
                 if not model_def:
@@ -180,6 +191,11 @@ class IdeGraphBuilder(GraphBuilder):
 
             server_handle = await runner_client.acquire_server(
                 model_id=model_def.id,
+                num_ctx=(
+                    model_def.parameters.num_ctx
+                    if model_def.parameters
+                    else 90000
+                ),
                 task=model_def.task,
             )
 

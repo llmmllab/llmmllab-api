@@ -9,7 +9,7 @@ created lazily the first time they are requested.
 import asyncio
 from typing import Dict, List, Optional
 
-from langchain.tools import BaseTool
+from langchain_core.tools import BaseTool
 from structlog.typing import FilteringBoundLogger
 
 from utils.logging import llmmllogger
