@@ -612,7 +612,7 @@ class AsyncPriorityQueue:
 
     @property
     def size(self) -> int:
-        return len(self._queue)
+        return sum(1 for i in self._queue if not i.completed and not i.cancelled)
 
     @property
     def sizes_by_priority(self) -> dict[str, int]:
