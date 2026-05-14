@@ -36,6 +36,7 @@ from utils.message_conversion import (
     extract_text_from_message,
 )
 from utils.grammar_generator import parse_structured_output
+from utils.token_estimation import estimate_tokens, estimate_message_tokens
 
 asyncio_logger = logging.getLogger("asyncio")
 # Set the logging level to WARNING or higher (e.g., ERROR, CRITICAL)
@@ -289,6 +290,70 @@ The current date is {current_date}."""
 
         return system_prompt, convo
 
+    def _trim_messages_to_context(
+        self, messages: List[Message], system_prompt: str
+    ) -> List[Message]:
+        """
+        Trim conversation messages so total tokens fit within the model context window.
+
+        Keeps the most recent messages and drops the oldest ones first, ensuring
+        the combined system prompt + conversation stays under the context limit.
+        Leaves a 10% headroom for the model's response tokens.
+
+        Args:
+            messages: Conversation messages (without system messages)
+            system_prompt: The system prompt text
+
+        Returns:
+            Trimmed message list that fits within context window
+        """
+        if not self.num_ctx or self.num_ctx <= 0:
+            return messages
+
+        # Reserve 10% of context for the model's response
+        headroom_ratio = 0.10
+        max_input_tokens = int(self.num_ctx * (1 - headroom_ratio))
+
+        # Estimate system prompt tokens
+        system_tokens = estimate_tokens(system_prompt)
+
+        # Calculate total conversation tokens
+        total_tokens = system_tokens
+        per_message_tokens = []
+        for msg in messages:
+            msg_tokens = estimate_message_tokens(msg)
+            per_message_tokens.append(msg_tokens)
+            total_tokens += msg_tokens
+
+        if total_tokens <= max_input_tokens:
+            return messages
+
+        # Trim from the front (oldest messages first)
+        self.logger.warning(
+            "Conversation exceeds context window, trimming messages",
+            total_tokens=total_tokens,
+            max_input_tokens=max_input_tokens,
+            num_ctx=self.num_ctx,
+            message_count=len(messages),
+        )
+
+        trimmed = list(messages)  # copy
+        remaining_tokens = total_tokens
+
+        while remaining_tokens > max_input_tokens and len(trimmed) > 1:
+            removed_tokens = per_message_tokens.pop(0)
+            trimmed.pop(0)
+            remaining_tokens -= removed_tokens
+
+        self.logger.info(
+            "Trimmed conversation to fit context window",
+            original_count=len(messages),
+            trimmed_count=len(trimmed),
+            remaining_tokens=remaining_tokens,
+            max_input_tokens=max_input_tokens,
+        )
+        return trimmed
+
     async def run(
         self,
         messages: MessageInput,
@@ -355,6 +420,9 @@ The current date is {current_date}."""
             if agent is None:
                 self.logger.error("🚨 Agent is None after _get_or_create_agent call!")
                 raise ValueError("Agent creation failed - agent is None")
+
+            # Trim conversation to fit within context window before sending
+            convo = self._trim_messages_to_context(convo, system_prompt)
 
             # Convert messages to LangChain format
             normalized_messages = messages_to_lc_messages(convo)
@@ -514,6 +582,9 @@ The current date is {current_date}."""
             if agent is None:
                 self.logger.error("🚨 Agent is None after _get_or_create_agent call!")
                 raise ValueError("Agent creation failed - agent is None")
+
+            # Trim conversation to fit within context window before sending
+            convo = self._trim_messages_to_context(convo, system_prompt)
 
             # Convert messages to LangChain format
             normalized_messages = messages_to_lc_messages(convo)
