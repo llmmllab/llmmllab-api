@@ -160,7 +160,10 @@ class IdeGraphBuilder(GraphBuilder):
                         None,
                     )
                     if not model_def:
-                        raise RuntimeError(f"Model '{model_name}' not found")
+                        # Fallback model also not found — try to get a model by task
+                        model_def = await runner_client.model_by_task(ModelTask.TEXTTOTEXT)
+                        if not model_def:
+                            raise RuntimeError(f"Model '{model_name}' not found")
             else:
                 model_def = await runner_client.model_by_task(ModelTask.TEXTTOTEXT)
                 if not model_def:
