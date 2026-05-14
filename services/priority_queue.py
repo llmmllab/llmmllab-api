@@ -67,6 +67,7 @@ class _QueueItem:
     metadata: RequestPriorityMetadata = field(compare=False)
     event: asyncio.Event = field(compare=False, default_factory=asyncio.Event)
     cancelled: bool = field(compare=False, default=False)
+    completed: bool = field(compare=False, default=False)
 
     @classmethod
     def create(cls, metadata: RequestPriorityMetadata) -> _QueueItem:
@@ -108,6 +109,10 @@ class AsyncPriorityQueue:
         ] = None
         self._recheck_task: Optional[asyncio.Task] = None
         self._recheck_interval = 5.0
+        self._session_last_served: dict[str, float] = {}
+        self._seen_models: set[str] = set()
+        self._seen_sources: set[str] = set()
+        self._seen_model_source_pairs: set[tuple[str, str]] = set()
         self._on_release = on_release
         self._on_complete = on_complete
 
@@ -124,10 +129,11 @@ class AsyncPriorityQueue:
         self,
         metadata: RequestPriorityMetadata,
         timeout_sec: Optional[float] = None,
-    ) -> asyncio.Event:
-        """Add a request to the queue and return an event to wait on.
+    ) -> tuple[_QueueItem, asyncio.Event]:
+        """Add a request to the queue and return (item, event).
 
         The event is set when it is this request's turn to proceed.
+        The item reference should be passed to ``dequeue()`` when done.
 
         Raises:
             QueueFullError: If the queue is at capacity.
@@ -158,6 +164,8 @@ class AsyncPriorityQueue:
             # dequeue() would set its event.
             if len(self._queue) == 1:
                 item.event.set()
+                if self._on_release:
+                    self._on_release(metadata)
 
         # Start aging task
         asyncio.create_task(self._age_item(item, metadata))
@@ -187,7 +195,7 @@ class AsyncPriorityQueue:
                 actual_wait_sec=metadata.wait_time,
             ) from None
 
-        return item.event
+        return item, item.event
 
     def set_can_proceed_callback(
         self,
@@ -211,71 +219,141 @@ class AsyncPriorityQueue:
                 pass
             self._recheck_task = None
 
-    async def dequeue(self) -> Optional[RequestPriorityMetadata]:
-        """Remove the current request and let the next eligible one through.
+    async def dequeue(
+        self, item: Optional[_QueueItem] = None,
+    ) -> Optional[RequestPriorityMetadata]:
+        """Remove the finishing request and let the next eligible one through.
 
-        Pops the highest-priority (front) item — which is the request
-        that just finished. Then iterates through remaining items and
-        releases the first one whose resources are available (as determined
-        by the ``_can_proceed`` callback). Items that can't proceed stay
-        blocked in the queue.
+        If *item* is provided, it is marked completed and lazily removed.
+        If *item* is None (legacy path, e.g. Redis fallback), the front
+        non-completed item is popped as before.
+
+        Then scans remaining items and releases the first one whose
+        resources are available (as determined by the ``_can_proceed``
+        callback). Items that can't proceed stay blocked in the queue.
         """
         released_meta: Optional[RequestPriorityMetadata] = None
         async with self._lock:
             if not self._queue:
+                if item is not None:
+                    item.completed = True
+                    if self._on_complete:
+                        self._on_complete(item.metadata)
                 return None
-            item = self._queue.pop(0)
-            self._sizes[item.metadata.priority] = sum(
-                1 for i in self._queue if i.metadata.priority == item.metadata.priority
-            )
-            _inc_dequeued(item.metadata.priority, item.metadata.source.value)
-            _observe_wait(
-                item.metadata.wait_time,
-                item.metadata.priority,
-                item.metadata.source.value,
-            )
-            self._update_gauges()
+
+            if item is not None:
+                # Event-based: mark the finishing item as completed
+                item.completed = True
+                # Compact leading completed items
+                while self._queue and self._queue[0].completed:
+                    compacted = self._queue.pop(0)
+                    self._sizes[compacted.metadata.priority] = max(
+                        0, self._sizes[compacted.metadata.priority] - 1
+                    )
+                    _inc_dequeued(compacted.metadata.priority, compacted.metadata.source.value)
+                    _observe_wait(
+                        compacted.metadata.wait_time,
+                        compacted.metadata.priority,
+                        compacted.metadata.source.value,
+                    )
+                self._update_gauges()
+                finished_meta = item.metadata
+            else:
+                # Legacy: pop front non-completed item
+                finished_item = self._queue.pop(0)
+                finished_meta = finished_item.metadata
+                self._sizes[finished_item.metadata.priority] = sum(
+                    1 for i in self._queue if i.metadata.priority == finished_item.metadata.priority
+                )
+                _inc_dequeued(finished_item.metadata.priority, finished_item.metadata.source.value)
+                _observe_wait(
+                    finished_item.metadata.wait_time,
+                    finished_item.metadata.priority,
+                    finished_item.metadata.source.value,
+                )
+                self._update_gauges()
+                finished_item.event.set()
 
             if not self._queue:
-                item.event.set()
-                return item.metadata
+                if self._on_complete:
+                    self._on_complete(finished_meta)
+                return finished_meta
 
-            # Always set the popped item's event so its enqueue() completes
-            item.event.set()
-
-            # No callback — release next item unconditionally (original behavior)
-            if self._can_proceed is None:
-                self._queue[0].event.set()
-                released_meta = self._queue[0].metadata
-                return item.metadata
-
-            # Collect metadata for all pending items to check outside lock
+            # Collect pending items to check outside lock
             pending: list[tuple[int, RequestPriorityMetadata]] = [
                 (i, m.metadata) for i, m in enumerate(self._queue)
+                if not m.event.is_set() and not m.completed
             ]
 
-        # Call callback outside the lock to avoid blocking other operations
+        if not pending:
+            if self._on_complete:
+                self._on_complete(finished_meta)
+            return finished_meta
+
+        # Group pending items by priority for session round-robin
+        from collections import defaultdict as _dd
+        by_priority: dict[int, list[tuple[int, RequestPriorityMetadata]]] = _dd(list)
         for idx, metadata in pending:
-            can_go = await self._can_proceed(metadata)
+            by_priority[metadata.priority.value].append((idx, metadata))
+
+        # Process priorities in order (HIGH first)
+        for _pri in sorted(by_priority):
+            candidates = by_priority[_pri]
+            selected_idx = self._select_by_session_rr(candidates)
+            selected_meta: Optional[RequestPriorityMetadata] = None
+            for c_idx, c_meta in candidates:
+                if c_idx == selected_idx:
+                    selected_meta = c_meta
+                    break
+
+            can_go = await self._can_proceed(selected_meta) if self._can_proceed else True  # type: ignore
             if can_go:
                 async with self._lock:
                     if (
-                        idx < len(self._queue)
-                        and self._queue[idx].metadata is metadata
-                        and not self._queue[idx].event.is_set()
+                        selected_idx < len(self._queue)
+                        and self._queue[selected_idx].metadata is selected_meta
+                        and not self._queue[selected_idx].event.is_set()
+                        and not self._queue[selected_idx].completed
                     ):
-                        # Priority preemption: don't release LOW if HIGH waits
-                        if self._has_higher_priority_waiting(idx):
+                        if self._has_higher_priority_waiting(selected_idx):
+                            continue
+                        self._queue[selected_idx].event.set()
+                        released_meta = selected_meta
+                break
+            if not released_meta:
+                remaining = [c for c in candidates if c[0] != selected_idx]
+                while remaining and not released_meta:
+                    fb_idx = self._select_by_session_rr(remaining)
+                    fb_meta: Optional[RequestPriorityMetadata] = None
+                    for c_idx, c_meta in remaining:
+                        if c_idx == fb_idx:
+                            fb_meta = c_meta
                             break
-                        self._queue[idx].event.set()
-                        released_meta = metadata
+                    can_go = await self._can_proceed(fb_meta) if self._can_proceed else True  # type: ignore
+                    if can_go:
+                        async with self._lock:
+                            if (
+                                fb_idx < len(self._queue)
+                                and self._queue[fb_idx].metadata is fb_meta
+                                and not self._queue[fb_idx].event.is_set()
+                                and not self._queue[fb_idx].completed
+                            ):
+                                if self._has_higher_priority_waiting(fb_idx):
+                                    break
+                                self._queue[fb_idx].event.set()
+                                released_meta = fb_meta
+                        break
+                    remaining = [c for c in remaining if c[0] != fb_idx]
+            if released_meta:
                 break
 
         if self._on_release and released_meta is not None:
             self._on_release(released_meta)
+            if released_meta.session_id:
+                self._session_last_served[released_meta.session_id] = time.monotonic()
         if self._on_complete:
-            self._on_complete(item.metadata)
-        return item.metadata
+            self._on_complete(finished_meta)
+        return finished_meta
 
     def _has_higher_priority_waiting(self, released_idx: int) -> bool:
         """Check if any higher-priority item waits behind the released item.
@@ -288,6 +366,28 @@ class AsyncPriorityQueue:
                 if self._queue[i].metadata.priority == Priority.HIGH:
                     return True
         return False
+
+    def _select_by_session_rr(
+        self, candidates: list[tuple[int, RequestPriorityMetadata]],
+    ) -> int:
+        """Select the candidate from the least-recently-served session."""
+        if len(candidates) <= 1:
+            return candidates[0][0]
+
+        def session_score(meta: RequestPriorityMetadata) -> float:
+            sid = meta.session_id
+            if sid is None:
+                return meta.enqueued_at
+            return self._session_last_served.get(sid, meta.enqueued_at)
+
+        best_idx = 0
+        best_score = session_score(candidates[0][1])
+        for i in range(1, len(candidates)):
+            score = session_score(candidates[i][1])
+            if score < best_score:
+                best_score = score
+                best_idx = i
+        return candidates[best_idx][0]
 
     async def _remove_item(self, item: _QueueItem) -> None:
         """Remove a specific item (e.g., on timeout)."""
@@ -375,24 +475,73 @@ class AsyncPriorityQueue:
                 pending: list[tuple[int, RequestPriorityMetadata]] = [
                     (i, m.metadata)
                     for i, m in enumerate(self._queue)
-                    if not m.event.is_set()
+                    if not m.event.is_set() and not m.completed
                 ]
                 if not pending:
                     continue
 
+            # Group by priority for session round-robin
+            from collections import defaultdict as _dd
+            by_priority: dict[int, list[tuple[int, RequestPriorityMetadata]]] = _dd(list)
             for idx, metadata in pending:
-                can_go = await self._can_proceed(metadata)
+                by_priority[metadata.priority.value].append((idx, metadata))
+
+            released_meta: Optional[RequestPriorityMetadata] = None
+            for _pri in sorted(by_priority):
+                candidates = by_priority[_pri]
+                selected_idx = self._select_by_session_rr(candidates)
+                selected_meta: Optional[RequestPriorityMetadata] = None
+                for c_idx, c_meta in candidates:
+                    if c_idx == selected_idx:
+                        selected_meta = c_meta
+                        break
+
+                can_go = await self._can_proceed(selected_meta)  # type: ignore
                 if can_go:
                     async with self._lock:
                         if (
-                            idx < len(self._queue)
-                            and self._queue[idx].metadata is metadata
-                            and not self._queue[idx].event.is_set()
+                            selected_idx < len(self._queue)
+                            and self._queue[selected_idx].metadata is selected_meta
+                            and not self._queue[selected_idx].event.is_set()
+                            and not self._queue[selected_idx].completed
                         ):
-                            self._queue[idx].event.set()
-                            if self._on_release:
-                                self._on_release(metadata)
+                            if self._has_higher_priority_waiting(selected_idx):
+                                continue
+                            self._queue[selected_idx].event.set()
+                            released_meta = selected_meta
                     break
+                if not released_meta:
+                    remaining = [c for c in candidates if c[0] != selected_idx]
+                    while remaining and not released_meta:
+                        fb_idx = self._select_by_session_rr(remaining)
+                        fb_meta: Optional[RequestPriorityMetadata] = None
+                        for c_idx, c_meta in remaining:
+                            if c_idx == fb_idx:
+                                fb_meta = c_meta
+                                break
+                        can_go = await self._can_proceed(fb_meta)  # type: ignore
+                        if can_go:
+                            async with self._lock:
+                                if (
+                                    fb_idx < len(self._queue)
+                                    and self._queue[fb_idx].metadata is fb_meta
+                                    and not self._queue[fb_idx].event.is_set()
+                                    and not self._queue[fb_idx].completed
+                                ):
+                                    if self._has_higher_priority_waiting(fb_idx):
+                                        break
+                                    self._queue[fb_idx].event.set()
+                                    released_meta = fb_meta
+                            break
+                        remaining = [c for c in remaining if c[0] != fb_idx]
+                if released_meta:
+                    break
+
+            if released_meta is not None:
+                if self._on_release:
+                    self._on_release(released_meta)
+                if released_meta.session_id:
+                    self._session_last_served[released_meta.session_id] = time.monotonic()
 
     def _update_gauges(self) -> None:
         """Update all queue size gauges (by priority, model, source, cross-tab)."""
@@ -402,37 +551,48 @@ class AsyncPriorityQueue:
         if not _HAS_PROMETHEUS:
             return
 
-        model_counts = {}
-        source_counts = {}
-        model_source_counts = {}
+        model_counts: dict[str, int] = {}
+        source_counts: dict[str, int] = {}
+        model_source_counts: dict[tuple[str, str], int] = {}
 
         for item in self._queue:
             mid = item.metadata.model_id or "unknown"
             src = item.metadata.source.value
+            self._seen_models.add(mid)
+            self._seen_sources.add(src)
+            self._seen_model_source_pairs.add((mid, src))
             model_counts[mid] = model_counts.get(mid, 0) + 1
             source_counts[src] = source_counts.get(src, 0) + 1
             model_source_counts[(mid, src)] = model_source_counts.get((mid, src), 0) + 1
 
-        for mid, count in model_counts.items():
-            queue_size_by_model.labels(model_id=mid).set(count)
-        for src, count in source_counts.items():
-            queue_size_by_source.labels(source=src).set(count)
-        for (mid, src), count in model_source_counts.items():
-            queue_size_by_model_source.labels(model_id=mid, source=src).set(count)
+        # Reset ALL seen labels (including stale ones) to 0, then set current
+        for mid in self._seen_models:
+            queue_size_by_model.labels(model_id=mid).set(model_counts.get(mid, 0))
+        for src in self._seen_sources:
+            queue_size_by_source.labels(source=src).set(source_counts.get(src, 0))
+        for mid, src in self._seen_model_source_pairs:
+            queue_size_by_model_source.labels(model_id=mid, source=src).set(
+                model_source_counts.get((mid, src), 0)
+            )
 
-    def cancel_by_session_id(self, session_id: str) -> int:
+    async def cancel_by_session_id(self, session_id: str) -> int:
         """Cancel all queued items matching a session_id.
 
         Returns the number of items cancelled.
         """
-        cancelled = 0
-        for item in self._queue:
-            if item.metadata.session_id == session_id:
-                item.cancelled = True
-                item.event.set()
-                cancelled += 1
-        self._queue = [i for i in self._queue if i.metadata.session_id != session_id]
-        self._update_gauges()
+        async with self._lock:
+            cancelled = 0
+            for item in self._queue:
+                if item.metadata.session_id == session_id:
+                    item.cancelled = True
+                    item.event.set()
+                    cancelled += 1
+            self._queue = [i for i in self._queue if i.metadata.session_id != session_id]
+            self._update_gauges()
+            for p in Priority:
+                self._sizes[p] = sum(
+                    1 for i in self._queue if i.metadata.priority == p
+                )
         return cancelled
 
     @staticmethod

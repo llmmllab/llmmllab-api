@@ -24,7 +24,7 @@ async def cancel_session(request: Request, session_id: str):
     queued_cancelled = 0
     try:
         from services.priority_queue import priority_queue
-        queued_cancelled = priority_queue.cancel_by_session_id(session_id)
+        queued_cancelled = await priority_queue.cancel_by_session_id(session_id)
     except Exception:
         pass
 

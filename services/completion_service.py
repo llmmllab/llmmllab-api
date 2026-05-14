@@ -504,6 +504,7 @@ class CompletionService:
         from services.priority_queue import priority_queue
 
         _effective_priority = priority if priority is not None else Priority.HIGH
+        _queue_item = None
         _queue_ctx = None
         if PRIORITY_QUEUE_ENABLED:
             resolved_model = await priority_queue.ensure_model_available(
@@ -524,7 +525,7 @@ class CompletionService:
                 max_queue_wait=max_queue_wait,
                 session_id=session_id,
             )
-            _queue_ctx = await priority_queue.enqueue(_meta)
+            _queue_item, _queue_ctx = await priority_queue.enqueue(_meta)
 
             if session_id:
                 try:
@@ -850,8 +851,8 @@ class CompletionService:
         finally:
             if session_id:
                 _in_flight_tasks.pop(session_id, None)
-            if _queue_ctx is not None:
-                await priority_queue.dequeue()
+            if _queue_item is not None:
+                await priority_queue.dequeue(_queue_item)
 
     # ------------------------------------------------------------------
     # Non-streaming path
@@ -884,6 +885,7 @@ class CompletionService:
         from services.priority_queue import priority_queue
 
         _effective_priority = priority if priority is not None else Priority.HIGH
+        _queue_item = None
         _queue_ctx = None
         if PRIORITY_QUEUE_ENABLED:
             resolved_model = await priority_queue.ensure_model_available(
@@ -904,7 +906,7 @@ class CompletionService:
                 max_queue_wait=max_queue_wait,
                 session_id=session_id,
             )
-            _queue_ctx = await priority_queue.enqueue(_meta)
+            _queue_item, _queue_ctx = await priority_queue.enqueue(_meta)
 
             if session_id:
                 try:
@@ -1183,5 +1185,5 @@ class CompletionService:
         finally:
             if session_id:
                 _in_flight_tasks.pop(session_id, None)
-            if _queue_ctx is not None:
-                await priority_queue.dequeue()
+            if _queue_item is not None:
+                await priority_queue.dequeue(_queue_item)
