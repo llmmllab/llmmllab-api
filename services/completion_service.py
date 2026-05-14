@@ -364,7 +364,6 @@ class CompletionService:
             if builder.server_handle:
                 try:
                     from services.runner_client import runner_client
-
                     await runner_client.release_server(builder.server_handle)
                 except Exception as release_err:
                     logger.debug(
@@ -372,7 +371,6 @@ class CompletionService:
                     )
             # Force model map refresh so stale endpoints are cleared
             from services.runner_client import runner_client
-
             await runner_client.refresh_model_map()
             # Retry with a fresh server handle
             async for event in CompletionService._build_and_run(
