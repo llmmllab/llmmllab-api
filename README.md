@@ -108,86 +108,103 @@ Copy `.env.example` to `.env` and set the required values. See `config.py` for d
 
 | Variable | Description |
 |----------|-------------|
-| `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `DB_SSLMODE` | PostgreSQL (TimescaleDB) connection |
-| `DB_CONNECTION_STRING` | Full connection string (overrides individual DB vars) |
+| `DB_HOST` | `localhost` | PostgreSQL host |
+| `DB_PORT` | `5432` | PostgreSQL port |
+| `DB_USER` | `postgres` | PostgreSQL username |
+| `DB_PASSWORD` | *(empty)* | PostgreSQL password |
+| `DB_NAME` | `llmmllab` | Database name |
+| `DB_SSLMODE` | `disable` | SSL mode (`disable`, `require`, etc.) |
+| `DB_CONNECTION_STRING` | *(auto-built from above)* | Full connection string; overrides individual DB vars if set |
+| `DB_MAINTENANCE_INTERVAL_HOURS` | `24` | Hours between automated DB maintenance runs (VACUUM ANALYZE) |
+| `DB_MAINTENANCE_INITIAL_DELAY_SECONDS` | `300` | Seconds to wait before the first maintenance run |
+| `DB_REINDEX_ON_MAINTENANCE` | `false` | Whether to run `REINDEX` during maintenance (`true`/`false`) |
 
 ### Redis (Optional)
 
-| Variable | Description |
-|----------|-------------|
-| `REDIS_ENABLED` | Enable the multi-tier (memory + Redis + DB) user-config cache (default: `true`; set to `false`/`0`/`no`/`off` to opt out and run with memory + DB only). |
-| `REDIS_HOST`, `REDIS_PORT`, `REDIS_DB` | Redis connection |
-| `REDIS_PASSWORD` | Redis password (optional) |
-| `REDIS_CONVERSATION_TTL`, `REDIS_MESSAGE_TTL`, `REDIS_SUMMARY_TTL` | TTL in minutes for cached data |
-| `REDIS_POOL_SIZE`, `REDIS_MIN_IDLE_CONNECTIONS`, `REDIS_CONNECT_TIMEOUT` | Connection pool settings |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `REDIS_ENABLED` | `true` | Enable Redis caching (`true`/`false`) |
+| `REDIS_HOST` | `localhost` | Redis host |
+| `REDIS_PORT` | `6379` | Redis port |
+| `REDIS_DB` | `0` | Redis database number |
+| `REDIS_PASSWORD` | *(empty)* | Redis password |
+| `REDIS_CONVERSATION_TTL` | `360` | Conversation cache TTL (seconds) |
+| `REDIS_MESSAGE_TTL` | `180` | Message cache TTL (seconds) |
+| `REDIS_SUMMARY_TTL` | `720` | Summary cache TTL (seconds) |
+| `REDIS_POOL_SIZE` | `10` | Connection pool size |
+| `REDIS_MIN_IDLE_CONNECTIONS` | `2` | Minimum idle connections in pool |
+| `REDIS_CONNECT_TIMEOUT` | `5` | Connection timeout (seconds) |
 
 ### Authentication
 
-| Variable | Description |
-|----------|-------------|
-| `AUTH_ISSUER`, `AUTH_AUDIENCE`, `AUTH_JWKS_URI` | JWT auth via JWKS |
-| `AUTH_CLIENT_ID`, `AUTH_CLIENT_SECRET` | OAuth client credentials |
-| `TEST_USER_ID` | Seed a local dev user + API key on startup (saved to `.env.local`) |
-| `INTERNAL_API_KEY` | Internal service-to-service API key |
-| `INTERNAL_ALLOWED_IPS` | Comma-separated CIDR list for internal API access |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AUTH_ISSUER` | `https://auth.longstorymedia.com` | JWT issuer URL |
+| `AUTH_AUDIENCE` | `lsm-client` | Expected JWT audience claim |
+| `AUTH_JWKS_URI` | `https://auth.longstorymedia.com/keys` | JWKS endpoint for key discovery |
+| `AUTH_CLIENT_ID` | `lsm-client` | OAuth client ID |
+| `AUTH_CLIENT_SECRET` | *(empty)* | OAuth client secret |
+| `TEST_USER_ID` | *(empty)* | If set, seeds a local dev user + API key on startup (saved to `.env.local`) |
 
 ### Runner / Inference
 
-| Variable | Description |
-|----------|-------------|
-| `RUNNER_ENDPOINTS` | Comma-separated runner service URLs |
-| `RUNNER_RETRIES` | Runner acquisition retries (default: 2) |
-| `RUNNER_RETRY_BACKOFF_BASE` | Runner retry backoff base (default: 1) |
-| `RUNNER_HEALTH_TIMEOUT_SEC` | Health check timeout (default: 5.0) |
-| `RUNNER_FAST_TIMEOUT_SEC` | Fast request timeout (default: 10.0) |
-| `RUNNER_ACQUIRE_TIMEOUT_SEC` | Server acquisition timeout (default: 150.0) |
-| `RUNNER_MAX_ACQUIRE_FAILURES` | Circuit breaker threshold (default: 3) |
-| `RUNNER_UNHEALTHY_WINDOW_SEC` | Circuit breaker reset window (default: 60.0) |
-| `RUNNER_ACQUIRE_RETRIES` | Per-endpoint connection retries (default: 2) |
-| `MODEL_CACHE_REFRESH_SEC` | Model map refresh interval (default: 60) |
-| `CONTEXT_USAGE_SAFETY_MARGIN` | Fraction of `num_ctx` reserved for conversation input (default: 0.85) |
-| `CONTEXT_MINIMUM_RATIO` | Min ratio of actual to requested context before rejecting a server (default: 0.80) |
-| `STALE_SERVER_RETRIES` | Retries on stale server handle (default: 1, set 0 to disable) |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RUNNER_ENDPOINTS` | `http://localhost:9000` | Comma-separated runner service URLs |
+| `RUNNER_RETRIES` | `2` | Number of retries for runner requests |
+| `RUNNER_RETRY_BACKOFF_BASE` | `1` | Base seconds for exponential backoff between retries |
+| `RUNNER_HEALTH_TIMEOUT_SEC` | `5.0` | Timeout for runner health checks (seconds) |
+| `RUNNER_FAST_TIMEOUT_SEC` | `10.0` | Timeout for fast runner requests (status, release, etc.) |
+| `RUNNER_ACQUIRE_TIMEOUT_SEC` | `150.0` | Timeout for server acquisition (seconds) |
+| `RUNNER_MAX_ACQUIRE_FAILURES` | `3` | Failures before marking a runner unhealthy (circuit breaker) |
+| `RUNNER_UNHEALTHY_WINDOW_SEC` | `60.0` | Seconds a runner stays unhealthy after tripping circuit breaker |
+| `RUNNER_ACQUIRE_RETRIES` | `2` | Per-endpoint retries during server acquisition |
+| `MODEL_CACHE_REFRESH_SEC` | `60` | Seconds between model list cache refreshes |
+| `STALE_SERVER_RETRIES` | `1` | Retries on stale server handle (set `0` to disable) |
 
 ### Priority Queue
 
-| Variable | Description |
-|----------|-------------|
-| `PRIORITY_QUEUE_ENABLED` | Enable request priority queue (default: true) |
-| `PRIORITY_QUEUE_MAX_SIZE` | Max queued requests (default: 100) |
-| `PRIORITY_QUEUE_TIMEOUT_SEC` | Queue timeout in seconds (default: 300) |
-| `PRIORITY_QUEUE_AGE_THRESHOLD_SEC` | Age threshold for priority bumping (default: 60) |
-| `PRIORITY_QUEUE_MAX_WAIT_MIN_SEC` | Min wait before priority bump (default: 1) |
-| `PRIORITY_QUEUE_MAX_WAIT_MAX_SEC` | Max wait before priority bump (default: 3600) |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PRIORITY_QUEUE_ENABLED` | `true` | Enable request priority queuing (`true`/`false`) |
+| `PRIORITY_QUEUE_MAX_SIZE` | `100` | Maximum queued requests |
+| `PRIORITY_QUEUE_TIMEOUT_SEC` | `300` | Max time a request waits in queue (seconds) |
+| `PRIORITY_QUEUE_AGE_THRESHOLD_SEC` | `60` | Seconds before a queued request is considered "aging" |
+| `PRIORITY_QUEUE_MAX_WAIT_MIN_SEC` | `1` | Minimum wait time before aging bump (seconds) |
+| `PRIORITY_QUEUE_MAX_WAIT_MAX_SEC` | `3600` | Maximum wait time before aging bump (seconds) |
 
 ### Chat / LLM
 
-| Variable | Description |
-|----------|-------------|
-| `CHAT_OPENAI_MAX_RETRIES` | Max retries for OpenAI-compatible chat completions (default: 2) |
-| `ENABLE_TOOL_CONTINUATION` | Force tool call if model describes but doesn't invoke (default: true) |
-| `OPENAI_API_KEY` | OpenAI API key (for remote models) |
-| `ANTHROPIC_API_KEY` | Anthropic API key (for remote models) |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CHAT_OPENAI_MAX_RETRIES` | `2` | Max retries for OpenAI-compatible chat completions |
+| `ENABLE_TOOL_CONTINUATION` | `true` | Allow tool-call continuation in agent loops (`true`/`false`) |
+| `OPENAI_API_KEY` | *(empty)* | OpenAI API key (for external model calls) |
+| `ANTHROPIC_API_KEY` | *(empty)* | Anthropic API key |
+| `HF_TOKEN` | *(empty)* | HuggingFace token for model downloads |
+| `SEARX_HOST` | *(empty)* | SearXNG instance URL for web search tool |
 
 ### Summarization
 
-| Variable | Description |
-|----------|-------------|
-| `MESSAGES_BEFORE_SUMMARY` | Messages before triggering summary (default: 6) |
-| `SUMMARIES_BEFORE_CONSOLIDATION` | Summaries before consolidation (default: 3) |
-| `SUMMARY_MODEL` | Model used for summarization (default: qwen3:0.6b) |
-| `SUMMARY_SYSTEM_PROMPT` | System prompt for summarization |
-| `MAX_SUMMARY_LEVELS` | Max nested summary levels (default: 3) |
-| `SUMMARY_WEIGHT_COEFFICIENT` | Weight for summary importance (default: 1) |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MESSAGES_BEFORE_SUMMARY` | `6` | Messages before triggering summary |
+| `SUMMARIES_BEFORE_CONSOLIDATION` | `3` | Summaries before consolidation |
+| `SUMMARY_MODEL` | `qwen3:0.6b` | Model used for summarization |
+| `SUMMARY_SYSTEM_PROMPT` | *(see `.env.example`)* | System prompt for summarization |
+| `MAX_SUMMARY_LEVELS` | `3` | Max nested summary levels |
+| `SUMMARY_WEIGHT_COEFFICIENT` | `1` | Weight for summary importance |
 
 ### Images
 
-| Variable | Description |
-|----------|-------------|
-| `IMAGE_GENERATION_ENABLED` | Enable image generation (default: true) |
-| `IMAGE_DIR` | Local image storage path |
-| `MAX_IMAGE_SIZE` | Max image dimension (default: 2048) |
-| `IMAGE_RETENTION_HOURS` | Image cleanup retention (default: 24) |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `IMAGE_GENERATION_ENABLED` | `true` | Enable image generation (`true`/`false`) |
+| `IMAGE_DIR` | `/root/images` | Directory for generated images |
+| `IMAGE_RETENTION_HOURS` | `24` | Hours to retain generated images before cleanup |
+| `MAX_IMAGE_SIZE` | `2048` | Max image dimension |
+| `CONFIG_DIR` | `/app/config` | Directory for runtime config files |
+| `HF_HOME` | `/root/.cache/huggingface` | HuggingFace cache directory |
 
 ### Vision Token Accounting
 
@@ -237,16 +254,19 @@ When enabled, writes every raw model token (no stripping/modification) plus all 
 
 ### General
 
-| Variable | Description |
-|----------|-------------|
-| `PORT` | Server port (default: 8000) |
-| `API_VERSION` | API version prefix (default: v1) |
-| `LOG_LEVEL` | Logging verbosity (debug, info, warning, error). Read directly by `utils/logging.py` because logging is bootstrapped before `config.py` loads. |
-| `LOG_FORMAT` | Log format (console or json). Same bootstrap-order constraint as `LOG_LEVEL`. |
-| `FORCE_COLOR` | Force ANSI colors in console log output (default: `0`). Useful when log output is piped through a logger that strips terminal detection. |
-| `HF_TOKEN` | HuggingFace token for model downloads |
-| `SEARX_HOST` | SearXNG instance URL for web search |
-| `CUDA_VISIBLE_DEVICES` | GPU devices for inference |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | `9999` | Server port (passed via Makefile to uvicorn) |
+| `API_VERSION` | `v1` | API version prefix |
+| `LOG_LEVEL` | `WARNING` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`). Read directly by `utils/logging.py` because logging is bootstrapped before `config.py` loads. |
+| `LOG_FORMAT` | `console` | Log format (`console` for human-readable, `json` for structured). Same bootstrap-order constraint as `LOG_LEVEL`. |
+| `FORCE_COLOR` | `0` | Force ANSI colors in console log output even without TTY (`1` to enable) |
+| `TEMPO_ENDPOINT` | `http://tempo.llmmllab.svc.cluster.local:4317` | Jaeger/Tempo OTLP endpoint for distributed tracing |
+| `CUDA_VISIBLE_DEVICES` | *(unset)* | GPU device IDs visible to the process |
+| `CUDA_DEVICE_ORDER` | `PCI_BUS_ID` | CUDA device ordering |
+| `PYTHONMALLOC` | `malloc` | Python memory allocator |
+| `MALLOC_ARENA_MAX` | `2` | glibc malloc arena limit (reduces memory fragmentation) |
+| `GGML_LOG_LEVEL` | `2` | GGML (llama.cpp backend) log verbosity |
 
 ## Project Structure
 
