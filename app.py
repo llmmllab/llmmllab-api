@@ -147,6 +147,7 @@ async def lifespan(_: FastAPI):
 
     # Wire up resource-aware priority queue
     try:
+        from collections import defaultdict
         from services.runner_client import (
             runner_client as _runner_client,
         )  # pylint: disable=import-outside-toplevel
@@ -154,41 +155,103 @@ async def lifespan(_: FastAPI):
             priority_queue,
         )  # pylint: disable=import-outside-toplevel
 
-        _active_sessions: set[str] = set()
+        _active_counts: dict[str, int] = defaultdict(int)
+        _SCHEDULED_CAP = 3  # --parallel (4) - 1 reserved for USER
+
+        # Per-session tracking: session_id -> {model_id, source, start_time, turn_count}
+        _session_state: dict[str, dict] = {}
 
         async def _can_proceed(metadata):
             if not metadata.model_id:
                 return True
-            # Serialize scheduled/system requests per model to prevent
-            # multiple cron jobs from competing for the same server.
             try:
-                from models.request_priority_metadata import (  # pylint: disable=import-outside-toplevel
-                    RequestSource,
-                )
+                from models.request_priority_metadata import RequestSource
             except Exception:
                 RequestSource = None
             if (
                 RequestSource
                 and metadata.source in (RequestSource.SCHEDULED, RequestSource.SYSTEM)
-                and metadata.model_id in _active_sessions
+                and _active_counts[metadata.model_id] >= _SCHEDULED_CAP
             ):
                 return False
             try:
                 return await _runner_client.check_slot_availability(metadata.model_id)
             except Exception:
-                return True  # Never block on check failure
+                return True
 
         def _on_release(metadata):
             if metadata.model_id:
-                _active_sessions.add(metadata.model_id)
+                _active_counts[metadata.model_id] += 1
+
+            if metadata.session_id:
+                import time
+                if metadata.session_id not in _session_state:
+                    _session_state[metadata.session_id] = {
+                        "model_id": metadata.model_id or "unknown",
+                        "source": metadata.source.value if metadata.source else "user",
+                        "start_time": time.monotonic(),
+                        "turn_count": 0,
+                    }
+                _session_state[metadata.session_id]["turn_count"] += 1
+                state = _session_state[metadata.session_id]
+                active_sessions.labels(
+                    model_id=state["model_id"],
+                    source=state["source"],
+                ).inc()
 
         def _on_complete(metadata):
             if metadata.model_id:
-                _active_sessions.discard(metadata.model_id)
+                _active_counts[metadata.model_id] -= 1
+
+            if metadata.session_id:
+                state = _session_state.get(metadata.session_id)
+                if state:
+                    active_sessions.labels(
+                        model_id=state["model_id"],
+                        source=state["source"],
+                    ).dec()
 
         priority_queue.set_can_proceed_callback(_can_proceed)
         priority_queue.set_session_callbacks(_on_release, _on_complete)
-        logger.info("Resource-aware priority queue callback wired up")
+        logger.info("Resource-aware priority queue callback wired up (scheduled cap=%d)", _SCHEDULED_CAP)
+
+        # Import session metrics
+        try:
+            from middleware.api_metrics import (
+                active_sessions,
+                session_duration_seconds,
+                session_turns_total,
+            )
+        except ImportError:
+            active_sessions = None  # pylint: disable=invalid-name
+            session_duration_seconds = None
+            session_turns_total = None
+
+        # Background task to detect completed sessions and observe metrics
+        async def _cleanup_stale_sessions(stale_timeout=300.0):
+            import time
+            while True:
+                await asyncio.sleep(30)
+                now = time.monotonic()
+                stale_ids = [
+                    sid for sid, state in _session_state.items()
+                    if now - state["start_time"] > stale_timeout
+                    and state["turn_count"] > 0
+                ]
+                for sid in stale_ids:
+                    state = _session_state.pop(sid)
+                    if session_duration_seconds:
+                        session_duration_seconds.labels(
+                            model_id=state["model_id"],
+                            source=state["source"],
+                        ).observe(now - state["start_time"])
+                    if session_turns_total:
+                        session_turns_total.labels(
+                            model_id=state["model_id"],
+                            source=state["source"],
+                        ).observe(state["turn_count"])
+
+        asyncio.create_task(_cleanup_stale_sessions())
     except Exception as e:
         logger.warning(f"Failed to wire up queue resource callback: {e}")
 
@@ -404,6 +467,7 @@ async def auth_middleware_handler(request: Request, call_next):
         "/docs",
         "/redoc",
         "/openapi.json",
+        "/metrics",
         "/static/images/view/",
     ]
 

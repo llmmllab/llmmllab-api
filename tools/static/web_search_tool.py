@@ -32,21 +32,80 @@ Available Engines (see https://docs.searxng.org/dev/engines/index.html):
 
 from typing import Annotated, List, Literal, Optional
 
+import httpx
+
 from langchain_core.tools import tool
 from config import SEARX_HOST
 from utils.logging import llmmllogger
 from models import SearchResult, SearchResultContent, WebSearchConfig
 
-# Import from langchain_community (preferred) then fallback to langchain_classic
-try:  # pragma: no cover - import resolution
-    from langchain_community.utilities.searx_search import SearxSearchWrapper  # type: ignore
-except ModuleNotFoundError:  # pragma: no cover - environment variability
-    try:
-        from langchain_classic.utilities.searx_search import SearxSearchWrapper  # type: ignore
-    except ModuleNotFoundError as e:  # pragma: no cover
-        raise ModuleNotFoundError(
-            "Neither langchain_community nor langchain_classic SearxSearchWrapper available. Install langchain-community >=0.2.0."
-        ) from e
+
+# Native SearxNG wrapper — replaces langchain_community SearxSearchWrapper
+# to eliminate the langchain-community dependency.
+class SearxNGWrapper:
+    """Lightweight SearxNG wrapper using httpx."""
+
+    def __init__(
+        self,
+        searx_host: str,
+        engines: Optional[List[str]] = None,
+        k: int = 10,
+        params: Optional[dict] = None,
+        headers: Optional[dict] = None,
+        categories: Optional[List[str]] = None,
+    ):
+        self.searx_host = searx_host.rstrip("/")
+        self.engines = engines
+        self.k = k
+        self.params = params or {}
+        self.headers = headers or {}
+        self.categories = categories or ["general"]
+
+    def results(
+        self,
+        query: str,
+        num_results: Optional[int] = None,
+        engines: Optional[List[str]] = None,
+        categories: Optional[List[str]] = None,
+    ) -> list[dict]:
+        """Execute a search and return structured results as dicts."""
+        search_params = {
+            "q": query,
+            "format": "json",
+            "categories": ",".join(categories or self.categories),
+        }
+        if engines:
+            search_params["engines"] = ",".join(engines)
+        elif self.engines:
+            search_params["engines"] = ",".join(self.engines)
+
+        # Merge with default params (language, safesearch, etc.)
+        search_params.update({k: v for k, v in self.params.items() if k not in search_params})
+
+        n = num_results or self.k
+
+        try:
+            resp = httpx.get(
+                f"{self.searx_host}/search",
+                params=search_params,
+                headers=self.headers,
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            results = data.get("results", [])[:n]
+            # Normalize to the dict format expected by the caller
+            return [
+                {
+                    "title": r.get("title", ""),
+                    "link": r.get("url", ""),
+                    "snippet": r.get("content", ""),
+                    "Result": "" if r.get("title") else "No good Search Result was found",
+                }
+                for r in results
+            ]
+        except Exception as e:
+            raise RuntimeError(f"SearxNG search failed: {e}") from e
 
 
 #   engines:
@@ -110,7 +169,7 @@ class SearxNG:
         self.searx_host = web_config.searx_host or SEARX_HOST
         self.categories = categories or list[str](web_config.categories)
 
-        # Build SearxSearchWrapper parameters directly from WebSearchConfig
+        # Build search parameters directly from WebSearchConfig
         params = {
             "format": "json",
             "language": web_config.language,
@@ -122,7 +181,7 @@ class SearxNG:
             "User-Agent": web_config.user_agent or "LLMMLLab-WebSearch/1.0",
         }
 
-        self.wrapper = SearxSearchWrapper(
+        self.wrapper = SearxNGWrapper(
             searx_host=self.searx_host,
             engines=web_config.engines,
             k=web_config.max_results,

@@ -1,4 +1,19 @@
 # Loki - log aggregation backend
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: loki-data
+  namespace: llmmllab
+  labels:
+    app: loki
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 10Gi
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -39,6 +54,13 @@ spec:
               port: 3100
             initialDelaySeconds: 10
             periodSeconds: 5
+          volumeMounts:
+            - name: loki-data
+              mountPath: /loki/data
+      volumes:
+        - name: loki-data
+          persistentVolumeClaim:
+            claimName: loki-data
 ---
 apiVersion: v1
 kind: Service

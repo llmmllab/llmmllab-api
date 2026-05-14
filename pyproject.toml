@@ -1,7 +1,7 @@
 [project]
 name = "llmmllab-api"
 version = "0.1.0"
-description = "Flexible API server for LLM-based applications built on top of LangChain and LangGraph"
+description = "Flexible API server for LLM-based applications built on top of LangGraph with minimal LangChain usage"
 readme = "README.md"
 requires-python = ">=3.12"
 authors = [{ name = "LongStoryMedia" }]
@@ -18,14 +18,16 @@ dependencies = [
     "requests>=2.32.0",
 
     # LangChain / LangGraph
-    "langchain>=0.3.0",
-    "langchain-core>=0.3.0",
-    "langgraph>=0.2.0",
+    # langchain-core provides BaseTool, BaseChatModel, Embeddings, messages, tool decorator
+    # langchain (full package) is kept only for create_agent, AgentMiddleware, ProviderStrategy, ToolRuntime
+    # langchain-community was removed — SearxNG now uses native httpx wrapper
+    "langchain>=1.2.0",
+    "langchain-core>=1.3.0",
+    "langgraph>=1.1.0",
     "langgraph-checkpoint>=2.0.0,<3.0.0",
     "langgraph-checkpoint-postgres==2.0.0",
-    "langchain-openai>=0.3.0",
-    "langchain-anthropic>=0.3.0",
-    "langchain-community>=0.3.0",
+    "langchain-openai>=1.1.0",
+    "langchain-anthropic>=1.4.0",
 
     # Model stack
     "huggingface-hub==0.35.0",

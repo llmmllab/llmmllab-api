@@ -9,8 +9,8 @@ import uuid
 
 from langgraph.graph.state import CompiledStateGraph, StateGraph, END, START
 from langgraph.prebuilt import ToolNode
-from langchain.chat_models import BaseChatModel
-from langchain.embeddings import Embeddings
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.embeddings import Embeddings
 from pydantic import BaseModel
 
 import config
@@ -125,7 +125,21 @@ class DialogGraphBuilder(GraphBuilder):
                         None,
                     )
                     if not primary_model_def:
-                        raise RuntimeError(f"Model '{model_name}' not found")
+                        # Fallback model also not found — use the configured default TextToText model
+                        self.logger.warning(
+                            "Resolved model not found on runners, using default "
+                            "TextToText model",
+                            user_id=user_id,
+                            resolved=model_name,
+                        )
+                        primary_model_def = await runner_client.default_model_by_task(
+                            ModelTask.TEXTTOTEXT
+                        )
+                        if not primary_model_def:
+                            raise RuntimeError(
+                                f"Model '{model_name}' not found and no "
+                                "TextToText model available"
+                            )
             else:
                 primary_model_def = await runner_client.model_by_task(ModelTask.TEXTTOTEXT)
                 if not primary_model_def:
@@ -139,6 +153,11 @@ class DialogGraphBuilder(GraphBuilder):
 
             primary_handle = await runner_client.acquire_server(
                 model_id=primary_model_def.id,
+                num_ctx=(
+                    primary_model_def.parameters.num_ctx
+                    if primary_model_def.parameters
+                    else 90000
+                ),
                 task=primary_model_def.task,
             )
             embedding_handle = await runner_client.acquire_server(

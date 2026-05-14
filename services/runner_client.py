@@ -7,14 +7,25 @@ shutdown) and model discovery across all runners.
 
 Uses a persistent ``httpx.AsyncClient`` with connection pooling to avoid
 the overhead of opening a new TCP connection for every request.
+
+Server Handle Lifecycle
+-----------------------
+Every handle returned by ``acquire_server()`` is automatically registered
+in an internal registry. On application shutdown, ``aclose()`` calls
+``shutdown_all_handles()`` which sends DELETE requests to the runner for
+each registered handle, ensuring no orphaned llama.cpp servers remain.
+
+The ``num_ctx`` parameter on ``acquire_server()`` is forwarded to the
+runner, which refuses to start servers when the requested context exceeds
+the model's configured context window (returns HTTP 507).
 """
 
 import asyncio
 import logging
 import os
 import time
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Set
 
 import httpx
 
@@ -79,6 +90,7 @@ class RunnerClient:
         self._UNHEALTHY_WINDOW = _UNHEALTHY_WINDOW
         # Track active server IDs per runner endpoint for cleanup on failure
         self._active_servers_by_endpoint: Dict[str, set[str]] = {}
+        # Registry of active server handles for cleanup on shutdown.
         self._active_handles: set[ServerHandle] = set()
 
     def _get_client(self) -> httpx.AsyncClient:
@@ -211,6 +223,30 @@ class RunnerClient:
 
         return last_response
 
+    async def shutdown_all_handles(self) -> None:
+        """Shut down all registered server handles on the runner.
+
+        Called during application shutdown to ensure no orphaned llama.cpp
+        servers remain running on the runner nodes.
+        """
+        if not self._active_handles:
+            return
+
+        handles_to_shutdown = list(self._active_handles)
+        logger.info(
+            f"Shutting down {len(handles_to_shutdown)} active server handle(s)"
+        )
+
+        for handle in handles_to_shutdown:
+            try:
+                await self.shutdown_server(handle)
+            except Exception as e:
+                logger.warning(
+                    f"Failed to shutdown handle {handle.server_id} during cleanup: {e}"
+                )
+
+        self._active_handles.clear()
+
     @staticmethod
     def _is_stale_server_error(response: httpx.Response) -> bool:
         """Check if a 404 response indicates a stale server handle.
@@ -245,19 +281,8 @@ class RunnerClient:
 
     async def aclose(self) -> None:
         """Close the shared HTTP client and release active servers.  Call during app shutdown."""
-        # Release all active server handles back to their runners.
-        if self._active_handles:
-            logger.info(
-                f"Releasing {len(self._active_handles)} active server handles on shutdown"
-            )
-            for handle in list(self._active_handles):
-                try:
-                    await self.release_server(handle)
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to release server {handle.server_id} on shutdown: {e}"
-                    )
-            self._active_handles.clear()
+        # Shut down all active server handles before closing the client
+        await self.shutdown_all_handles()
 
         if self._refresh_task is not None:
             self._refresh_task.cancel()
@@ -429,23 +454,45 @@ class RunnerClient:
     # Server lifecycle
     # ------------------------------------------------------------------
 
-    async def acquire_server(self, model_id: str, **kwargs) -> ServerHandle:
+    def register_handle(self, handle: ServerHandle) -> None:
+        """Register a server handle for lifecycle cleanup on shutdown."""
+        self._active_handles.add(handle)
+
+    def unregister_handle(self, handle: ServerHandle) -> None:
+        """Unregister a server handle after it has been released/shutdown."""
+        self._active_handles.discard(handle)
+
+    async def acquire_server(self, model_id: str, num_ctx: Optional[int] = None, **kwargs) -> ServerHandle:
         """Acquire a new llama.cpp server from a runner.
 
         Uses the cached model map for fast routing. Falls back to
         health-check scan if the model isn't in the map.
 
-        Extra kwargs are accepted for forward compatibility with callers
-        that pass task/config_override. config_override is forwarded to
-        the runner if present.
+        Parameters
+        ----------
+        model_id:
+            Identifier of the model to load.
+        num_ctx:
+            Requested context window size. Passed to the runner, which
+            refuses the request (HTTP 507) when it exceeds the model's
+            configured context window.
+        **kwargs:
+            Forwarded for compatibility (task, config_override).
 
-        Returns:
-            ServerHandle with connection details for the allocated server.
+        Returns
+        -------
+        ServerHandle
+            Connection details for the allocated server (auto-registered
+            for shutdown cleanup).
 
-        Raises:
-            RuntimeError: if no runner can satisfy the request.
+        Raises
+        ------
+        RuntimeError
+            If no runner can satisfy the request.
         """
         payload: dict[str, Any] = {"model_id": model_id}
+        if num_ctx is not None:
+            payload["num_ctx"] = num_ctx
         config_override = kwargs.get("config_override")
         if config_override:
             payload["config_override"] = config_override
@@ -473,6 +520,7 @@ class RunnerClient:
                     f"Skipping {endpoint}: circuit breaker open "
                     f"({self._acquire_failures.get(endpoint, 0)} failures)"
                 )
+
                 continue
 
             # Retry connection-level errors per endpoint (configurable via RUNNER_ACQUIRE_RETRIES)
@@ -549,6 +597,7 @@ class RunnerClient:
             servers = self._active_servers_by_endpoint.get(handle.runner_host)
             if servers:
                 servers.discard(handle.server_id)
+            self.unregister_handle(handle)
 
     async def shutdown_server(self, handle: ServerHandle) -> None:
         """Permanently shut down a server on the runner."""
@@ -567,6 +616,7 @@ class RunnerClient:
             servers = self._active_servers_by_endpoint.get(handle.runner_host)
             if servers:
                 servers.discard(handle.server_id)
+            self.unregister_handle(handle)
 
     # ------------------------------------------------------------------
     # Model map
@@ -731,6 +781,27 @@ class RunnerClient:
                 logger.warning(f"Failed to query models from {endpoint}: {e}")
                 continue
         return None
+
+    async def default_model_by_task(self, task: ModelTask) -> Optional[Model]:
+        """Find the default model for the given task across all runners.
+
+        Uses the runner's /v1/models/default endpoint which returns the
+        model marked with `default: true` in .models.yaml.
+        Falls back to model_by_task() if no default is configured.
+        """
+        client = self._get_client()
+        for endpoint in self._endpoints:
+            try:
+                resp = await client.get(
+                    f"{endpoint}/v1/models/default", params={"task": task.value}
+                )
+                if resp.status_code == 200:
+                    return Model(**resp.json())
+            except Exception as e:
+                logger.warning(f"Failed to query default model from {endpoint}: {e}")
+                continue
+        # Fallback: if no default configured, return any model matching the task
+        return await self.model_by_task(task)
 
 
 # Module-level singleton
