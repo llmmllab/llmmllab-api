@@ -19,6 +19,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.tools import BaseTool
 from langchain_core.messages import BaseMessage, AIMessage
 
+import config
 from models import (
     MessageContent,
     MessageContentType,
@@ -173,6 +174,8 @@ class BaseAgent:
                 else self._node_metadata.node_name
             ),
             middleware=middleware or [],
+            debug=config.LOG_LEVEL.lower() == "debug"
+            or config.LOG_LEVEL.lower() == "trace",
         )
 
         return agent
@@ -614,6 +617,7 @@ The current date is {current_date}."""
 
             last_error = None
             max_attempts = 11
+            result = None
             for attempt in range(max_attempts):
                 try:
                     result = await agent.ainvoke({"messages": normalized_messages})  # type: ignore
