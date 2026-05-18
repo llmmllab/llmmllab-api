@@ -512,7 +512,7 @@ async def stream_message(
     stop_reason: str | None = None
 
     # Final fallback: all retries produced nothing
-    if not acc.has_content and not acc.has_tool_calls and not acc.final_content:
+    if not acc.has_content and not acc.has_tool_calls and not acc.final_content and acc.finish_reason != "stop":
         logger.warning(
             "All retries produced empty response",
             extra={
@@ -728,18 +728,26 @@ async def createMessage(
                 ) from e
             raise
 
-        if result.chat_response is None or (
-            not result.has_content and not result.has_tool_calls
+        if result.chat_response is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Model returned an empty response.",
+            )
+
+        if (
+            not result.has_content
+            and not result.has_tool_calls
+            and result.chat_response.finish_reason != "stop"
         ):
             if getattr(result, "context_overflow", False):
                 raise HTTPException(
                     status_code=507,
                     detail="Context window exceeded. Please reduce conversation length or use a model with larger context.",
                 )
-        raise HTTPException(
-            status_code=503,
-            detail="Model returned an empty response.",
-        )
+            raise HTTPException(
+                status_code=503,
+                detail="Model returned an empty response.",
+            )
 
         stop_reason_map: dict[str | None, str] = {
             "stop": "end_turn",
