@@ -31,7 +31,7 @@ import httpx
 
 from config import MODEL_CACHE_REFRESH_SEC, RUNNER_ENDPOINTS
 from models import Model, ModelTask
-from utils.logging import llmmllogger
+from utils.logging import llmmllogger, _session_id_ctx
 
 # Suppress verbose httpx/httpcore trace and debug logs at module level.
 # This ensures they're silenced before any client is created, regardless of
@@ -107,6 +107,11 @@ class RunnerClient:
             )
         return self._client
 
+    def _session_headers(self) -> Dict[str, str]:
+        """Return X-Session-ID header from current context, if available."""
+        sid = _session_id_ctx.get()
+        return {"X-Session-ID": sid} if sid else {}
+
     # ------------------------------------------------------------------
     # Retry-After aware request proxying
     # ------------------------------------------------------------------
@@ -152,12 +157,14 @@ class RunnerClient:
         """
         url = f"{handle.base_url}/{path.lstrip('/')}"
         client = self._get_client()
+        headers = self._session_headers()
 
         # First attempt (no backoff yet)
         response = await client.request(
             method=method,
             url=url,
             json=json,
+            headers=headers,
             timeout=_ACQUIRE_TIMEOUT,
             stream=stream,
         )
@@ -204,6 +211,7 @@ class RunnerClient:
                 method=method,
                 url=url,
                 json=json,
+                headers=headers,
                 timeout=_ACQUIRE_TIMEOUT,
                 stream=stream,
             )
@@ -571,6 +579,7 @@ class RunnerClient:
                     resp = await client.post(
                         f"{endpoint}/v1/server/create",
                         json=payload,
+                        headers=self._session_headers(),
                         timeout=_ACQUIRE_TIMEOUT,
                     )
 
@@ -624,7 +633,8 @@ class RunnerClient:
         try:
             client = self._get_client()
             resp = await client.post(
-                f"{handle.runner_host}/v1/server/{handle.server_id}/release"
+                f"{handle.runner_host}/v1/server/{handle.server_id}/release",
+                headers=self._session_headers(),
             )
             resp.raise_for_status()
             logger.info(f"Released server {handle.server_id}")
@@ -645,7 +655,8 @@ class RunnerClient:
         try:
             client = self._get_client()
             resp = await client.delete(
-                f"{handle.runner_host}/v1/server/{handle.server_id}"
+                f"{handle.runner_host}/v1/server/{handle.server_id}",
+                headers=self._session_headers(),
             )
             resp.raise_for_status()
             logger.info(f"Shutdown server {handle.server_id}")
