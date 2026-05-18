@@ -3,7 +3,7 @@ import json
 import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime
-from typing import Literal, TypeAlias, Union
+from typing import Any, Dict, Literal, TypeAlias, Union
 from wsgiref import headers
 
 from fastapi import APIRouter, HTTPException, Request
@@ -38,6 +38,7 @@ from models.openai.chat_completion_stream_response_delta import (
 )
 from models.openai.completion_usage import CompletionUsage
 from models.openai.create_chat_completion_request import CreateChatCompletionRequest
+from models.model_parameters import ModelParameters
 from models.openai.create_chat_completion_response import (
     ChoicesItem,
     CreateChatCompletionResponse,
@@ -335,6 +336,7 @@ async def stream_chat_completion(
     model_name: str,
     client_tools: list[dict] | None = None,
     tool_choice: str | None = None,
+    model_parameters: ModelParameters | None = None,
     priority: Priority | None = None,
     max_queue_wait: float | None = None,
     source: RequestSource | None = None,
@@ -379,6 +381,7 @@ async def stream_chat_completion(
             model_name=model_name,
             client_tools=client_tools,
             tool_choice=tool_choice,
+            model_parameters=model_parameters,
             priority=priority,
             max_queue_wait=max_queue_wait,
             source=source,
@@ -598,6 +601,35 @@ async def createChatCompletion(
         getattr(_priority_meta, "session_id", None) if _priority_meta else None
     )
 
+    # Build ModelParameters from explicit OpenAI fields + optional model_parameters override
+    # Explicit individual fields take highest priority, then model_parameters, then model defaults
+    _oai_params_dict: Dict[str, Any] = {}
+    if body.max_tokens is not None:
+        _oai_params_dict["max_tokens"] = body.max_tokens
+    if body.seed is not None:
+        _oai_params_dict["seed"] = body.seed
+    if body.stop is not None:
+        _oai_params_dict["stop"] = (
+            body.stop.root if hasattr(body.stop, "root") else body.stop
+        )
+    if body.frequency_penalty != 0:
+        _oai_params_dict["repeat_penalty"] = body.frequency_penalty
+    if body.presence_penalty != 0 and body.frequency_penalty == 0:
+        _oai_params_dict["repeat_penalty"] = body.presence_penalty
+    if body.reasoning_effort is not None:
+        _oai_params_dict["reasoning_effort"] = (
+            body.reasoning_effort.root if hasattr(body.reasoning_effort, "root") else body.reasoning_effort
+        )
+
+    model_parameters: ModelParameters | None = None
+    if body.model_parameters or _oai_params_dict:
+        if body.model_parameters:
+            model_parameters = body.model_parameters.model_copy(
+                update=_oai_params_dict if _oai_params_dict else {}
+            )
+        elif _oai_params_dict:
+            model_parameters = ModelParameters(**_oai_params_dict)
+
     if body.stream:
         # Only pass tool kwargs when they have actual values to avoid
         # bypassing workflow caching with empty build_kwargs
@@ -612,6 +644,7 @@ async def createChatCompletion(
                 user_id,
                 internal_messages,
                 body.model,
+                model_parameters=model_parameters,
                 priority=priority,
                 max_queue_wait=max_queue_wait,
                 source=req_source,
@@ -634,6 +667,7 @@ async def createChatCompletion(
             model_name=body.model,
             client_tools=client_tools,
             tool_choice=tool_choice,
+            model_parameters=model_parameters,
             priority=priority,
             max_queue_wait=max_queue_wait,
             source=req_source,

@@ -31,6 +31,7 @@ from models import (
     MessageContentType,
     UserConfig,
 )
+from models.model_parameters import ModelParameters
 from services.runner_client import runner_client
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from pydantic import SecretStr
@@ -157,13 +158,20 @@ class DialogGraphBuilder(GraphBuilder):
             if not embedding_model_def:
                 raise RuntimeError("No TextToEmbeddings model available")
 
+            # Merge request-level model parameters override onto model defaults
+            request_params: ModelParameters | None = kwargs.get("model_parameters")
+            if request_params and primary_model_def.parameters:
+                effective_params = primary_model_def.parameters.model_copy(
+                    update=request_params.model_dump(exclude_none=True)
+                )
+            elif request_params:
+                effective_params = request_params
+            else:
+                effective_params = primary_model_def.parameters
+
             primary_handle = await runner_client.acquire_server(
                 model_id=primary_model_def.id,
-                num_ctx=(
-                    primary_model_def.parameters.num_ctx
-                    if primary_model_def.parameters
-                    else 90000
-                ),
+                num_ctx=effective_params.num_ctx if effective_params else 90000,
                 task=primary_model_def.task,
             )
             embedding_handle = await runner_client.acquire_server(
@@ -188,12 +196,7 @@ class DialogGraphBuilder(GraphBuilder):
             primary_agent = ChatAgent(
                 model=cast(BaseChatModel, primary_model),
                 system_prompt=primary_model_def.system_prompt or "",
-                num_ctx=(
-                    primary_model_def.parameters.num_ctx
-                    if primary_model_def.parameters
-                    else None
-                )
-                or 90000,
+                num_ctx=(effective_params.num_ctx if effective_params else None) or 90000,
                 component_name="PrimaryChatAgent",
             )
             embedding_agent = EmbeddingAgent(

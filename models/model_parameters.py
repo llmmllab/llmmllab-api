@@ -184,5 +184,39 @@ class ModelParameters(BaseModel):
         ),
     ] = 0.5
     """Minimum fraction of num_ctx that llama.cpp --fit is allowed to auto-reduce to (0.0-1.0). Default 0.5 means context can shrink to 50% of requested."""
+    reasoning_budget: Annotated[
+        Optional[int],
+        Field(
+            default=None,
+            description="Maximum tokens to spend on reasoning (chain-of-thought) before generating final answer",
+        ),
+    ] = None
+    """Maximum tokens to spend on reasoning (chain-of-thought) before generating final answer"""
+    spec_type_mtp: Annotated[
+        Optional[bool],
+        Field(
+            default=False,
+            description="Enable MTP (Multi-Token Prediction) speculative decoding. Passes --spec-type draft-mtp to llama-server.",
+        ),
+    ] = False
+    """Enable MTP speculative decoding for ~2x token generation speedup."""
+    spec_draft_n_max: Annotated[
+        Optional[int],
+        Field(
+            default=3,
+            description="Number of draft tokens for MTP speculative decoding (llama.cpp --spec-draft-n-max).",
+            ge=1,
+            le=16,
+        ),
+    ] = 3
+    """Number of draft tokens for MTP speculative decoding."""
+    kv_unified: Annotated[
+        bool,
+        Field(
+            default=True,
+            description="Use unified key-value cache format (llama.cpp --kv-unified) for improved performance and compatibility with future features. Requires llama.cpp v1.3.0 or later.",
+        ),
+    ] = True
+    """Use unified key-value cache format for improved performance and future compatibility."""
 
     model_config = ConfigDict(extra="ignore")

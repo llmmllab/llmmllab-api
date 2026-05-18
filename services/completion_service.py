@@ -35,6 +35,7 @@ from models.request_priority_metadata import (
     RequestSource,
 )
 from models.tool_call import ToolCall
+from models.model_parameters import ModelParameters
 from utils.logging import llmmllogger
 from httpx import RemoteProtocolError, ConnectError
 from config import RUNNER_RETRIES, RUNNER_RETRY_BACKOFF_BASE
@@ -281,6 +282,7 @@ class CompletionService:
         client_tools: list | None = None,
         tool_choice: str | None = None,
         server_tool_names: set[str] | None = None,
+        model_parameters: ModelParameters | None = None,
     ):
         """Build a composer workflow and return (workflow, builder, server_url)."""
         builder = await get_graph_builder(workflow_type, user_id)
@@ -291,6 +293,7 @@ class CompletionService:
             client_tools=client_tools,
             tool_choice=tool_choice,
             server_tool_names=server_tool_names or None,
+            model_parameters=model_parameters,
         )
         server_url = None
         if builder.server_handle:
@@ -329,6 +332,7 @@ class CompletionService:
         client_tools: list | None = None,
         tool_choice: str | None = None,
         server_tool_names: set[str] | None = None,
+        model_parameters: ModelParameters | None = None,
         _retry_count: int = 0,
     ) -> AsyncIterator[Union[ChatResponse, ServerToolEvent]]:
         """Build a composer workflow and yield its events.
@@ -356,6 +360,7 @@ class CompletionService:
                 client_tools,
                 tool_choice,
                 server_tool_names,
+                model_parameters,
             )
             initial_state = await create_initial_state(
                 user_id, conversation_id, builder, messages
@@ -397,6 +402,7 @@ class CompletionService:
                 client_tools,
                 tool_choice,
                 server_tool_names,
+                model_parameters,
                 _retry_count=_retry_count + 1,
             ):
                 yield event
@@ -412,6 +418,7 @@ class CompletionService:
         client_tools: list | None = None,
         tool_choice: str | None = None,
         server_tool_names: set[str] | None = None,
+        model_parameters: ModelParameters | None = None,
     ) -> AsyncIterator[Union[ChatResponse, ServerToolEvent]]:
         """Build and run with automatic server handle refresh on connection failure.
 
@@ -442,6 +449,7 @@ class CompletionService:
                     client_tools,
                     tool_choice,
                     server_tool_names,
+                    model_parameters,
                 ):
                     yield event
                 return  # Success — all events yielded
@@ -482,6 +490,7 @@ class CompletionService:
         client_tools: list | None = None,
         tool_choice: str | None = None,
         server_tool_names: set[str] | None = None,
+        model_parameters: ModelParameters | None = None,
         priority: Priority | None = None,
         max_queue_wait: float | None = None,
         source: RequestSource | None = None,
@@ -543,6 +552,7 @@ class CompletionService:
                 client_tools=client_tools,
                 tool_choice=tool_choice,
                 server_tool_names=server_tool_names,
+                model_parameters=model_parameters,
             ):
                 if isinstance(event, ServerToolEvent):
                     yield event, acc
@@ -628,6 +638,7 @@ class CompletionService:
                     client_tools,
                     "auto",
                     server_tool_names,
+                    model_parameters,
                 ):
                     if isinstance(event, ServerToolEvent):
                         continue
@@ -707,6 +718,7 @@ class CompletionService:
                     client_tools,
                     "auto",
                     server_tool_names,
+                    model_parameters,
                 ):
                     if isinstance(event, ServerToolEvent):
                         continue
@@ -761,6 +773,7 @@ class CompletionService:
                         client_tools,
                         tool_choice,
                         server_tool_names,
+                        model_parameters,
                     ):
                         if isinstance(event, ServerToolEvent):
                             continue
@@ -816,6 +829,7 @@ class CompletionService:
                             client_tools,
                             "auto",
                             server_tool_names,
+                            model_parameters,
                         ):
                             if isinstance(event, ServerToolEvent):
                                 continue
@@ -868,6 +882,7 @@ class CompletionService:
         client_tools: list | None = None,
         tool_choice: str | None = None,
         server_tool_names: set[str] | None = None,
+        model_parameters: ModelParameters | None = None,
         priority: Priority | None = None,
         max_queue_wait: float | None = None,
         source: RequestSource | None = None,
@@ -932,6 +947,7 @@ class CompletionService:
                 client_tools=client_tools,
                 tool_choice=tool_choice,
                 server_tool_names=server_tool_names,
+                model_parameters=model_parameters,
             ):
                 if isinstance(event, ServerToolEvent):
                     continue
@@ -998,6 +1014,7 @@ class CompletionService:
                         client_tools,
                         "auto",
                         server_tool_names,
+                        model_parameters=model_parameters,
                     ):
                         if isinstance(event, ServerToolEvent):
                             continue
@@ -1089,6 +1106,7 @@ class CompletionService:
                         client_tools,
                         "auto",
                         server_tool_names,
+                        model_parameters=model_parameters,
                     ):
                         if isinstance(event, ServerToolEvent):
                             continue
@@ -1149,6 +1167,7 @@ class CompletionService:
                         client_tools,
                         tool_choice,
                         server_tool_names,
+                        model_parameters=model_parameters,
                     ):
                         if isinstance(event, ServerToolEvent):
                             continue
@@ -1181,6 +1200,7 @@ class CompletionService:
                             client_tools,
                             "auto",
                             server_tool_names,
+                            model_parameters=model_parameters,
                         ):
                             if isinstance(event, ServerToolEvent):
                                 continue

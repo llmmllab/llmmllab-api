@@ -32,6 +32,7 @@ from models import (
     MessageContentType,
     WorkflowConfig,
 )
+from models.model_parameters import ModelParameters
 from services.runner_client import runner_client
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
@@ -193,15 +194,22 @@ class IdeGraphBuilder(GraphBuilder):
                 model_arg=model_name,
             )
 
+            # Merge request-level model parameters override onto model defaults
+            request_params: ModelParameters | None = kwargs.get("model_parameters")
+            if request_params and model_def.parameters:
+                effective_params = model_def.parameters.model_copy(
+                    update=request_params.model_dump(exclude_none=True)
+                )
+            elif request_params:
+                effective_params = request_params
+            else:
+                effective_params = model_def.parameters
+
             assert model_def.id is not None, "Model definition must have an ID"
 
             server_handle = await runner_client.acquire_server(
                 model_id=model_def.id,
-                num_ctx=(
-                    model_def.parameters.num_ctx
-                    if model_def.parameters
-                    else 90000
-                ),
+                num_ctx=effective_params.num_ctx if effective_params else 90000,
                 task=model_def.task,
             )
 
@@ -224,8 +232,7 @@ class IdeGraphBuilder(GraphBuilder):
             primary_agent = ChatAgent(
                 model=cast(BaseChatModel, primary_model),
                 system_prompt=model_def.system_prompt or IDE_PRIMARY_SYSTEM_PROMPT,
-                num_ctx=(model_def.parameters.num_ctx if model_def.parameters else None)
-                or 90000,
+                num_ctx=(effective_params.num_ctx if effective_params else None) or 90000,
                 component_name="PrimaryCodingAgent",
             )
 
