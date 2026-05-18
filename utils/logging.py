@@ -32,8 +32,7 @@ def reset_session_id_ctx(token: contextvars.Token[str | None]) -> None:
 
 def _add_session_id_to_logs(_, __, event_dict):
     sid = _session_id_ctx.get()
-    if sid:
-        event_dict["session_id"] = sid
+    event_dict["session_id"] = sid or "none"
     return event_dict
 
 
