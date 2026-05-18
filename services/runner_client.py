@@ -24,8 +24,8 @@ import asyncio
 import logging
 import os
 import time
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
 import httpx
 
@@ -82,6 +82,7 @@ class RunnerClient:
         self._client: Optional[httpx.AsyncClient] = None
         self._model_map: Dict[str, List[str]] = {}
         self._refresh_task: Optional[asyncio.Task] = None
+        self._health_check_task: Optional[asyncio.Task] = None
         self._unhealthy_since: Dict[str, float] = {}
         self._acquire_failures: Dict[str, int] = {}
         # Circuit breaker: skip a runner if it has >= this many consecutive
@@ -279,11 +280,50 @@ class RunnerClient:
         except Exception:
             return False
 
+    async def _health_check_loop(self, interval: float = 30.0) -> None:
+        """Periodically validate active handles and purge dead ones.
+
+        Runs every *interval* seconds. When a handle fails validation,
+        it is removed from tracking and the model map is refreshed so
+        subsequent requests get a fresh server.
+        """
+        while True:
+            await asyncio.sleep(interval)
+            if not self._active_handles:
+                continue
+            stale_handles: list[ServerHandle] = []
+            for handle in list(self._active_handles):
+                if not await self.validate_server_handle(handle):
+                    stale_handles.append(handle)
+            if stale_handles:
+                logger.warning(
+                    f"Health check found {len(stale_handles)} stale handle(s) — purging",
+                    extra={"server_ids": [h.server_id for h in stale_handles]},
+                )
+                for handle in stale_handles:
+                    self._active_handles.discard(handle)
+                    servers = self._active_servers_by_endpoint.get(handle.runner_host)
+                    if servers:
+                        servers.discard(handle.server_id)
+                await self.refresh_model_map()
+
+    def start_health_check(self) -> None:
+        """Start the background health check task. Call once during app startup."""
+        if self._health_check_task is None or self._health_check_task.done():
+            self._health_check_task = asyncio.create_task(self._health_check_loop())
+
     async def aclose(self) -> None:
         """Close the shared HTTP client and release active servers.  Call during app shutdown."""
         # Shut down all active server handles before closing the client
         await self.shutdown_all_handles()
 
+        if self._health_check_task is not None:
+            self._health_check_task.cancel()
+            try:
+                await self._health_check_task
+            except asyncio.CancelledError:
+                pass
+            self._health_check_task = None
         if self._refresh_task is not None:
             self._refresh_task.cancel()
             try:
@@ -590,8 +630,9 @@ class RunnerClient:
             logger.info(f"Released server {handle.server_id}")
             self._active_handles.discard(handle)
         except Exception as e:
-            logger.error(f"Failed to release server {handle.server_id}: {e}")
-            raise
+            # Runner is likely dead — discard handle silently
+            logger.warning(f"Failed to release server {handle.server_id} (runner may be down): {e}")
+            self._active_handles.discard(handle)
         finally:
             # Remove from active tracking so cleanup doesn't try to kill it
             servers = self._active_servers_by_endpoint.get(handle.runner_host)

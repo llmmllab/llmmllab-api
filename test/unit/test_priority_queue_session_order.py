@@ -74,19 +74,18 @@ async def test_session_round_robin_three_sessions():
     # s1 released as sole item
     assert released_order[0] == "s1"
 
-    # Dequeue s1 — should release s2 (oldest unserved)
+    # Dequeue s1 — should release both s2 and s3 (no resource constraint)
+    # s2 should be released first (oldest unserved via round-robin)
     item_a, _ = await tasks[0]
     released_order.clear()
     await q.dequeue(item_a)
-    assert released_order[0] == "s2"
+    assert "s2" in released_order
+    assert "s3" in released_order
+    assert released_order[0] == "s2"  # s2 enqueued first = oldest unserved
 
-    # Dequeue s2 — should release s3 (oldest unserved)
     item_b, _ = await tasks[1]
-    released_order.clear()
-    await q.dequeue(item_b)
-    assert released_order[0] == "s3"
-
     item_c, _ = await tasks[2]
+    await q.dequeue(item_b)
     await q.dequeue(item_c)
     await q.close()
 

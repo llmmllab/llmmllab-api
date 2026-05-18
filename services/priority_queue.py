@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import time
-import logging
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Optional, Union
+from typing import Any, Awaitable, Callable, Optional
 
 from models.request_priority_metadata import Priority, RequestPriorityMetadata
 from services.queue_exceptions import QueueFullError, QueueTimeoutError
@@ -94,7 +93,7 @@ class AsyncPriorityQueue:
             Callable[[RequestPriorityMetadata], Awaitable[bool]]
         ] = None
         self._recheck_task: Optional[asyncio.Task] = None
-        self._recheck_interval = 5.0
+        self._recheck_interval = 2.0
         self._session_last_served: dict[str, float] = {}
         self._seen_models: set[str] = set()
         self._seen_sources: set[str] = set()
@@ -284,8 +283,34 @@ class AsyncPriorityQueue:
                 self._on_complete(finished_meta)
             return finished_meta
 
-        # Group pending items by priority for session round-robin
+        # Release ALL eligible waiting items (not just one).
+        # This enables concurrent request processing up to the model's
+        # parallel slot count — the _can_proceed callback enforces limits.
+        released_all = await self._release_eligible(pending)
+
+        for meta in released_all:
+            if self._on_release:
+                self._on_release(meta)
+            if meta.session_id:
+                self._session_last_served[meta.session_id] = time.monotonic()
+        if self._on_complete:
+            self._on_complete(finished_meta)
+        return finished_meta
+
+    async def _release_eligible(
+        self,
+        pending: list[tuple[int, RequestPriorityMetadata]],
+    ) -> list[RequestPriorityMetadata]:
+        """Release all eligible waiting items from pending list.
+
+        Respects priority ordering and session round-robin, but releases
+        multiple items per call (up to what _can_proceed allows). This
+        enables concurrent request processing up to the model's parallel
+        slot count.
+        """
         from collections import defaultdict as _dd
+
+        released: list[RequestPriorityMetadata] = []
 
         by_priority: dict[int, list[tuple[int, RequestPriorityMetadata]]] = _dd(list)
         for idx, metadata in pending:
@@ -293,62 +318,36 @@ class AsyncPriorityQueue:
 
         # Process priorities in order (HIGH first)
         for _pri in sorted(by_priority):
-            candidates = by_priority[_pri]
-            selected_idx = self._select_by_session_rr(candidates)
-            selected_meta: Optional[RequestPriorityMetadata] = None
-            for c_idx, c_meta in candidates:
-                if c_idx == selected_idx:
-                    selected_meta = c_meta
-                    break
-
-            can_go = await self._can_proceed(selected_meta) if self._can_proceed else True  # type: ignore
-            if can_go:
-                async with self._lock:
-                    if (
-                        selected_idx < len(self._queue)
-                        and self._queue[selected_idx].metadata is selected_meta
-                        and not self._queue[selected_idx].event.is_set()
-                        and not self._queue[selected_idx].completed
-                    ):
-                        if self._has_higher_priority_waiting(selected_idx):
-                            continue
-                        self._queue[selected_idx].event.set()
-                        released_meta = selected_meta
-                break
-            if not released_meta:
-                remaining = [c for c in candidates if c[0] != selected_idx]
-                while remaining and not released_meta:
-                    fb_idx = self._select_by_session_rr(remaining)
-                    fb_meta: Optional[RequestPriorityMetadata] = None
-                    for c_idx, c_meta in remaining:
-                        if c_idx == fb_idx:
-                            fb_meta = c_meta
-                            break
-                    can_go = await self._can_proceed(fb_meta) if self._can_proceed else True  # type: ignore
-                    if can_go:
-                        async with self._lock:
-                            if (
-                                fb_idx < len(self._queue)
-                                and self._queue[fb_idx].metadata is fb_meta
-                                and not self._queue[fb_idx].event.is_set()
-                                and not self._queue[fb_idx].completed
-                            ):
-                                if self._has_higher_priority_waiting(fb_idx):
-                                    break
-                                self._queue[fb_idx].event.set()
-                                released_meta = fb_meta
+            candidates = list(by_priority[_pri])
+            while candidates:
+                selected_idx = self._select_by_session_rr(candidates)
+                selected_meta: Optional[RequestPriorityMetadata] = None
+                for c_idx, c_meta in candidates:
+                    if c_idx == selected_idx:
+                        selected_meta = c_meta
                         break
-                    remaining = [c for c in remaining if c[0] != fb_idx]
-            if released_meta:
-                break
 
-        if self._on_release and released_meta is not None:
-            self._on_release(released_meta)
-            if released_meta.session_id:
-                self._session_last_served[released_meta.session_id] = time.monotonic()
-        if self._on_complete:
-            self._on_complete(finished_meta)
-        return finished_meta
+                can_go = (
+                    await self._can_proceed(selected_meta)
+                    if self._can_proceed
+                    else True
+                )
+                if can_go:
+                    async with self._lock:
+                        if (
+                            selected_idx < len(self._queue)
+                            and self._queue[selected_idx].metadata is selected_meta
+                            and not self._queue[selected_idx].event.is_set()
+                            and not self._queue[selected_idx].completed
+                        ):
+                            if self._has_higher_priority_waiting(selected_idx):
+                                break
+                            self._queue[selected_idx].event.set()
+                            released.append(selected_meta)
+                # Remove tried candidate regardless of outcome (skip blocked items)
+                candidates = [c for c in candidates if c[0] != selected_idx]
+
+        return released
 
     def _has_higher_priority_waiting(self, released_idx: int) -> bool:
         """Check if any higher-priority item waits behind the released item.
@@ -409,23 +408,20 @@ class AsyncPriorityQueue:
 
             # Collect pending items to check outside lock
             pending: list[tuple[int, RequestPriorityMetadata]] = [
-                (i, m.metadata) for i, m in enumerate(self._queue)
+                (i, m.metadata)
+                for i, m in enumerate(self._queue)
+                if not m.event.is_set() and not m.completed
             ]
 
-        for idx, metadata in pending:
-            can_go = await self._can_proceed(metadata)
-            if can_go:
-                async with self._lock:
-                    if (
-                        idx < len(self._queue)
-                        and self._queue[idx].metadata is metadata
-                        and not self._queue[idx].event.is_set()
-                    ):
-                        if not self._has_higher_priority_waiting(idx):
-                            self._queue[idx].event.set()
-                            if self._on_release:
-                                self._on_release(metadata)
-                break
+        if not pending:
+            return
+
+        released_all = await self._release_eligible(pending)
+        for meta in released_all:
+            if self._on_release:
+                self._on_release(meta)
+            if meta.session_id:
+                self._session_last_served[meta.session_id] = time.monotonic()
 
     async def _age_item(
         self, item: _QueueItem, metadata: RequestPriorityMetadata
@@ -474,71 +470,14 @@ class AsyncPriorityQueue:
                 if not pending:
                     continue
 
-            # Group by priority for session round-robin
-            from collections import defaultdict as _dd
+            # Release all eligible items (mirrors dequeue behavior)
+            released_all = await self._release_eligible(pending)
 
-            by_priority: dict[int, list[tuple[int, RequestPriorityMetadata]]] = _dd(
-                list
-            )
-            for idx, metadata in pending:
-                by_priority[metadata.priority.value].append((idx, metadata))
-
-            released_meta: Optional[RequestPriorityMetadata] = None
-            for _pri in sorted(by_priority):
-                candidates = by_priority[_pri]
-                selected_idx = self._select_by_session_rr(candidates)
-                selected_meta: Optional[RequestPriorityMetadata] = None
-                for c_idx, c_meta in candidates:
-                    if c_idx == selected_idx:
-                        selected_meta = c_meta
-                        break
-
-                can_go = await self._can_proceed(selected_meta)  # type: ignore
-                if can_go:
-                    async with self._lock:
-                        if (
-                            selected_idx < len(self._queue)
-                            and self._queue[selected_idx].metadata is selected_meta
-                            and not self._queue[selected_idx].event.is_set()
-                            and not self._queue[selected_idx].completed
-                        ):
-                            if self._has_higher_priority_waiting(selected_idx):
-                                continue
-                            self._queue[selected_idx].event.set()
-                            released_meta = selected_meta
-                    break
-                if not released_meta:
-                    remaining = [c for c in candidates if c[0] != selected_idx]
-                    while remaining and not released_meta:
-                        fb_idx = self._select_by_session_rr(remaining)
-                        fb_meta: Optional[RequestPriorityMetadata] = None
-                        for c_idx, c_meta in remaining:
-                            if c_idx == fb_idx:
-                                fb_meta = c_meta
-                                break
-                        can_go = await self._can_proceed(fb_meta)  # type: ignore
-                        if can_go:
-                            async with self._lock:
-                                if (
-                                    fb_idx < len(self._queue)
-                                    and self._queue[fb_idx].metadata is fb_meta
-                                    and not self._queue[fb_idx].event.is_set()
-                                    and not self._queue[fb_idx].completed
-                                ):
-                                    if self._has_higher_priority_waiting(fb_idx):
-                                        break
-                                    self._queue[fb_idx].event.set()
-                                    released_meta = fb_meta
-                            break
-                        remaining = [c for c in remaining if c[0] != fb_idx]
-                if released_meta:
-                    break
-
-            if released_meta is not None:
+            for meta in released_all:
                 if self._on_release:
-                    self._on_release(released_meta)
-                if released_meta.session_id:
-                    self._session_last_served[released_meta.session_id] = (
+                    self._on_release(meta)
+                if meta.session_id:
+                    self._session_last_served[meta.session_id] = (
                         time.monotonic()
                     )
 

@@ -457,8 +457,8 @@ async def stream_chat_completion(
         )
         yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
 
-    # All retries produced nothing — send error message
-    if not has_content and not has_tool_calls and not final_content:
+    # All retries produced nothing — send error unless finish_reason is "stop" (valid empty response)
+    if not has_content and not has_tool_calls and not final_content and acc.finish_reason != "stop":
         logger.warning(
             "All retries produced empty response", extra={"model": model_name}
         )
@@ -651,8 +651,17 @@ async def createChatCompletion(
             ) from e
         raise
 
-    if result.chat_response is None or (
-        not result.has_content and not result.has_tool_calls
+    if result.chat_response is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Model returned an empty response.",
+        )
+
+    # Empty response with finish_reason="stop" is valid (e.g. model switch signal)
+    if (
+        not result.has_content
+        and not result.has_tool_calls
+        and result.chat_response.finish_reason != "stop"
     ):
         if getattr(result, "context_overflow", False):
             raise HTTPException(
