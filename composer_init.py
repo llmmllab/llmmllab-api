@@ -7,11 +7,12 @@ architectural decoupling. This interface abstracts LangGraph workflow
 construction, execution, and state management.
 
 Interface Functions:
-- initialize_composer(): Service lifecycle management
+- get_composer_service(): Lazy accessor / initializer for the singleton service
+- shutdown_composer(): Service lifecycle management
 - compose_workflow(): Create executable LangGraph workflows using user_id and messages
 - create_initial_state(): Generate workflow state from user_id and messages
 - execute_workflow(): Stream-enabled workflow execution
-- get_composer_config(): Runtime configuration access
+- invalidate_workflow(): Purge a single cached workflow on stale-handle retries
 
 Architectural Role:
 - Defines clean API boundaries between components
@@ -33,64 +34,37 @@ from graph.workflows.base import GraphBuilder
 from graph.workflows.factory import WorkFlowType, get_builder
 
 
-class ComposerServiceManager:
-    """Singleton manager for composer service instance."""
+_composer_service: Optional[ComposerService] = None
 
-    _instance: Optional["ComposerServiceManager"] = None
-    _service: Optional[ComposerService] = None
 
-    def __new__(cls) -> "ComposerServiceManager":
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
+async def get_composer_service(
+    builder: Optional[GraphBuilder] = None,
+) -> ComposerService:
+    """Get or lazily initialize the module-level ``ComposerService`` instance.
 
-    async def initialize(self, builder: GraphBuilder) -> None:
-        """Initialize the composer service. Should be called once at startup."""
-        if self._service is None:
-            llmmllogger.logger.info("Initializing composer service")
-            self._service = ComposerService(builder)
-            llmmllogger.logger.info("Composer service initialized")
-
-    async def shutdown(self) -> None:
-        """Shutdown the composer service. Should be called at server shutdown."""
-        if self._service:
-            llmmllogger.logger.info("Shutting down composer service")
-            await self._service.shutdown()
-            self._service = None
-
-    def get_service(self) -> ComposerService:
-        """Get the composer service instance."""
-        if self._service is None:
-            raise RuntimeError(
-                "Composer service not initialized. Call initialize_composer() first."
+    A ``builder`` must be supplied on the first call so the service can be
+    constructed.  Subsequent calls return the cached instance and ignore any
+    ``builder`` argument.
+    """
+    global _composer_service
+    if _composer_service is None:
+        if builder is None:
+            raise ComposerError(
+                "WorkflowBuilder is required for composer service initialization."
             )
-        return self._service
-
-    async def get_or_init_service(
-        self, builder: Optional[GraphBuilder] = None
-    ) -> ComposerService:
-        """Get or initialize the composer service instance."""
-        if self._service is None:
-            if builder is None:
-                raise ComposerError(
-                    "WorkflowBuilder is required for composer service initialization."
-                )
-            await self.initialize(builder)
-        assert self._service is not None
-        return self._service
-
-
-_manager = ComposerServiceManager()
+        llmmllogger.logger.info("Initializing composer service")
+        _composer_service = ComposerService(builder)
+        llmmllogger.logger.info("Composer service initialized")
+    return _composer_service
 
 
 async def shutdown_composer() -> None:
     """Shutdown the composer service. Should be called at server shutdown."""
-    await _manager.shutdown()
-
-
-async def get_or_init_composer_service(builder: GraphBuilder) -> ComposerService:
-    """Get or initialize the composer service instance."""
-    return await _manager.get_or_init_service(builder)
+    global _composer_service
+    if _composer_service is not None:
+        llmmllogger.logger.info("Shutting down composer service")
+        await _composer_service.shutdown()
+        _composer_service = None
 
 
 async def compose_workflow(
@@ -113,7 +87,7 @@ async def compose_workflow(
     Returns:
         CompiledStateGraph: Ready to execute LangGraph workflow
     """
-    svc = await _manager.get_or_init_service(builder)
+    svc = await get_composer_service(builder)
     return await svc.compose_workflow(
         user_id=user_id,
         model_name=model_name,
@@ -133,9 +107,9 @@ async def invalidate_workflow(user_id: str, model_name: Optional[str] = None) ->
     Returns ``True`` if an entry was evicted, ``False`` if no entry was present.
     Safe to call even if the composer service hasn't been initialized yet.
     """
-    if _manager._service is None:
+    if _composer_service is None:
         return False
-    return await _manager._service.invalidate_workflow(user_id, model_name)
+    return await _composer_service.invalidate_workflow(user_id, model_name)
 
 
 async def clear_workflow_cache(user_id: str) -> None:
@@ -146,8 +120,9 @@ async def clear_workflow_cache(user_id: str) -> None:
         user_id: User ID whose workflow cache should be cleared
     """
     try:
-        svc = await _manager.get_or_init_service()
-        cache = svc.workflow_caches.get(user_id, None)
+        if _composer_service is None:
+            return
+        cache = _composer_service.workflow_caches.get(user_id, None)
         if cache:
             await cache.close()
     except ComposerError as e:
@@ -208,9 +183,12 @@ async def get_graph_builder(workflow_type: WorkFlowType, user_id: str) -> GraphB
 
 # Convenience exports for direct usage
 __all__ = [
+    "get_composer_service",
     "shutdown_composer",
     "compose_workflow",
+    "clear_workflow_cache",
     "create_initial_state",
     "execute_workflow",
     "invalidate_workflow",
+    "get_graph_builder",
 ]
