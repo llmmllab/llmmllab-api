@@ -49,6 +49,11 @@ from services.response_handlers import (
     update_stream_delta,
     update_stream_final,
 )
+from services.session_tracking import (
+    cancel_session as _cancel_session_impl,
+    register_session_task,
+    unregister_session_task,
+)
 from services.truncation import is_context_overflow, is_truncated
 from utils.logging import llmmllogger
 
@@ -60,17 +65,16 @@ logger = llmmllogger.bind(component="completion_service")
 # These should trigger a server-handle refresh, not an empty-response retry.
 _CONNECTION_ERRORS = (RemoteProtocolError, ConnectError)
 
-# In-flight task registry for session cancellation
-_in_flight_tasks: dict[str, asyncio.Task] = {}
-
 
 async def cancel_session(session_id: str) -> bool:
-    """Cancel an in-flight task by session_id. Returns True if found."""
-    task = _in_flight_tasks.pop(session_id, None)
-    if task and not task.done():
-        task.cancel()
-        return True
-    return False
+    """Cancel an in-flight task by session_id. Returns True if found.
+
+    Thin wrapper around :func:`services.session_tracking.cancel_session` kept
+    here for backward compatibility — external callers (e.g.
+    ``routers/session_admin.py``) import this symbol directly from
+    ``services.completion_service``.
+    """
+    return await _cancel_session_impl(session_id)
 
 
 # ---------------------------------------------------------------------------
@@ -485,7 +489,7 @@ class CompletionService:
                 try:
                     cur_task = asyncio.current_task()
                     if cur_task is not None:
-                        _in_flight_tasks[session_id] = cur_task
+                        await register_session_task(session_id, cur_task)
                 except RuntimeError:
                     pass
 
@@ -493,7 +497,7 @@ class CompletionService:
             yield effective_model
         finally:
             if session_id:
-                _in_flight_tasks.pop(session_id, None)
+                await unregister_session_task(session_id)
             if queue_item is not None:
                 await priority_queue.dequeue(queue_item)
 
