@@ -82,11 +82,29 @@ class ComposerService:
             # 2. Use per-user cache if enabled
             user_cache = None
 
-            # Build cache key that incorporates model without tools
-            # to avoid creating multiple instances of the same server
+            # Build cache key that incorporates model + session.
+            #
+            # Session is part of the key because GraphBuilder constructs
+            # ``ChatOpenAI(..., default_headers={"X-Session-ID": sid})`` at
+            # workflow build time — the session_id is captured statically
+            # from the contextvar.  If we cached by (user, model) alone,
+            # two distinct claude-code sessions for the same user on the
+            # same model would share one cached CompiledStateGraph and
+            # the second session's traffic would carry the first session's
+            # X-Session-ID header all the way to the runner, contaminating
+            # the slot LRU and trashing each other's KV cache.
+            #
+            # Including the session_id keeps each session's ChatOpenAI
+            # binding isolated.  Memory cost: one CompiledStateGraph per
+            # active (user, model, session) tuple — bounded by
+            # WorkflowCache.max_size (1000) and TTL'd at 5 min.
+            from utils.logging import _session_id_ctx
+            sid = _session_id_ctx.get() or "nosession"
+
             cache_key = f"workflow_{user_id}"
             if model_name:
                 cache_key += f"_{model_name}"
+            cache_key += f"_{sid}"
 
             if user_config.workflow.enable_workflow_caching:
                 if user_id not in self.workflow_caches:
@@ -138,11 +156,18 @@ class ComposerService:
         """Build the same cache key used in ``compose_workflow``.
 
         Kept in one place so :meth:`invalidate_workflow` is guaranteed to
-        match the key used when the entry was inserted.
+        match the key used when the entry was inserted.  Reads
+        ``_session_id_ctx`` so the result matches the build-time key
+        when invalidate is called from within the same request context
+        (e.g. the stale-handle retry path in completion_service).
         """
+        from utils.logging import _session_id_ctx
+        sid = _session_id_ctx.get() or "nosession"
+
         cache_key = f"workflow_{user_id}"
         if model_name:
             cache_key += f"_{model_name}"
+        cache_key += f"_{sid}"
         return cache_key
 
     async def invalidate_workflow(

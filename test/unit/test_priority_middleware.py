@@ -239,7 +239,9 @@ class TestDispatchBodyFallback:
         middleware = PriorityMiddleware(app=MagicMock())
         result = await middleware.dispatch(req, call_next)
 
-        assert req.state.request_priority_metadata.session_id == "sess-body-123"
+        # Body-derived session_ids are prefixed with "pck:" so they live
+        # in a disjoint namespace from header-derived session_ids.
+        assert req.state.request_priority_metadata.session_id == "pck:sess-body-123"
         assert req.state.request_priority_metadata.model_id == "Qwen3_6_27B"
 
     @pytest.mark.asyncio
