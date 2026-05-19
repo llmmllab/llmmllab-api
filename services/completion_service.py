@@ -342,10 +342,12 @@ class CompletionService:
         Non-stale errors propagate immediately without retry.
         """
         from graph.errors import StaleServerError
+        from services.runner_client import runner_client
 
         max_retries = STALE_SERVER_RETRIES
         model_name = await _resolve_model(model_name, user_id)
         builder = None
+        stale_err: StaleServerError | None = None
 
         try:
             workflow, builder, _server_url = await CompletionService.build_workflow(
@@ -364,36 +366,60 @@ class CompletionService:
             ):
                 yield event
         except asyncio.CancelledError:
-            # Release server handle on cancellation to prevent resource leak
-            if builder and builder.server_handle:
-                try:
-                    from services.runner_client import runner_client
-
-                    await runner_client.release_server(builder.server_handle)
-                except Exception:
-                    pass
+            logger.info(
+                "Workflow cancelled — releasing server handle in finally",
+                extra={
+                    "server_id": (
+                        builder.server_handle.server_id
+                        if builder and builder.server_handle
+                        else None
+                    ),
+                },
+            )
             raise
         except StaleServerError as e:
-            if _retry_count >= max_retries:
-                logger.error(
-                    f"Stale server {e.server_id} — retry exhausted, propagating error",
-                )
-                raise
-            logger.warning(
-                f"Stale server {e.server_id} detected — releasing and re-acquiring (attempt {_retry_count + 1}/{max_retries})",
-            )
+            # Capture the error and defer the retry decision until after
+            # the finally block releases the (now stale) handle.  This
+            # guarantees release fires on the stale path too, without
+            # double-releasing.
+            stale_err = e
+        finally:
+            # Always release the handle: success, error, or cancel.  The
+            # underlying llama.cpp process is not killed — release is a
+            # soft refcount decrement on the runner.  A follow-up request
+            # for the same model will simply re-acquire the warm server.
             if builder and builder.server_handle:
+                handle = builder.server_handle
+                # Detach from the builder so any later code path can't
+                # accidentally release twice.
+                builder.server_handle = None
                 try:
-                    from services.runner_client import runner_client
-
-                    await runner_client.release_server(builder.server_handle)
-                except Exception as release_err:
+                    await runner_client.release_server(handle)
                     logger.debug(
-                        f"Failed to release stale server {e.server_id}: {release_err}"
+                        "Released server handle on workflow exit",
+                        extra={"server_id": handle.server_id},
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as release_err:
+                    logger.warning(
+                        "release_server failed in _build_and_run finally — handle discarded",
+                        extra={
+                            "server_id": handle.server_id,
+                            "error": str(release_err),
+                        },
                     )
 
-            from services.runner_client import runner_client
-
+        if stale_err is not None:
+            if _retry_count >= max_retries:
+                logger.error(
+                    f"Stale server {stale_err.server_id} — retry exhausted, propagating error",
+                )
+                raise stale_err
+            logger.warning(
+                f"Stale server {stale_err.server_id} detected — re-acquiring "
+                f"(attempt {_retry_count + 1}/{max_retries})",
+            )
             await runner_client.refresh_model_map()
             async for event in CompletionService._build_and_run(
                 user_id,

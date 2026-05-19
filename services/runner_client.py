@@ -23,9 +23,11 @@ the model's configured context window (returns HTTP 507).
 import asyncio
 import logging
 import os
+import re
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional
 
 import httpx
 
@@ -159,15 +161,55 @@ class RunnerClient:
         client = self._get_client()
         headers = self._session_headers()
 
+        async def _send_once() -> httpx.Response:
+            """Issue a single upstream request, propagating CancelledError.
+
+            On caller cancellation, the in-flight httpx coroutine is
+            cancelled at the await — httpx then closes its in-flight
+            stream/connection automatically.  We catch CancelledError
+            here only to log and re-raise; we never swallow it and we
+            never retry past it.
+            """
+            try:
+                return await client.request(
+                    method=method,
+                    url=url,
+                    json=json,
+                    headers=headers,
+                    timeout=_ACQUIRE_TIMEOUT,
+                    stream=stream,
+                )
+            except asyncio.CancelledError:
+                logger.info(
+                    "proxy_request cancelled — propagating to upstream httpx call",
+                    extra={
+                        "server_id": handle.server_id,
+                        "method": method,
+                        "url": url,
+                    },
+                )
+                raise
+
         # First attempt (no backoff yet)
-        response = await client.request(
-            method=method,
-            url=url,
-            json=json,
-            headers=headers,
-            timeout=_ACQUIRE_TIMEOUT,
-            stream=stream,
-        )
+        response = await _send_once()
+
+        # Detect stale server handle: 404 from a /v1/server/<id>/... path
+        # means the runner has evicted the llama.cpp server we're holding.
+        # Convert to StaleServerError so the existing retry layer in
+        # CompletionService refreshes the model map and reacquires.
+        if self._is_stale_server_response(handle, response):
+            logger.warning(
+                "proxy_request got 404 for known server handle — raising StaleServerError",
+                extra={
+                    "server_id": handle.server_id,
+                    "url": url,
+                    "status_code": response.status_code,
+                },
+            )
+            # Local import to avoid a circular dependency at module load time.
+            from graph.errors import StaleServerError
+
+            raise StaleServerError(handle.server_id)
 
         if response.status_code != 503:
             return response
@@ -204,17 +246,29 @@ class RunnerClient:
                     "elapsed": round(elapsed, 1),
                 },
             )
-            await asyncio.sleep(backoff)
+            try:
+                await asyncio.sleep(backoff)
+            except asyncio.CancelledError:
+                logger.info(
+                    "proxy_request cancelled during 503 backoff — aborting retry loop",
+                    extra={"server_id": handle.server_id},
+                )
+                raise
             elapsed += backoff
 
-            response = await client.request(
-                method=method,
-                url=url,
-                json=json,
-                headers=headers,
-                timeout=_ACQUIRE_TIMEOUT,
-                stream=stream,
-            )
+            response = await _send_once()
+
+            if self._is_stale_server_response(handle, response):
+                logger.warning(
+                    "proxy_request retry got 404 for known server handle — raising StaleServerError",
+                    extra={
+                        "server_id": handle.server_id,
+                        "url": url,
+                    },
+                )
+                from graph.errors import StaleServerError
+
+                raise StaleServerError(handle.server_id)
 
             if response.status_code != 503:
                 return response
@@ -231,6 +285,37 @@ class RunnerClient:
         )
 
         return last_response
+
+    # Match runner paths of the form `.../v1/server/<server_id>/...`
+    _SERVER_PATH_RE = re.compile(r"/v1/server/([^/]+)(?:/|$)")
+
+    def _is_stale_server_response(
+        self, handle: ServerHandle, response: httpx.Response
+    ) -> bool:
+        """Return True if a 404 indicates the runner no longer knows this server.
+
+        We only convert to a StaleServerError when:
+          - the response is 404, AND
+          - the request URL targets a /v1/server/<id>/... path, AND
+          - the api still believes it holds a valid handle for that
+            server_id (it's in ``_active_handles``).
+
+        A 404 from llama.cpp itself (e.g., an unknown completions sub-path)
+        will not match the server_id check, so it bubbles up unchanged.
+        """
+        if response.status_code != 404:
+            return False
+        request = getattr(response, "request", None)
+        url_str = str(request.url) if request is not None else handle.base_url
+        m = self._SERVER_PATH_RE.search(url_str)
+        if not m:
+            return False
+        path_server_id = m.group(1)
+        if path_server_id != handle.server_id:
+            return False
+        # Only convert when this api had a live handle for this server_id —
+        # otherwise the 404 may be a genuine upstream not-found.
+        return any(h.server_id == handle.server_id for h in self._active_handles)
 
     async def shutdown_all_handles(self) -> None:
         """Shut down all registered server handles on the runner.
@@ -858,3 +943,47 @@ class RunnerClient:
 
 # Module-level singleton
 runner_client = RunnerClient()
+
+
+@asynccontextmanager
+async def server_handle_lease(
+    model_id: str,
+    num_ctx: Optional[int] = None,
+    **kwargs,
+) -> AsyncIterator[ServerHandle]:
+    """Acquire a ``ServerHandle`` and guarantee release on every exit path.
+
+    Wraps :meth:`RunnerClient.acquire_server` so that the soft refcount
+    decrement always fires — on success, exception, and cancellation.
+    The underlying llama.cpp process is *not* killed by release; the
+    runner's TTL-based reaper handles eviction.  This makes calling
+    release after every request safe: a follow-up request for the same
+    model will simply re-acquire the (likely still warm) server.
+
+    Example
+    -------
+    >>> async with server_handle_lease("qwen3", num_ctx=8192) as handle:
+    ...     resp = await runner_client.proxy_request(handle, "POST", ...)
+    """
+    handle = await runner_client.acquire_server(
+        model_id, num_ctx=num_ctx, **kwargs
+    )
+    try:
+        yield handle
+    finally:
+        try:
+            await runner_client.release_server(handle)
+        except asyncio.CancelledError:
+            # Re-raise cancellation but don't swallow it — release_server
+            # itself is best-effort and already discards the handle on
+            # failure, but if we're being cancelled we want the caller
+            # to know.
+            raise
+        except Exception as e:
+            logger.warning(
+                "release_server failed in lease cleanup",
+                extra={
+                    "server_id": handle.server_id,
+                    "error": str(e),
+                },
+            )
