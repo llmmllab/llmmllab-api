@@ -912,6 +912,29 @@ class CompletionService:
                             },
                         )
                     else:
+                        # Before wasting a retry on the same (possibly stale)
+                        # handle, probe every known runner's startup_epoch.
+                        # Chat completions go through LangChain's ChatOpenAI
+                        # directly, bypassing proxy_request's 404→StaleServerError
+                        # path; a dead-handle scenario surfaces here as an
+                        # empty response.  If any runner restarted, purge its
+                        # handles and raise StaleServerError so the upper
+                        # retry layer rebuilds the workflow with a fresh handle.
+                        from graph.errors import StaleServerError
+                        from services.runner_client import runner_client
+                        purged = await runner_client.revalidate_runner_handles()
+                        if purged > 0:
+                            logger.warning(
+                                "Empty response coincided with detected runner "
+                                "restart — invalidating workflow and re-acquiring",
+                                extra={
+                                    "model": model_name,
+                                    "purged_handles": purged,
+                                },
+                            )
+                            raise StaleServerError(
+                                f"runner restart detected via empty response ({purged} handles purged)"
+                            )
                         logger.warning(
                             "Model produced empty response — retrying with same messages",
                             extra={"model": model_name},

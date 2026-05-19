@@ -694,6 +694,24 @@ class RunnerClient:
         except Exception:
             return False
 
+    async def revalidate_runner_handles(self) -> int:
+        """Probe every known runner endpoint's startup_epoch and purge stale handles.
+
+        Used as a recovery trigger when something downstream looks suspicious
+        (e.g. an empty LLM response that the chat completion path can't easily
+        attribute to a 404, because LangChain's ChatOpenAI calls bypass our
+        proxy_request StaleServerError detection).
+
+        Returns the count of handles purged.  A non-zero return means a
+        runner restarted; callers should typically raise StaleServerError
+        so the upper-layer retry rebuilds workflows with fresh handles.
+        """
+        before = len(self._active_handles)
+        for endpoint in list(self._runner_epochs.keys()):
+            await self._check_runner_epoch(endpoint)
+        after = len(self._active_handles)
+        return max(0, before - after)
+
     # ------------------------------------------------------------------
     # Runner selection
     # ------------------------------------------------------------------
