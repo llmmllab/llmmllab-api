@@ -54,7 +54,6 @@ from routers import (
     conversation,
     db_admin,
     documents,
-    ollama,
     api_key,
     metrics as metrics_router,
 )
@@ -450,9 +449,6 @@ app.include_router(documents.router)
 
 # Import and include the internal router
 app.include_router(db_admin.router)
-
-# Include Ollama-compatible API endpoints
-app.include_router(ollama.router)
 
 # Include auto-generated OpenAI-compatible API endpoints (excluding models and files)
 for router in OPENAI_ROUTERS:
