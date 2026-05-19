@@ -122,6 +122,22 @@ async def compose_workflow(
     )
 
 
+async def invalidate_workflow(user_id: str, model_name: Optional[str] = None) -> bool:
+    """Purge a single cached workflow for ``(user_id, model_name)``.
+
+    Use this from the stale-server retry path so the next ``compose_workflow``
+    call rebuilds the workflow and re-acquires a fresh ``ServerHandle`` instead
+    of reusing the cached workflow whose ``ChatOpenAI(base_url=...)`` points at
+    a dead runner.
+
+    Returns ``True`` if an entry was evicted, ``False`` if no entry was present.
+    Safe to call even if the composer service hasn't been initialized yet.
+    """
+    if _manager._service is None:
+        return False
+    return await _manager._service.invalidate_workflow(user_id, model_name)
+
+
 async def clear_workflow_cache(user_id: str) -> None:
     """
     Clear the workflow cache for a specific user.
@@ -196,4 +212,5 @@ __all__ = [
     "compose_workflow",
     "create_initial_state",
     "execute_workflow",
+    "invalidate_workflow",
 ]

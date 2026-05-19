@@ -134,6 +134,42 @@ class ComposerService:
             )
             raise
 
+    def _build_cache_key(self, user_id: str, model_name: Optional[str]) -> str:
+        """Build the same cache key used in ``compose_workflow``.
+
+        Kept in one place so :meth:`invalidate_workflow` is guaranteed to
+        match the key used when the entry was inserted.
+        """
+        cache_key = f"workflow_{user_id}"
+        if model_name:
+            cache_key += f"_{model_name}"
+        return cache_key
+
+    async def invalidate_workflow(
+        self, user_id: str, model_name: Optional[str] = None
+    ) -> bool:
+        """Purge the cached workflow for ``(user_id, model_name)``.
+
+        Used when a ``StaleServerError`` confirms that the ``ServerHandle``
+        baked into the cached workflow's ``ChatOpenAI(base_url=...)`` is
+        pointing at an evicted/dead runner server.  The next ``compose_workflow``
+        call will rebuild the workflow from scratch and acquire a fresh handle.
+
+        Idempotent: returns ``False`` if no entry was present, ``True`` if an
+        entry was evicted.  Thread-safe via the per-user ``WorkflowCache._lock``.
+        """
+        cache = self.workflow_caches.get(user_id)
+        if cache is None:
+            return False
+        cache_key = self._build_cache_key(user_id, model_name)
+        evicted = await cache.invalidate(cache_key)
+        if evicted:
+            self.logger.info(
+                "Invalidated cached workflow due to stale server handle",
+                extra={"user_id": user_id, "cache_key": cache_key},
+            )
+        return evicted
+
     async def shutdown(self):
         """Clean up resources on service shutdown."""
         self.logger.info("Shutting down ComposerService")
