@@ -95,6 +95,13 @@ class RunnerClient:
         self._active_servers_by_endpoint: Dict[str, set[str]] = {}
         # Registry of active server handles for cleanup on shutdown.
         self._active_handles: set[ServerHandle] = set()
+        # Per-endpoint last-seen runner startup_epoch (unix_ms). On change,
+        # every handle from that endpoint is dead and must be purged.
+        self._runner_epochs: Dict[str, int] = {}
+        # Serializes check-and-update of `_runner_epochs` so concurrent
+        # callers can't both observe an unchanged epoch, miss the purge,
+        # and race on `_active_handles`.
+        self._epoch_lock: asyncio.Lock = asyncio.Lock()
 
     def _get_client(self) -> httpx.AsyncClient:
         """Lazily create a shared ``httpx.AsyncClient``."""
@@ -220,6 +227,22 @@ class RunnerClient:
 
         while elapsed < timeout:
             attempt += 1
+
+            # Opportunistic restart check on 503: if the runner restarted,
+            # backing off is pointless — the handle is already dead. Skip
+            # straight to StaleServerError so the caller can reacquire.
+            epoch_ok = await self._check_runner_epoch(handle.runner_host)
+            if not epoch_ok and handle not in self._active_handles:
+                logger.warning(
+                    "proxy_request 503 + runner restart detected — raising StaleServerError",
+                    extra={
+                        "server_id": handle.server_id,
+                        "runner_host": handle.runner_host,
+                    },
+                )
+                from graph.errors import StaleServerError
+
+                raise StaleServerError(handle.server_id)
 
             # Read Retry-After header (seconds as integer)
             retry_after = 30  # default fallback
@@ -546,6 +569,115 @@ class RunnerClient:
             f"Invalidated model map for unhealthy endpoint {endpoint}",
         )
 
+    # ------------------------------------------------------------------
+    # Runner restart detection (startup_epoch tracking)
+    # ------------------------------------------------------------------
+
+    # Tight timeout for `/v1/status` — this endpoint is cheap and should
+    # never block acquire_server for long. If the runner can't answer
+    # within a few seconds, treat it as unreachable (not restarted) and
+    # let the normal health / circuit breaker path handle it.
+    _STATUS_TIMEOUT = httpx.Timeout(3.0)
+
+    async def _check_runner_epoch(self, endpoint: str) -> bool:
+        """Detect runner restart by polling its ``GET /v1/status`` epoch.
+
+        Returns
+        -------
+        bool
+            ``True`` if the runner is reachable and its ``startup_epoch``
+            is unchanged (or is being seen for the first time — no
+            baseline to compare against).
+            ``False`` if the runner is unreachable (single failure — no
+            invalidation, to avoid thrash) OR the epoch changed (in
+            which case all handles for that endpoint have been purged
+            from ``_active_handles`` before this method returns).
+
+        Notes
+        -----
+        - We update ``_runner_epochs[endpoint]`` ONLY after the purge
+          has completed, so a crash mid-purge leaves the old epoch in
+          place and the next caller will retry the purge.
+        - A check-and-update lock prevents two concurrent callers from
+          both observing a stale epoch, missing the purge window, and
+          racing on ``_active_handles``.
+        """
+        client = self._get_client()
+        try:
+            resp = await client.get(
+                f"{endpoint}/v1/status",
+                timeout=self._STATUS_TIMEOUT,
+                headers=self._session_headers(),
+            )
+        except Exception as e:
+            logger.warning(
+                f"Runner {endpoint} /v1/status unreachable, "
+                f"skipping epoch check: {e}"
+            )
+            return False
+
+        if resp.status_code != 200:
+            logger.warning(
+                f"Runner {endpoint} /v1/status returned "
+                f"{resp.status_code}, skipping epoch check"
+            )
+            return False
+
+        try:
+            data = resp.json()
+            new_epoch = int(data["startup_epoch"])
+        except (ValueError, KeyError, TypeError) as e:
+            logger.warning(
+                f"Runner {endpoint} /v1/status returned malformed body: {e}"
+            )
+            return False
+
+        async with self._epoch_lock:
+            prev_epoch = self._runner_epochs.get(endpoint)
+
+            # First sighting — record and treat as unchanged. No handles
+            # could possibly predate this baseline.
+            if prev_epoch is None:
+                self._runner_epochs[endpoint] = new_epoch
+                logger.debug(
+                    f"Runner {endpoint} startup_epoch recorded: {new_epoch}"
+                )
+                return True
+
+            if prev_epoch == new_epoch:
+                return True
+
+            # Epoch changed — runner restarted. Purge every handle
+            # belonging to this endpoint BEFORE updating the stored
+            # epoch, so a partial failure leaves us in a state where
+            # the next caller will retry the purge.
+            stale_handles = [
+                h for h in self._active_handles if h.runner_host == endpoint
+            ]
+            for handle in stale_handles:
+                self._active_handles.discard(handle)
+            self._active_servers_by_endpoint.pop(endpoint, None)
+
+            logger.info(
+                f"Runner restart detected for {endpoint} — purged "
+                f"{len(stale_handles)} stale handle(s)",
+                extra={
+                    "endpoint": endpoint,
+                    "old_epoch": prev_epoch,
+                    "new_epoch": new_epoch,
+                    "purged_count": len(stale_handles),
+                    "purged_server_ids": [h.server_id for h in stale_handles],
+                },
+            )
+
+            # Also drop the endpoint from the model map — refresh_model_map
+            # will re-discover whatever the freshly-started runner has.
+            self._invalidate_model_map_for_endpoint(endpoint)
+
+            # Update only after purge succeeded.
+            self._runner_epochs[endpoint] = new_epoch
+            return False
+
     async def validate_server_handle(self, handle: ServerHandle) -> bool:
         """Check if a server handle is still valid by hitting the server's /health.
 
@@ -655,6 +787,15 @@ class RunnerClient:
                 )
 
                 continue
+
+            # Proactive runner-restart detection: hit /v1/status. If the
+            # runner's startup_epoch changed since we last saw it, every
+            # handle we hold for this endpoint is dead — purge them now
+            # so we don't try to reuse them later. Either way (changed,
+            # unchanged, or unreachable) we still proceed to attempt
+            # acquire — a fresh server is fine after a purge, and a
+            # one-off /v1/status failure shouldn't block real traffic.
+            await self._check_runner_epoch(endpoint)
 
             # Retry connection-level errors per endpoint (configurable via RUNNER_ACQUIRE_RETRIES)
             max_retries = _ACQUIRE_RETRIES
