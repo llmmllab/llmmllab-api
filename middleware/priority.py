@@ -169,7 +169,7 @@ class PriorityMiddleware(BaseHTTPMiddleware):
         if body_fields:
             if not metadata.session_id and body_fields.session_id:
                 metadata.session_id = f"pck:{body_fields.session_id}"
-                llmmllogger.debug(
+                logger.debug(
                     "session_id derived from prompt_cache_key body field",
                     extra={"session_id": metadata.session_id},
                 )
