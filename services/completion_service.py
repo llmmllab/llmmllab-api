@@ -420,6 +420,12 @@ class CompletionService:
                 f"Stale server {stale_err.server_id} detected — re-acquiring "
                 f"(attempt {_retry_count + 1}/{max_retries})",
             )
+            # Purge the cached workflow whose ChatOpenAI(base_url=...) still
+            # points at the dead server. Without this the next compose_workflow
+            # call would return the same stale CompiledStateGraph and the
+            # retry would re-raise StaleServerError forever.
+            from composer_init import invalidate_workflow as _invalidate_workflow
+            await _invalidate_workflow(user_id, model_name)
             await runner_client.refresh_model_map()
             async for event in CompletionService._build_and_run(
                 user_id,
