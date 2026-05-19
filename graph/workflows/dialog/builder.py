@@ -1,7 +1,9 @@
 """
-Simplified GraphBuilder with Dependency Injection - Focused coordinator using composition.
-Uses clean factories and strategies with proper dependency injection pattern.
-All agents, storage services, and model profiles are instantiated upfront and injected.
+Dialog GraphBuilder — conversational workflow with memory + title generation.
+
+Uses dependency injection: all agent, storage, and node instances are
+constructed up front and wired into the graph. Shared model-resolution and
+primary-agent construction live on the ``GraphBuilder`` base class.
 """
 
 from typing import Optional, Type, cast
@@ -9,7 +11,6 @@ import uuid
 
 from langgraph.graph.state import CompiledStateGraph, StateGraph, END, START
 from langgraph.prebuilt import ToolNode
-from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.embeddings import Embeddings
 from pydantic import BaseModel
 
@@ -32,8 +33,7 @@ from models import (
     UserConfig,
 )
 from services.runner_client import runner_client
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from pydantic import SecretStr
+from langchain_openai import OpenAIEmbeddings
 
 from agents.chat import ChatAgent
 from agents.embed import EmbeddingAgent
@@ -48,33 +48,26 @@ from graph.nodes.memory import (
     MemoryCreationNode,
     MemoryStorageNode,
 )
-from utils.logging import _session_id_ctx
 from tools.registry import registry_manager
 from graph.state import WorkflowState, assemble_context_messages
 
 
-def _get_session_id_header():
-    sid = _session_id_ctx.get()
-    return {"X-Session-ID": sid} if sid else None
-
-
 class DialogGraphBuilder(GraphBuilder):
     """
-    Clean, focused GraphBuilder using dependency injection and composition.
+    Conversational GraphBuilder using dependency injection and composition.
 
     Responsibilities:
-    - Create all agent and storage service instances upfront
-    - Inject dependencies into nodes for proper separation of concerns
-    - Coordinate workflow creation using factories
-    - Provide simple public interface
-    - Handle errors gracefully
-
-    Does NOT handle:
-    - Caching (delegated to CachedWorkflowFactory)
-    - Complex routing (handled by dedicated routers)
-    - Circuit breaking (separate concern)
-    - Tool orchestration (separate nodes)
+    - Resolve the primary text model + acquire its server (shared via base)
+    - Resolve the embedding model + wire the embedding agent
+    - Build memory search/create/store nodes
+    - Compose the title-generation tail of the graph
     """
+
+    # The base class reads ``runner_client`` and ``ChatAgent`` from this
+    # module via ``sys.modules`` at call time, which lets test-time
+    # monkeypatches on ``graph.workflows.dialog.builder.runner_client``
+    # flow through the shared helpers correctly.
+    _chat_openai_max_retries = config.CHAT_OPENAI_MAX_RETRIES
 
     def __init__(self, storage: "Storage", user_config: UserConfig):
         super().__init__(storage, user_config)
@@ -94,62 +87,13 @@ class DialogGraphBuilder(GraphBuilder):
         it is ``None``, the builder falls back to the first available
         ``TEXTTOTEXT`` model — this is the same default path the router uses
         when the client sends ``"model": "default"``.
-
-        Args:
-            user_id: User identifier
-            response_format: Optional response format constraint
-            model_name: Resolved model name (from router or service layer).
-                When ``None``, falls back to the default ``TEXTTOTEXT`` model.
-            **kwargs: Additional workflow parameters
-
-        Returns:
-            Compiled workflow ready for execution
         """
         try:
-            # Resolve the primary model: prefer an explicit model_name (already
-            # resolved at the router/service layer), fall back to the default
-            # TEXTTOTEXT model when none was specified.
-            if model_name:
-                all_models = await runner_client.list_models()
-                primary_model_def = next(
-                    (
-                        m
-                        for m in all_models
-                        if m.name == model_name or m.id == model_name
-                    ),
-                    None,
-                )
-                if not primary_model_def:
-                    # Requested model not on any runner — fall back to user's default
-                    model_name = await self.resolve_model(model_name, user_id)
-                    primary_model_def = next(
-                        (
-                            m
-                            for m in all_models
-                            if m.name == model_name or m.id == model_name
-                        ),
-                        None,
-                    )
-                    if not primary_model_def:
-                        # Fallback model also not found — use the configured default TextToText model
-                        self.logger.warning(
-                            "Resolved model not found on runners, using default "
-                            "TextToText model",
-                            user_id=user_id,
-                            resolved=model_name,
-                        )
-                        primary_model_def = await runner_client.default_model_by_task(
-                            ModelTask.TEXTTOTEXT
-                        )
-                        if not primary_model_def:
-                            raise RuntimeError(
-                                f"Model '{model_name}' not found and no "
-                                "TextToText model available"
-                            )
-            else:
-                primary_model_def = await runner_client.model_by_task(ModelTask.TEXTTOTEXT)
-                if not primary_model_def:
-                    raise RuntimeError("No TextToText model available")
+            # Two-phase primary resolution: resolve the model definition first,
+            # then check the embedding model is available, only THEN acquire
+            # the primary server. This preserves the original "raise before
+            # acquire" ordering when no embedding model is available.
+            primary_model_def = await self._resolve_primary_model(user_id, model_name)
 
             embedding_model_def = await runner_client.model_by_task(
                 ModelTask.TEXTTOEMBEDDINGS
@@ -157,45 +101,23 @@ class DialogGraphBuilder(GraphBuilder):
             if not embedding_model_def:
                 raise RuntimeError("No TextToEmbeddings model available")
 
-            primary_handle = await runner_client.acquire_server(
-                model_id=primary_model_def.id,
-                num_ctx=(
-                    primary_model_def.parameters.num_ctx
-                    if primary_model_def.parameters
-                    else 90000
-                ),
-                task=primary_model_def.task,
+            primary_agent, _ = await self._acquire_primary_server_and_agent(
+                user_id=user_id,
+                model_def=primary_model_def,
+                system_prompt_default="",
+                component_name="PrimaryChatAgent",
             )
+
             embedding_handle = await runner_client.acquire_server(
                 model_id=embedding_model_def.id,
                 task=embedding_model_def.task,
             )
 
-            primary_model = ChatOpenAI(
-                base_url=primary_handle.base_url,
-                api_key=SecretStr("none"),
-                model=primary_model_def.name,
-                stream_usage=True,
-                max_retries=config.CHAT_OPENAI_MAX_RETRIES,
-                default_headers=_get_session_id_header(),
-            )
             embedding_model = OpenAIEmbeddings(
                 base_url=embedding_handle.base_url,
                 api_key="none",
             )
-            self.server_handle = primary_handle
 
-            primary_agent = ChatAgent(
-                model=cast(BaseChatModel, primary_model),
-                system_prompt=primary_model_def.system_prompt or "",
-                num_ctx=(
-                    primary_model_def.parameters.num_ctx
-                    if primary_model_def.parameters
-                    else None
-                )
-                or 90000,
-                component_name="PrimaryChatAgent",
-            )
             embedding_agent = EmbeddingAgent(
                 model=cast(Embeddings, embedding_model),
                 component_name="EmbeddingAgent",

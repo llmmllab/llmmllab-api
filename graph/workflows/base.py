@@ -3,13 +3,15 @@ Base GraphBuilder — shared DI setup for workflow subclasses.
 """
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, List, Optional, Type
+from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Type, cast
 
 from langgraph.graph.state import CompiledStateGraph
-from pydantic import BaseModel
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_openai import ChatOpenAI
+from pydantic import BaseModel, SecretStr
 
-from models import Message, UserConfig
-from utils.logging import llmmllogger
+from models import Message, ModelTask, UserConfig
+from utils.logging import _session_id_ctx, llmmllogger
 
 from ..state import WorkflowState
 
@@ -23,6 +25,8 @@ if TYPE_CHECKING:
     from db.search_storage import SearchStorage
     from db.checkpoint_storage import CheckpointStorage
     from services.runner_client import ServerHandle
+    from agents.chat import ChatAgent
+    from models import Model
 
 
 def should_continue_tool_calls(state: WorkflowState) -> str:
@@ -42,15 +46,61 @@ def should_generate_title(state: WorkflowState) -> str:
     return "skip_title"
 
 
+def _get_session_id_header():
+    """Inject the current session id as a default header on outbound requests."""
+    sid = _session_id_ctx.get()
+    return {"X-Session-ID": sid} if sid else None
+
+
+# Default fallback context window when a model definition has no explicit
+# `num_ctx` parameter. Kept as a module-level constant so subclasses and
+# tests can reference the same value.
+DEFAULT_NUM_CTX = 90000
+
+
 class GraphBuilder(ABC):
     """
     Base class for workflow builders.
 
     Holds per-user storage handles and a logger. Subclasses implement
     `build_workflow` and `create_initial_state`.
+
+    Subclasses must set the ``_runner_client`` and ``_chat_agent_cls`` class
+    attributes to the symbols imported in their own module. This indirection
+    keeps ``unittest.mock.patch("graph.workflows.<sub>.builder.runner_client")``
+    style test patches working while still letting the shared model-resolution
+    logic live here.
     """
 
     server_handle: Optional["ServerHandle"] = None
+
+    # ChatOpenAI retry policy — IDE uses a small fixed value; Dialog reads
+    # config.CHAT_OPENAI_MAX_RETRIES. Subclasses can override.
+    _chat_openai_max_retries: int = 2
+
+    @property
+    def _runner_client(self) -> Any:
+        """Look up ``runner_client`` from the subclass's defining module.
+
+        Reading through ``sys.modules`` (rather than capturing the symbol at
+        class-definition time) lets tests that ``patch("graph.workflows.X.builder.runner_client")``
+        affect the value the shared base-class helpers see.
+        """
+        import sys
+
+        mod = sys.modules[type(self).__module__]
+        return getattr(mod, "runner_client")
+
+    @property
+    def _chat_agent_cls(self) -> Any:
+        """Look up ``ChatAgent`` from the subclass's defining module.
+
+        Same rationale as ``_runner_client``: respect test-time monkeypatches.
+        """
+        import sys
+
+        mod = sys.modules[type(self).__module__]
+        return getattr(mod, "ChatAgent")
 
     def __init__(self, storage: "Storage", user_config: UserConfig):
         self.user_config = user_config
@@ -87,6 +137,140 @@ class GraphBuilder(ABC):
         from services.model_service import model_service
 
         return await model_service.resolve_default_model(requested_model, user_id)
+
+    async def _resolve_primary_model(
+        self, user_id: str, model_name: Optional[str]
+    ) -> "Model":
+        """Resolve the primary (TextToText) model for this workflow.
+
+        Mirrors the previous per-builder resolution logic so behaviour stays
+        bit-for-bit identical:
+
+        1. If ``model_name`` is given, look it up in ``runner_client.list_models()``.
+        2. If not found, ask ``resolve_model`` for the user's default and re-search
+           the same list (no re-fetch).
+        3. If still not found, fall back to ``runner_client.default_model_by_task``.
+        4. If no ``model_name``, take the first ``TEXTTOTEXT`` model.
+        """
+        rc = self._runner_client
+
+        if model_name:
+            all_models = await rc.list_models()
+            model_def = next(
+                (m for m in all_models if m.name == model_name or m.id == model_name),
+                None,
+            )
+            if not model_def:
+                # Requested model not on any runner — fall back to user's default
+                model_name = await self.resolve_model(model_name, user_id)
+                model_def = next(
+                    (m for m in all_models if m.name == model_name or m.id == model_name),
+                    None,
+                )
+                if not model_def:
+                    # Fallback model also not found — use the configured default
+                    # TextToText model
+                    self.logger.warning(
+                        "Resolved model not found on runners, using default "
+                        "TextToText model",
+                        user_id=user_id,
+                        resolved=model_name,
+                    )
+                    model_def = await rc.default_model_by_task(ModelTask.TEXTTOTEXT)
+                    if not model_def:
+                        raise RuntimeError(
+                            f"Model '{model_name}' not found and no "
+                            "TextToText model available"
+                        )
+        else:
+            model_def = await rc.model_by_task(ModelTask.TEXTTOTEXT)
+            if not model_def:
+                raise RuntimeError("No TextToText model available")
+
+        return model_def
+
+    async def _acquire_primary_server_and_agent(
+        self,
+        user_id: str,
+        model_def: "Model",
+        system_prompt_default: str,
+        component_name: str,
+    ) -> Tuple["ChatAgent", Any]:
+        """Acquire a server for the resolved primary model and build a ChatAgent.
+
+        Returns the constructed agent and the underlying ``ChatOpenAI``
+        instance (so callers that need to ``bind_tools`` can rewrap it — see
+        IDE proxy mode).
+
+        Side-effect: sets ``self.server_handle``.
+        """
+        rc = self._runner_client
+        chat_agent_cls = self._chat_agent_cls
+
+        self.logger.debug(
+            "Building workflow",
+            user_id=user_id,
+            model=model_def.name,
+        )
+
+        assert model_def.id is not None, "Model definition must have an ID"
+
+        num_ctx = (
+            model_def.parameters.num_ctx
+            if model_def.parameters
+            else DEFAULT_NUM_CTX
+        )
+        server_handle = await rc.acquire_server(
+            model_id=model_def.id,
+            num_ctx=num_ctx,
+            task=model_def.task,
+        )
+
+        primary_model = ChatOpenAI(
+            base_url=server_handle.base_url,
+            api_key=SecretStr("none"),
+            model=model_def.name,
+            stream_usage=True,
+            max_retries=self._chat_openai_max_retries,
+            default_headers=_get_session_id_header(),
+        )
+        self.server_handle = server_handle
+
+        primary_agent = chat_agent_cls(
+            model=cast(BaseChatModel, primary_model),
+            system_prompt=model_def.system_prompt or system_prompt_default,
+            num_ctx=(
+                model_def.parameters.num_ctx if model_def.parameters else None
+            )
+            or DEFAULT_NUM_CTX,
+            component_name=component_name,
+        )
+
+        return primary_agent, primary_model
+
+    async def _build_primary_agent(
+        self,
+        user_id: str,
+        model_name: Optional[str],
+        system_prompt_default: str,
+        component_name: str,
+    ) -> Tuple["Model", "ChatAgent", Any]:
+        """One-shot: resolve primary model, acquire server, build ChatAgent.
+
+        Convenience wrapper for builders that don't need to interleave any
+        other resolution steps (e.g. IDE). Dialog uses the two-phase pair
+        ``_resolve_primary_model`` + ``_acquire_primary_server_and_agent``
+        directly so it can raise on a missing embedding model before any
+        server is acquired.
+        """
+        model_def = await self._resolve_primary_model(user_id, model_name)
+        primary_agent, primary_model = await self._acquire_primary_server_and_agent(
+            user_id=user_id,
+            model_def=model_def,
+            system_prompt_default=system_prompt_default,
+            component_name=component_name,
+        )
+        return model_def, primary_agent, primary_model
 
     @abstractmethod
     async def build_workflow(

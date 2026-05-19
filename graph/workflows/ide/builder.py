@@ -9,21 +9,19 @@ Supports three tool modes:
     Server tool calls loop through the ServerToolNode; client tool calls pass through.
 """
 
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Type, Union, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Type, Union
 
 import uuid
 
 from langgraph.graph.state import CompiledStateGraph, StateGraph, END, START
 from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.memory import InMemorySaver
-from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel
 
 from constants import AGENT_NODE_NAME, TOOL_NODE_NAME
 
 from models import (
-    ModelTask,
     UserConfig,
     NodeMetadata,
     MessageRole,
@@ -33,13 +31,10 @@ from models import (
     WorkflowConfig,
 )
 from services.runner_client import runner_client
-from langchain_openai import ChatOpenAI
-from pydantic import SecretStr
 
 from agents.chat import ChatAgent
 from graph.workflows.base import GraphBuilder, should_continue_tool_calls
 from graph.nodes.agent import AgentNode
-from utils.logging import _session_id_ctx
 from graph.nodes.server_tools import (
     ServerToolNode,
     make_should_continue_server_tools,
@@ -84,21 +79,22 @@ next message. Use that result to inform your next step.
 """
 
 
-def _get_session_id_header():
-    sid = _session_id_ctx.get()
-    return {"X-Session-ID": sid} if sid else None
-
-
 class IdeGraphBuilder(GraphBuilder):
     """
     IDE-focused GraphBuilder supporting proxy and server-side tool modes.
 
-    Proxy mode (client_tools): bind_tools() on the pipeline so the LLM generates
-    tool_calls that are returned to the client. Graph: START -> Agent -> END.
+    Proxy mode (client_tools): bind_tools() on the pipeline so the LLM can
+    generate tool_calls that are returned to the client. Graph: START -> Agent -> END.
 
     Server-side mode (server_tools): adds ToolNode + feedback loop.
     Graph: START -> Agent -> (tools? -> ToolNode -> Agent) | END.
     """
+
+    # The base class reads ``runner_client`` and ``ChatAgent`` from this
+    # module via ``sys.modules`` at call time, which lets tests that patch
+    # ``graph.workflows.ide.builder.runner_client`` / ``ChatAgent`` flow
+    # through the shared helpers correctly.
+    _chat_openai_max_retries = 2
 
     def __init__(self, storage: "Storage", user_config: UserConfig):
         super().__init__(storage, user_config)
@@ -134,100 +130,42 @@ class IdeGraphBuilder(GraphBuilder):
             Compiled workflow ready for execution
         """
         try:
-            # Look up model by name or fall back to first TextToText model.
-            #
             # NOTE on model resolution: the service layer
             # (CompletionService._build_and_run) already calls
             # _resolve_model() before reaching this builder, so the
-            # model_name arriving here is typically already resolved to
-            # an available model. The fallback below is a safety net for
-            # direct builder usage (bypassing the service layer) and for
-            # edge cases where the resolved name still doesn't match any
-            # runner model.
-            if model_name:
-                all_models = await runner_client.list_models()
-                model_def = next(
-                    (
-                        m
-                        for m in all_models
-                        if m.name == model_name or m.id == model_name
-                    ),
-                    None,
-                )
-                if not model_def:
-                    # Requested model not on any runner — fall back to user's default
-                    model_name = await self.resolve_model(model_name, user_id)
-                    model_def = next(
-                        (
-                            m
-                            for m in all_models
-                            if m.name == model_name or m.id == model_name
-                        ),
-                        None,
-                    )
-                    if not model_def:
-                        # Fallback model also not found — use the configured default TextToText model
-                        self.logger.warning(
-                            "Resolved model not found on runners, using default "
-                            "TextToText model",
-                            user_id=user_id,
-                            resolved=model_name,
-                        )
-                        model_def = await runner_client.default_model_by_task(
-                            ModelTask.TEXTTOTEXT
-                        )
-                        if not model_def:
-                            raise RuntimeError(
-                                f"Model '{model_name}' not found and no "
-                                "TextToText model available"
-                            )
-            else:
-                model_def = await runner_client.model_by_task(ModelTask.TEXTTOTEXT)
-                if not model_def:
-                    raise RuntimeError("No TextToText model available")
-
-            self.logger.debug(
-                "Building workflow",
+            # model_name arriving here is typically already resolved.
+            # The shared helper applies the same fallback ladder used
+            # historically by the IDE builder.
+            #
+            # We deliberately build the agent AFTER any client_tools have
+            # been bound to the underlying ChatOpenAI instance — the
+            # base helper returns the ChatOpenAI so we can rewrap it.
+            model_def, _agent, primary_model = await self._build_primary_agent(
                 user_id=user_id,
-                model=model_def.name,
-                model_arg=model_name,
-            )
-
-            assert model_def.id is not None, "Model definition must have an ID"
-
-            server_handle = await runner_client.acquire_server(
-                model_id=model_def.id,
-                num_ctx=(
-                    model_def.parameters.num_ctx
-                    if model_def.parameters
-                    else 90000
-                ),
-                task=model_def.task,
-            )
-
-            primary_model = ChatOpenAI(
-                base_url=server_handle.base_url,
-                api_key=SecretStr("none"),
-                model=model_def.name,
-                stream_usage=True,
-                max_retries=2,
-                default_headers=_get_session_id_header(),
-            )
-            self.server_handle = server_handle
-
-            # Bind client tools to the pipeline so the LLM can generate tool_calls
-            if client_tools:
-                bind_kwargs: dict = {}
-                bind_kwargs["tool_choice"] = tool_choice or "auto"
-                primary_model = primary_model.bind_tools(client_tools, **bind_kwargs)  # type: ignore[union-attr]
-
-            primary_agent = ChatAgent(
-                model=cast(BaseChatModel, primary_model),
-                system_prompt=model_def.system_prompt or IDE_PRIMARY_SYSTEM_PROMPT,
-                num_ctx=(model_def.parameters.num_ctx if model_def.parameters else None)
-                or 90000,
+                model_name=model_name,
+                system_prompt_default=IDE_PRIMARY_SYSTEM_PROMPT,
                 component_name="PrimaryCodingAgent",
             )
+
+            # Bind client tools to the pipeline so the LLM can generate tool_calls.
+            # We rebuild the ChatAgent only when binding actually changes the model.
+            if client_tools:
+                bind_kwargs: dict = {"tool_choice": tool_choice or "auto"}
+                primary_model = primary_model.bind_tools(client_tools, **bind_kwargs)  # type: ignore[union-attr]
+                # Rebuild the ChatAgent around the tool-bound model so it
+                # generates tool_calls. Use the same system prompt / num_ctx
+                # logic the base helper used.
+                num_ctx = (
+                    model_def.parameters.num_ctx if model_def.parameters else None
+                ) or 90000
+                primary_agent = ChatAgent(
+                    model=primary_model,
+                    system_prompt=model_def.system_prompt or IDE_PRIMARY_SYSTEM_PROMPT,
+                    num_ctx=num_ctx,
+                    component_name="PrimaryCodingAgent",
+                )
+            else:
+                primary_agent = _agent
 
             workflow = StateGraph(WorkflowState)
 
