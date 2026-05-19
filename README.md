@@ -1,6 +1,8 @@
 # llmmllab-api
 
-Python FastAPI inference service with OpenAI- and Anthropic-compatible endpoints, backed by `llama.cpp` and LangGraph agent orchestration.
+Python FastAPI inference service with OpenAI- and Anthropic-compatible endpoints, backed by `llama.cpp` (via a separate runner service) and LangGraph agent orchestration.
+
+The Ollama-compatible router was removed; only the OpenAI (`/v1/chat/completions`, `/v1/embeddings`, ...) and Anthropic (`/v1/messages`) wire protocols are exposed.
 
 ## Quick Start
 
@@ -133,25 +135,34 @@ Copy `.env.example` to `.env` and set the required values. See `config.py` for d
 | `HF_TOKEN` | HuggingFace token for model downloads |
 | `SEARX_HOST` | SearXNG instance URL for web search |
 | `CUDA_VISIBLE_DEVICES` | GPU devices for inference |
-| `STALE_SERVER_RETRIES` | Retries on stale server handle (default: 1, set 0 to disable) |
 
 ## Project Structure
 
 - `app.py` — FastAPI entry point
-- `routers/` — API routes (openai/, anthropic/, common/)
+- `routers/` — API routes (`openai/`, `anthropic/`, `common/`)
 - `middleware/` — Auth, DB init, message validation
-- `services/` — Business logic (completion, token, tool)
+- `services/` — Business logic. The completion path is split across `completion_service.py` (orchestrator), `completion_state.py`, `prompt_templates.py`, `truncation.py`, `response_handlers.py`, `session_tracking.py`, `retry_policies.py`, and `continuation_logic.py`. The runner client (`runner_client.py`) tracks runner restart epochs.
 - `runner/` — Model execution pipelines
-- `composer_init.py` — Workflow orchestration API
+- `composer_init.py` — Workflow orchestration API (module-level singleton; exposes `compose_workflow`, `invalidate_workflow`, `clear_workflow_cache`, `execute_workflow`)
 - `agents/` — Agent implementations
 - `core/` — Core composer components
-- `graph/` — LangGraph workflow builder, nodes, state
+- `graph/` — LangGraph workflow system. Both IDE and Dialog builders subclass the shared `GraphBuilder` in `graph/workflows/base.py`. `graph/executor.py` converts runner-restart 404s into `StaleServerError`.
 - `tools/` — Tool registry and static tools
-- `db/` — Multi-tier storage (PostgreSQL + Redis)
+- `db/` — Multi-tier storage (PostgreSQL + optional Redis)
 - `models/` — Pydantic data models
-- `utils/` — Shared helpers
+- `utils/` — Shared helpers (message conversion, logging, token estimation, ...)
 - `k8s/` — Kubernetes deployment manifests
 - `test/` — Tests
+
+## Runner Restart Recovery
+
+The api recovers transparently from runner process restarts:
+
+- `RunnerClient` tracks a per-endpoint `startup_epoch` returned by `GET /v1/status`. On `acquire_server` and opportunistically on 503 responses, it re-probes status. An epoch bump purges all active handles for that endpoint and invalidates the model map.
+- 404 responses against `/v1/server/<id>/...` for a known handle, and 404-shaped errors raised during LangGraph workflow execution, are converted into `StaleServerError`.
+- Empty SSE streams from chat completions trigger `revalidate_runner_handles()` (chat streams bypass the proxy that would otherwise see the 404 directly).
+- The completion service catches `StaleServerError`, invalidates the cached workflow for `(user_id, model_name)` via `composer_init.invalidate_workflow`, refreshes the model map, and retries with a fresh handle. Retries are capped by `STALE_SERVER_RETRIES` (default 1, set 0 to disable).
+- Empty-after-all-retries now closes the stream cleanly with no content. The api no longer injects a `[Model returned empty response...]` diagnostic into the assistant response — that text was being echoed back into history by clients and eventually exhausted output token budgets.
 
 ## Docker
 
