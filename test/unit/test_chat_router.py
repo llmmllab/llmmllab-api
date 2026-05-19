@@ -32,7 +32,7 @@ def _build_app():
             "services.conversation_service": MagicMock(),
             "services.CompletionService": MagicMock(),
             "composer_init": MagicMock(),
-            "utils.message_transformation": MagicMock(),
+            "utils.message_conversion": MagicMock(),
         }),
     ):
         import routers.chat  # noqa: F811

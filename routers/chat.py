@@ -22,7 +22,7 @@ from models.request_priority_metadata import Priority, RequestSource
 from services import CompletionService
 from utils import extract_text_from_message
 from utils.logging import llmmllogger
-from utils.message_transformation import transform_file_content_to_documents
+from utils.message_conversion import transform_file_content_to_documents
 
 logger = llmmllogger.bind(component="chat_router")
 router = APIRouter(prefix="/chat", tags=["chat"])
