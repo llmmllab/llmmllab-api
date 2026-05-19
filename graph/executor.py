@@ -570,6 +570,56 @@ class WorkflowExecutor:
             raise
 
         except Exception as e:
+            # Stale-handle recovery.  When the runner is replaced mid-request
+            # (rollout, crash, eviction), the cached workflow's LangChain
+            # ChatOpenAI is still pointing at the dead server_id and the
+            # next chat call surfaces as openai.NotFoundError /
+            # httpx.HTTPStatusError (status 404).  These never reach
+            # CompletionService._build_and_run_with_retry by themselves —
+            # they get caught here as a generic Exception and converted
+            # to a "Sorry…" message.
+            #
+            # Detect the 404 case, probe every known runner's startup_epoch
+            # to see if one restarted, and if so re-raise as
+            # StaleServerError so the upper retry layer purges the workflow
+            # cache and re-acquires.
+            from graph.errors import StaleServerError
+
+            if isinstance(e, StaleServerError):
+                # Already propagating, just let it through.
+                raise
+
+            looks_like_404 = (
+                getattr(e, "status_code", None) == 404
+                or getattr(getattr(e, "response", None), "status_code", None) == 404
+                or " 404 " in str(e)
+                or "Not Found" in str(e)
+            )
+            if looks_like_404:
+                try:
+                    from services.runner_client import runner_client
+                    purged = await runner_client.revalidate_runner_handles()
+                except Exception as probe_err:  # pragma: no cover — defensive
+                    self.logger.warning(
+                        "Failed to probe runner epoch after 404",
+                        extra={"error": str(probe_err)},
+                    )
+                    purged = 0
+                if purged > 0:
+                    self.logger.warning(
+                        "Workflow saw 404 and runner restart was confirmed "
+                        "— raising StaleServerError to trigger workflow rebuild",
+                        extra={"purged_handles": purged, "underlying_error": str(e)},
+                    )
+                    # Find a server_id to attach to the error.  Best-effort —
+                    # the upper retry layer only uses it for logging.
+                    server_id = (
+                        getattr(e, "server_id", None)
+                        or getattr(getattr(e, "response", None), "headers", {}).get("x-server-id", "")
+                        or "unknown"
+                    )
+                    raise StaleServerError(str(server_id)) from e
+
             self.logger.error(
                 "Workflow execution failed", extra={"error": str(e)}, exc_info=True
             )
