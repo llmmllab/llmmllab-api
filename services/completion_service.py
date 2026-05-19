@@ -28,7 +28,6 @@ from composer_init import (
 from config import RUNNER_RETRIES, RUNNER_RETRY_BACKOFF_BASE
 from graph.state import ServerToolEvent
 from graph.workflows.factory import WorkFlowType
-from httpx import ConnectError, RemoteProtocolError
 from models.chat_response import ChatResponse
 from models.message import Message, MessageContent, MessageContentType
 from models.request_priority_metadata import (
@@ -49,6 +48,7 @@ from services.response_handlers import (
     update_stream_delta,
     update_stream_final,
 )
+from services.retry_policies import stream_with_connection_retry
 from services.session_tracking import (
     cancel_session as _cancel_session_impl,
     register_session_task,
@@ -60,10 +60,6 @@ from utils.logging import llmmllogger
 __all__ = ["CompletionService", "CompletionResult", "StreamAccumulator", "cancel_session"]
 
 logger = llmmllogger.bind(component="completion_service")
-
-# Connection-level errors that indicate the runner/server is unreachable.
-# These should trigger a server-handle refresh, not an empty-response retry.
-_CONNECTION_ERRORS = (RemoteProtocolError, ConnectError)
 
 
 async def cancel_session(session_id: str) -> bool:
@@ -330,10 +326,9 @@ class CompletionService:
     ) -> AsyncIterator[Union[ChatResponse, ServerToolEvent]]:
         """Build and run with automatic server handle refresh on connection failure.
 
-        When a request fails with a connection-level error (e.g. the runner
-        restarted mid-request), this method catches the error, forces a model
-        map refresh, and retries with a fresh server handle.  This prevents
-        stale ``ServerHandle`` objects from pointing to dead servers.
+        Delegates to :func:`services.retry_policies.stream_with_connection_retry`
+        which catches connection-level errors, refreshes the model map, and
+        retries with a fresh server handle.
 
         Parameters
         ----------
@@ -341,45 +336,29 @@ class CompletionService:
             Maximum number of connection-error retries.
             Defaults to RUNNER_RETRIES from config (env: RUNNER_RETRIES).
         """
-        from openai import APIConnectionError
-
         if max_retries is None:
             max_retries = RUNNER_RETRIES
 
-        for attempt in range(max_retries + 1):
-            try:
-                async for event in CompletionService._build_and_run(
-                    user_id,
-                    messages,
-                    model_name,
-                    workflow_type,
-                    conversation_id,
-                    client_tools,
-                    tool_choice,
-                    server_tool_names,
-                ):
-                    yield event
-                return
-            except asyncio.CancelledError:
-                raise  # Never retry on cancellation
-            except (APIConnectionError, *_CONNECTION_ERRORS) as e:
-                if attempt < max_retries:
-                    logger.warning(
-                        "Connection error during workflow execution, "
-                        "retrying with fresh server handle",
-                        extra={
-                            "error": str(e),
-                            "error_type": type(e).__name__,
-                            "attempt": attempt + 1,
-                            "max_retries": max_retries,
-                        },
-                    )
-                    await asyncio.sleep(RUNNER_RETRY_BACKOFF_BASE * (attempt + 1))
-                    from services.runner_client import runner_client
+        async def _refresh_model_map() -> None:
+            from services.runner_client import runner_client
 
-                    await runner_client.refresh_model_map()
-                    continue
-                raise
+            await runner_client.refresh_model_map()
+
+        async for event in stream_with_connection_retry(
+            CompletionService._build_and_run,
+            user_id=user_id,
+            messages=messages,
+            model_name=model_name,
+            workflow_type=workflow_type,
+            conversation_id=conversation_id,
+            client_tools=client_tools,
+            tool_choice=tool_choice,
+            server_tool_names=server_tool_names,
+            max_retries=max_retries,
+            backoff_base=RUNNER_RETRY_BACKOFF_BASE,
+            refresh_model_map=_refresh_model_map,
+        ):
+            yield event
 
     @staticmethod
     async def _collect_response(
