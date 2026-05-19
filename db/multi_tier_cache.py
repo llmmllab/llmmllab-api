@@ -219,7 +219,15 @@ class MultiTierUserConfigCache:
 
         # Tier 2: Redis cache
         if self.redis_cache:
-            config = self.redis_cache.get_user_config_from_cache(user_id)
+            try:
+                config = self.redis_cache.get_user_config_from_cache(user_id)
+            except Exception as e:
+                # Redis outage must not break the fallback chain; fall through
+                # to the database tier instead of bubbling the exception up.
+                logger.warning(
+                    f"Redis error retrieving user config for {user_id}: {e}"
+                )
+                config = None
             if config:
                 # Cache in memory for faster future access
                 self.memory_cache.set(user_id, config)

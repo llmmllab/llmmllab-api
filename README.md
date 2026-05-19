@@ -48,7 +48,7 @@ Copy `.env.example` to `.env` and set the required values. See `config.py` for d
 
 | Variable | Description |
 |----------|-------------|
-| `REDIS_ENABLED` | Enable Redis cache (default: true in k8s, false locally) |
+| `REDIS_ENABLED` | Enable the multi-tier (memory + Redis + DB) user-config cache (default: `true`; set to `false`/`0`/`no`/`off` to opt out and run with memory + DB only). |
 | `REDIS_HOST`, `REDIS_PORT`, `REDIS_DB` | Redis connection |
 | `REDIS_PASSWORD` | Redis password (optional) |
 | `REDIS_CONVERSATION_TTL`, `REDIS_MESSAGE_TTL`, `REDIS_SUMMARY_TTL` | TTL in minutes for cached data |
