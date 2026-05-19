@@ -39,13 +39,11 @@ from models.request_priority_metadata import (
 from models.tool_call import ToolCall
 from services.completion_state import CompletionResult, StreamAccumulator
 from services.prompt_templates import (
-    CONTEXT_OVERFLOW_THRESHOLD,
     CONTINUATION_PROMPT,
     EMPTY_RESPONSE_NUDGE,
-    SENTENCE_TERMINATORS,
     TRUNCATION_CONTINUATION_PROMPT,
-    TRUNCATION_MIN_LEN,
 )
+from services.truncation import is_context_overflow, is_truncated
 from utils.logging import llmmllogger
 
 __all__ = ["CompletionService", "CompletionResult", "StreamAccumulator", "cancel_session"]
@@ -107,68 +105,6 @@ async def _resolve_model(model_name: str, user_id: str) -> str:
     except Exception:
         # If model_service is unavailable, return the original name
         return model_name
-
-
-def _is_context_overflow(
-    prompt_tokens: int,
-    finish_reason: str,
-    output_tokens: int,
-    model_num_ctx: int | None = None,
-) -> bool:
-    """Detect whether the model likely hit its context window limit.
-
-    When *model_num_ctx* is provided, the total token budget
-    (prompt tokens + output tokens) is compared against the model's
-    context window to determine overflow.  When it is not provided,
-    a fixed threshold is used as a fallback.
-
-    Returns True when:
-    - The total tokens exceed the model's context window (if known), OR
-    - The prompt consumed a lot of tokens (above threshold), AND
-    - The model produced no output (empty response), OR
-    - The model was cut off immediately (finish_reason == 'length' with zero output).
-
-    In these cases, retrying with the same (or larger) context is futile.
-    """
-    # Prefer a model-aware check when num_ctx is available.
-    if model_num_ctx is not None:
-        total_tokens = prompt_tokens + output_tokens
-        if total_tokens >= model_num_ctx:
-            return True
-        # If we're well below the context window, no overflow.
-        if total_tokens < CONTEXT_OVERFLOW_THRESHOLD:
-            return False
-    else:
-        if prompt_tokens < CONTEXT_OVERFLOW_THRESHOLD:
-            return False
-    if output_tokens > 0:
-        return False
-    # Empty response with a large prompt — almost certainly context overflow.
-    # Also catches finish_reason == 'length' with zero output.
-    return True
-
-
-def _is_truncated(text: str, finish_reason: str) -> bool:
-    """Detect a response that should be continued.
-
-    `finish_reason="length"` means the model hit the token limit — always
-    truncated by definition, regardless of trailing punctuation.
-
-    `finish_reason="stop"` means the model emitted EOS. This is usually
-    intentional, but llama.cpp occasionally emits EOS mid-sentence (a
-    "premature stop"). We apply a heuristic: if the response is non-trivial
-    in length and ends without a sentence terminator, treat it as truncated.
-    Short replies are excluded — single-word answers ("OK", "42", a URL)
-    legitimately end without punctuation.
-    """
-    if finish_reason == "length":
-        return bool(text and text.strip())
-    if finish_reason != "stop":
-        return False
-    stripped = text.rstrip()
-    if len(stripped) < TRUNCATION_MIN_LEN:
-        return False
-    return stripped[-1] not in SENTENCE_TERMINATORS
 
 
 # ---------------------------------------------------------------------------
@@ -750,7 +686,7 @@ class CompletionService:
                     yield event, acc
 
                 if (
-                    _is_truncated(acc.final_content or "", acc.finish_reason)
+                    is_truncated(acc.final_content or "", acc.finish_reason)
                     and not acc.has_tool_calls
                 ):
                     accumulated_text = acc.final_content or ""
@@ -825,7 +761,7 @@ class CompletionService:
                     and acc.finish_reason != "stop"
                 ):
                     model_num_ctx = await CompletionService._get_model_num_ctx(model_name)
-                    if _is_context_overflow(
+                    if is_context_overflow(
                         acc.input_tokens,
                         acc.finish_reason,
                         acc.output_tokens,
@@ -974,7 +910,7 @@ class CompletionService:
                 accumulated_text = CompletionService._extract_text(
                     result.chat_response.message
                 )
-                if _is_truncated(
+                if is_truncated(
                     accumulated_text,
                     result.chat_response.finish_reason or "",
                 ):
@@ -1084,7 +1020,7 @@ class CompletionService:
                 primary_finish_reason = result.chat_response.finish_reason or ""
                 model_num_ctx = await CompletionService._get_model_num_ctx(model_name)
 
-                if _is_context_overflow(
+                if is_context_overflow(
                     primary_prompt_tokens,
                     primary_finish_reason,
                     primary_output_tokens,
