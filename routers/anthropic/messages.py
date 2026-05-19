@@ -511,40 +511,27 @@ async def stream_message(
     # Determine stop_reason for the message_delta event.
     stop_reason: str | None = None
 
-    # Final fallback: all retries produced nothing
+    # Final fallback: all retries produced nothing.  Do NOT inject a
+    # diagnostic string into the assistant's response stream — clients
+    # echo that text back as the assistant's message on the next turn,
+    # which (a) pollutes the conversation history with our error text,
+    # (b) compounds when consecutive turns also produce empty (each new
+    # turn appends another copy), and (c) eventually exhausts output
+    # token budgets.  Instead, surface stop_reason="error" with empty
+    # content so the caller can detect failure cleanly.
     if not acc.has_content and not acc.has_tool_calls and not acc.final_content and acc.finish_reason != "stop":
         logger.warning(
-            "All retries produced empty response",
+            "All retries produced empty response — returning error stop_reason",
             extra={
                 "model": model_name,
                 "input_tokens": input_tokens,
                 "finish_reason": acc.finish_reason,
             },
         )
+        # Anthropic protocol doesn't define an "error" stop_reason, but
+        # "max_tokens" with zero output content is the closest signal
+        # that the generation failed.  No text content is emitted.
         stop_reason = "max_tokens"
-        if not text_block_started:
-            text_block_index = next_block_index
-            next_block_index += 1
-            yield _sse(
-                "content_block_start",
-                {
-                    "type": "content_block_start",
-                    "index": text_block_index,
-                    "content_block": {"type": "text", "text": ""},
-                },
-            )
-            text_block_started = True
-        yield _sse(
-            "content_block_delta",
-            {
-                "type": "content_block_delta",
-                "index": text_block_index,
-                "delta": {
-                    "type": "text_delta",
-                    "text": "[Model returned empty response after all retries. The context may be too large or the model may need to be reloaded.]",
-                },
-            },
-        )
 
     # Close the text block
     if text_block_started:

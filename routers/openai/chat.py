@@ -457,28 +457,18 @@ async def stream_chat_completion(
         )
         yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
 
-    # All retries produced nothing — send error unless finish_reason is "stop" (valid empty response)
+    # All retries produced nothing — close the stream cleanly with no
+    # content.  Previously we injected a diagnostic string into the
+    # assistant's delta, but clients echo that back as the assistant
+    # message on the next turn, polluting conversation history and
+    # eventually exhausting output token budgets after a few rounds
+    # (observed 2026-05-19).  Log it and let the natural finish_reason
+    # propagate; callers that care can detect zero output content.
     if not has_content and not has_tool_calls and not final_content and acc.finish_reason != "stop":
         logger.warning(
-            "All retries produced empty response", extra={"model": model_name}
+            "All retries produced empty response — closing stream with no content",
+            extra={"model": model_name},
         )
-        error_text = "[Model returned empty response after all retries. The context may be too large or the model may need to be reloaded.]"
-        error_chunk = CreateChatCompletionStreamResponse(
-            id=chunk_id,
-            object="chat.completion.chunk",
-            created=created,
-            model=model_name,
-            choices=[
-                StreamChoicesItem.model_construct(
-                    index=0,
-                    delta=ChatCompletionStreamResponseDelta(content=error_text),
-                    finish_reason=None,
-                )
-            ],
-        )
-        yield f"data: {error_chunk.model_dump_json(exclude_none=True)}\n\n"
-        final_content = error_text
-        has_content = True
 
     # Stream tool calls from the final accumulated event
     if final_tool_calls:
