@@ -34,6 +34,19 @@ def _mock_client(**overrides):
     return client
 
 
+def _status_response(startup_epoch=1):
+    """Build a mock /v1/status response (used by _check_runner_epoch).
+
+    proxy_request calls _check_runner_epoch on every 503 retry to detect
+    runner restarts. A 200 with a stable startup_epoch keeps the existing
+    handle valid so the backoff/retry loop proceeds as expected.
+    """
+    resp = MagicMock(spec=httpx.Response)
+    resp.status_code = 200
+    resp.json.return_value = {"startup_epoch": startup_epoch}
+    return resp
+
+
 HANDLE = ServerHandle(
     base_url="http://runner:8000/v1/server/abc123",
     server_id="abc123",
@@ -85,10 +98,14 @@ class TestProxyRequestRetryAfter:
             call_count[0] += 1
             return resp_503 if call_count[0] == 1 else resp_200
 
-        mock = _mock_client(request=AsyncMock(side_effect=mock_request))
+        mock = _mock_client(
+            request=AsyncMock(side_effect=mock_request),
+            get=AsyncMock(return_value=_status_response()),
+        )
 
         client = RunnerClient(endpoints=["http://runner:8000"])
         client._client = mock
+        client._active_handles.add(HANDLE)
 
         result = await client.proxy_request(
             HANDLE, "POST", "/v1/chat/completions", json={}, timeout=10.0
@@ -107,10 +124,14 @@ class TestProxyRequestRetryAfter:
             call_count[0] += 1
             return resp_503
 
-        mock = _mock_client(request=AsyncMock(side_effect=mock_request))
+        mock = _mock_client(
+            request=AsyncMock(side_effect=mock_request),
+            get=AsyncMock(return_value=_status_response()),
+        )
 
         client = RunnerClient(endpoints=["http://runner:8000"])
         client._client = mock
+        client._active_handles.add(HANDLE)
 
         # timeout=5: first backoff is min(2^1, 30)=2s (fits), second is min(2^2,30)=4s
         # (2+4=6 > 5) so it stops after 2 attempts
@@ -144,10 +165,14 @@ class TestProxyRequestExponentialBackoff:
             call_count[0] += 1
             return resp_503 if call_count[0] < 4 else resp_200
 
-        mock = _mock_client(request=AsyncMock(side_effect=mock_request))
+        mock = _mock_client(
+            request=AsyncMock(side_effect=mock_request),
+            get=AsyncMock(return_value=_status_response()),
+        )
 
         client = RunnerClient(endpoints=["http://runner:8000"])
         client._client = mock
+        client._active_handles.add(HANDLE)
 
         with patch("asyncio.sleep", tracked_sleep):
             result = await client.proxy_request(
@@ -176,10 +201,14 @@ class TestProxyRequestExponentialBackoff:
             call_count[0] += 1
             return resp_503 if call_count[0] < 4 else resp_200
 
-        mock = _mock_client(request=AsyncMock(side_effect=mock_request))
+        mock = _mock_client(
+            request=AsyncMock(side_effect=mock_request),
+            get=AsyncMock(return_value=_status_response()),
+        )
 
         client = RunnerClient(endpoints=["http://runner:8000"])
         client._client = mock
+        client._active_handles.add(HANDLE)
 
         with patch("asyncio.sleep", tracked_sleep):
             result = await client.proxy_request(
@@ -204,10 +233,14 @@ class TestProxyRequestTimeout:
             call_count[0] += 1
             return resp_503
 
-        mock = _mock_client(request=AsyncMock(side_effect=mock_request))
+        mock = _mock_client(
+            request=AsyncMock(side_effect=mock_request),
+            get=AsyncMock(return_value=_status_response()),
+        )
 
         client = RunnerClient(endpoints=["http://runner:8000"])
         client._client = mock
+        client._active_handles.add(HANDLE)
 
         # timeout=5: first backoff is 2s (ok), second would be 4s (2+4=6 > 5)
         result = await client.proxy_request(

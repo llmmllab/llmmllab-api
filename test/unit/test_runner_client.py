@@ -693,20 +693,42 @@ class TestRunnerClientSlidingRefresh:
 class TestRunnerClientAcquireWithMap:
     @pytest.mark.asyncio
     async def test_acquire_uses_cached_map(self):
-        """acquire_server uses cached map, skips health checks."""
+        """acquire_server uses cached map, skips /health checks.
+
+        Note: acquire_server still calls GET /v1/status on the chosen
+        endpoint for restart-epoch detection (added with runner-restart
+        recovery). What it must *not* do is fall back to the per-endpoint
+        /health scan in _select_runner, since the model map already tells
+        it which runner owns this model.
+        """
         mock_create = MagicMock()
         mock_create.status_code = 201
         mock_create.json.return_value = {"server_id": "abc", "base_url": "http://r2:8001/v1/server/abc", "model": "model-c"}
         mock_create.raise_for_status = MagicMock()
-        mock = _mock_client(post=AsyncMock(return_value=mock_create))
+        # /v1/status response so _check_runner_epoch succeeds quietly.
+        mock_status = MagicMock()
+        mock_status.status_code = 200
+        mock_status.json.return_value = {"startup_epoch": 1}
+        mock = _mock_client(
+            post=AsyncMock(return_value=mock_create),
+            get=AsyncMock(return_value=mock_status),
+        )
         client = RunnerClient(endpoints=["http://r1:8000", "http://r2:8001"])
         client._client = mock
         client._model_map = {"model-a": ["http://r1:8000"], "model-c": ["http://r2:8001"]}
         handle = await client.acquire_server("model-c")
         assert handle.server_id == "abc"
         assert handle.runner_host == "http://r2:8001"
-        # Should NOT have called get() for health check
-        mock.get.assert_not_called()
+        # Must not have hit /health on either endpoint — the cached map
+        # bypasses _select_runner. /v1/status calls are allowed.
+        get_urls = [c.args[0] if c.args else c.kwargs.get("url", "") for c in mock.get.call_args_list]
+        assert all("/health" not in url for url in get_urls), (
+            f"acquire_server with cached map must skip /health checks, got: {get_urls}"
+        )
+        # And the only endpoint touched should be the mapped one.
+        assert all("r2:8001" in url for url in get_urls), (
+            f"acquire_server should only contact the mapped endpoint, got: {get_urls}"
+        )
 
     @pytest.mark.asyncio
     async def test_acquire_fallback_on_missing_model(self):
