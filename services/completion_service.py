@@ -38,6 +38,14 @@ from models.request_priority_metadata import (
 )
 from models.tool_call import ToolCall
 from services.completion_state import CompletionResult, StreamAccumulator
+from services.prompt_templates import (
+    CONTEXT_OVERFLOW_THRESHOLD,
+    CONTINUATION_PROMPT,
+    EMPTY_RESPONSE_NUDGE,
+    SENTENCE_TERMINATORS,
+    TRUNCATION_CONTINUATION_PROMPT,
+    TRUNCATION_MIN_LEN,
+)
 from utils.logging import llmmllogger
 
 __all__ = ["CompletionService", "CompletionResult", "StreamAccumulator", "cancel_session"]
@@ -101,32 +109,6 @@ async def _resolve_model(model_name: str, user_id: str) -> str:
         return model_name
 
 
-_CONTINUATION_PROMPT = (
-    "You described using a tool but did not actually call one. "
-    "Call the appropriate tool now. Do not describe what you will do — invoke the tool directly."
-)
-
-_EMPTY_RESPONSE_NUDGE = (
-    "Your response didn't produce any output. Did you mean to say something "
-    "or use a tool? If so, continue. Otherwise, simply respond with 'done' "
-    "and nothing else."
-)
-
-# Threshold (in tokens) above which we consider the prompt "large".
-# When a large prompt produces an empty response, retrying is futile —
-# the context is likely exceeding the model's window.
-_CONTEXT_OVERFLOW_THRESHOLD = 100_000
-
-_TRUNCATION_CONTINUATION_PROMPT = (
-    "Your response was cut off. Continue from where you left off. "
-    "If you were in the middle of a tool call, complete the tool call. "
-    "If you were in the middle of text, continue the text."
-)
-
-_SENTENCE_TERMINATORS = frozenset('.!?)\n`]}"\'>,:')
-_TRUNCATION_MIN_LEN = 40
-
-
 def _is_context_overflow(
     prompt_tokens: int,
     finish_reason: str,
@@ -154,10 +136,10 @@ def _is_context_overflow(
         if total_tokens >= model_num_ctx:
             return True
         # If we're well below the context window, no overflow.
-        if total_tokens < _CONTEXT_OVERFLOW_THRESHOLD:
+        if total_tokens < CONTEXT_OVERFLOW_THRESHOLD:
             return False
     else:
-        if prompt_tokens < _CONTEXT_OVERFLOW_THRESHOLD:
+        if prompt_tokens < CONTEXT_OVERFLOW_THRESHOLD:
             return False
     if output_tokens > 0:
         return False
@@ -184,9 +166,9 @@ def _is_truncated(text: str, finish_reason: str) -> bool:
     if finish_reason != "stop":
         return False
     stripped = text.rstrip()
-    if len(stripped) < _TRUNCATION_MIN_LEN:
+    if len(stripped) < TRUNCATION_MIN_LEN:
         return False
-    return stripped[-1] not in _SENTENCE_TERMINATORS
+    return stripped[-1] not in SENTENCE_TERMINATORS
 
 
 # ---------------------------------------------------------------------------
@@ -782,7 +764,7 @@ class CompletionService:
                     )
                     truncation_messages = CompletionService._build_followup_messages(
                         messages,
-                        _TRUNCATION_CONTINUATION_PROMPT,
+                        TRUNCATION_CONTINUATION_PROMPT,
                         assistant_text=accumulated_text,
                     )
                     async for event, acc in CompletionService._stream_secondary_pass(
@@ -818,7 +800,7 @@ class CompletionService:
                         continuation_messages = (
                             CompletionService._build_followup_messages(
                                 messages,
-                                _CONTINUATION_PROMPT,
+                                CONTINUATION_PROMPT,
                                 assistant_text=accumulated_text,
                             )
                         )
@@ -912,7 +894,7 @@ class CompletionService:
                             )
                             nudge_messages = CompletionService._build_followup_messages(
                                 messages,
-                                _EMPTY_RESPONSE_NUDGE,
+                                EMPTY_RESPONSE_NUDGE,
                             )
                             async for event, acc in CompletionService._stream_secondary_pass(
                                 acc,
@@ -1005,7 +987,7 @@ class CompletionService:
                     )
                     truncation_messages = CompletionService._build_followup_messages(
                         messages,
-                        _TRUNCATION_CONTINUATION_PROMPT,
+                        TRUNCATION_CONTINUATION_PROMPT,
                         assistant_text=accumulated_text,
                     )
                     response = await CompletionService._collect_response(
@@ -1069,7 +1051,7 @@ class CompletionService:
                     )
                     continuation_messages = CompletionService._build_followup_messages(
                         messages,
-                        _CONTINUATION_PROMPT,
+                        CONTINUATION_PROMPT,
                         assistant_text=accumulated_text,
                     )
                     response = await CompletionService._collect_response(
@@ -1148,7 +1130,7 @@ class CompletionService:
                         )
                         nudge_messages = CompletionService._build_followup_messages(
                             messages,
-                            _EMPTY_RESPONSE_NUDGE,
+                            EMPTY_RESPONSE_NUDGE,
                         )
                         response = await CompletionService._collect_response(
                             user_id,
