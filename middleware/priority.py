@@ -156,13 +156,23 @@ class PriorityMiddleware(BaseHTTPMiddleware):
 
         metadata = _classify_request(request)
 
-        # Fallback: extract session_id and model_id from request body
+        # Fallback: extract session_id and model_id from request body.
         # OpenClaw sets compat.supportsPromptCacheKey=true which passes
-        # session ID as ``prompt_cache_key`` in the JSON body.
+        # session ID as ``prompt_cache_key`` in the JSON body.  Namespace
+        # body-derived session IDs with a "pck:" prefix so they can never
+        # collide with header-derived session IDs (e.g. another client
+        # picking the same uuid by accident, or an OpenClaw cron job
+        # using a prompt_cache_key that happens to match an active
+        # claude-code anthropic-session-id).  This guarantees disjoint
+        # slot-LRU namespaces between the two identification mechanisms.
         body_fields = await _extract_body_fields(request)
         if body_fields:
-            if not metadata.session_id:
-                metadata.session_id = body_fields.session_id
+            if not metadata.session_id and body_fields.session_id:
+                metadata.session_id = f"pck:{body_fields.session_id}"
+                llmmllogger.debug(
+                    "session_id derived from prompt_cache_key body field",
+                    extra={"session_id": metadata.session_id},
+                )
             if not getattr(metadata, "model_id", None):
                 metadata.model_id = body_fields.model_id
 
