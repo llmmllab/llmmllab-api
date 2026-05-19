@@ -17,7 +17,6 @@ import asyncio
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
 from typing import Optional, Union
 
 from composer_init import (
@@ -38,7 +37,10 @@ from models.request_priority_metadata import (
     RequestSource,
 )
 from models.tool_call import ToolCall
+from services.completion_state import CompletionResult, StreamAccumulator
 from utils.logging import llmmllogger
+
+__all__ = ["CompletionService", "CompletionResult", "StreamAccumulator", "cancel_session"]
 
 logger = llmmllogger.bind(component="completion_service")
 
@@ -185,60 +187,6 @@ def _is_truncated(text: str, finish_reason: str) -> bool:
     if len(stripped) < _TRUNCATION_MIN_LEN:
         return False
     return stripped[-1] not in _SENTENCE_TERMINATORS
-
-
-# ---------------------------------------------------------------------------
-# Result containers
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class CompletionResult:
-    """Accumulated result from a non-streaming completion."""
-
-    chat_response: Optional[ChatResponse] = None
-    output_tokens: int = 0
-    context_overflow: bool = False
-
-    @property
-    def has_content(self) -> bool:
-        return bool(
-            self.chat_response
-            and self.chat_response.message
-            and self.chat_response.message.content
-            and any(
-                c.text
-                for c in self.chat_response.message.content
-                if c.type == MessageContentType.TEXT and c.text
-            )
-        )
-
-    @property
-    def has_tool_calls(self) -> bool:
-        return bool(
-            self.chat_response
-            and self.chat_response.message
-            and self.chat_response.message.tool_calls
-        )
-
-    @property
-    def is_error(self) -> bool:
-        return bool(self.chat_response and self.chat_response.finish_reason == "error")
-
-
-@dataclass
-class StreamAccumulator:
-    """Mutable state accumulated while streaming events to the router."""
-
-    has_content: bool = False
-    has_tool_calls: bool = False
-    is_error: bool = False
-    finish_reason: str = ""
-    final_tool_calls: list[ToolCall] = field(default_factory=list)
-    final_content: str = ""
-    output_tokens: int = 0
-    input_tokens: int = 0
-    context_overflow: bool = False
 
 
 # ---------------------------------------------------------------------------
