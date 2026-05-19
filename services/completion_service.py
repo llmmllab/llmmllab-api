@@ -17,7 +17,7 @@ import asyncio
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Optional, Union
+from typing import Union
 
 from composer_init import (
     compose_workflow,
@@ -29,20 +29,22 @@ from config import RUNNER_RETRIES, RUNNER_RETRY_BACKOFF_BASE
 from graph.state import ServerToolEvent
 from graph.workflows.factory import WorkFlowType
 from models.chat_response import ChatResponse
-from models.message import Message, MessageContent, MessageContentType
+from models.message import Message
 from models.request_priority_metadata import (
     Priority,
     RequestPriorityMetadata,
     RequestSource,
 )
 from services.completion_state import CompletionResult, StreamAccumulator
-from services.prompt_templates import (
-    CONTINUATION_PROMPT,
-    EMPTY_RESPONSE_NUDGE,
-    TRUNCATION_CONTINUATION_PROMPT,
+from services.continuation_logic import (
+    maybe_continue_on_missing_tool_call,
+    maybe_continue_on_missing_tool_call_nonstream,
+    maybe_continue_on_truncation,
+    maybe_continue_on_truncation_nonstream,
+    maybe_retry_on_empty,
+    maybe_retry_on_empty_nonstream,
 )
 from services.response_handlers import (
-    build_followup_messages,
     extract_text,
     set_result_response,
     update_stream_delta,
@@ -78,7 +80,6 @@ async def cancel_session(session_id: str) -> bool:
 # ---------------------------------------------------------------------------
 
 from middleware.api_metrics import (  # noqa: E402
-    empty_response_retries_total,
     workflow_completions_total,
     workflow_duration_seconds,
 )
@@ -361,73 +362,6 @@ class CompletionService:
             yield event
 
     @staticmethod
-    async def _collect_response(
-        user_id: str,
-        messages: list[Message],
-        model_name: str,
-        workflow_type: WorkFlowType,
-        conversation_id: int,
-        client_tools: list | None,
-        tool_choice: str | None,
-        server_tool_names: set[str] | None,
-    ) -> Optional[ChatResponse]:
-        """Run a workflow and return only the final ChatResponse."""
-        async for event in CompletionService._build_and_run(
-            user_id,
-            messages,
-            model_name,
-            workflow_type,
-            conversation_id,
-            client_tools,
-            tool_choice,
-            server_tool_names,
-        ):
-            if isinstance(event, ServerToolEvent):
-                continue
-            if event.done and event.message:
-                return event
-        return None
-
-    @staticmethod
-    async def _stream_secondary_pass(
-        acc: StreamAccumulator,
-        user_id: str,
-        messages: list[Message],
-        model_name: str,
-        workflow_type: WorkFlowType,
-        conversation_id: int,
-        client_tools: list | None,
-        tool_choice: str | None,
-        server_tool_names: set[str] | None,
-        *,
-        content_prefix: str = "",
-    ) -> AsyncIterator[tuple[Union[ChatResponse, ServerToolEvent], StreamAccumulator]]:
-        """Yield streaming events from a secondary pass, updating acc."""
-        async for event in CompletionService._build_and_run(
-            user_id,
-            messages,
-            model_name,
-            workflow_type,
-            conversation_id,
-            client_tools,
-            tool_choice,
-            server_tool_names,
-        ):
-            if isinstance(event, ServerToolEvent):
-                continue
-            if event.done:
-                update_stream_final(
-                    acc,
-                    event,
-                    server_tool_names,
-                    content_prefix=content_prefix,
-                    accumulate_output_tokens=True,
-                )
-                continue
-            update_stream_delta(acc, event)
-            yield event, acc
-
-    @staticmethod
     @asynccontextmanager
     async def _enqueue_and_wait(
         model_name: str,
@@ -551,31 +485,16 @@ class CompletionService:
                     is_truncated(acc.final_content or "", acc.finish_reason)
                     and not acc.has_tool_calls
                 ):
-                    accumulated_text = acc.final_content or ""
-                    logger.info(
-                        "Model response appears truncated — sending continuation prompt",
-                        extra={
-                            "content_len": len(accumulated_text),
-                            "finish_reason": acc.finish_reason,
-                            "content_preview": accumulated_text[-200:],
-                        },
-                    )
-                    truncation_messages = build_followup_messages(
-                        messages,
-                        TRUNCATION_CONTINUATION_PROMPT,
-                        assistant_text=accumulated_text,
-                    )
-                    async for event, acc in CompletionService._stream_secondary_pass(
+                    async for event, acc in maybe_continue_on_truncation(
+                        CompletionService._build_and_run,
                         acc,
                         user_id,
-                        truncation_messages,
+                        messages,
                         model_name,
                         workflow_type,
                         conversation_id,
                         client_tools,
-                        "auto",
                         server_tool_names,
-                        content_prefix=accumulated_text,
                     ):
                         yield event, acc
 
@@ -586,34 +505,18 @@ class CompletionService:
                     and (acc.has_content or acc.final_content)
                     and acc.finish_reason not in ("stop", "length")
                 ):
-                    accumulated_text = acc.final_content or ""
-                    if accumulated_text:
-                        logger.info(
-                            "Model produced text without tool calls — sending single continuation check",
-                            extra={
-                                "content_len": len(accumulated_text),
-                                "content_preview": accumulated_text[:200],
-                            },
-                        )
-                        continuation_messages = (
-                            build_followup_messages(
-                                messages,
-                                CONTINUATION_PROMPT,
-                                assistant_text=accumulated_text,
-                            )
-                        )
-                        async for event, acc in CompletionService._stream_secondary_pass(
-                            acc,
-                            user_id,
-                            continuation_messages,
-                            model_name,
-                            workflow_type,
-                            conversation_id,
-                            client_tools,
-                            "auto",
-                            server_tool_names,
-                        ):
-                            yield event, acc
+                    async for event, acc in maybe_continue_on_missing_tool_call(
+                        CompletionService._build_and_run,
+                        acc,
+                        user_id,
+                        messages,
+                        model_name,
+                        workflow_type,
+                        conversation_id,
+                        client_tools,
+                        server_tool_names,
+                    ):
+                        yield event, acc
 
                 if (
                     not acc.has_content
@@ -640,35 +543,20 @@ class CompletionService:
                             },
                         )
                     else:
-                        # Before wasting a retry on the same (possibly stale)
-                        # handle, probe every known runner's startup_epoch.
                         # Chat completions go through LangChain's ChatOpenAI
                         # directly, bypassing proxy_request's 404→StaleServerError
                         # path; a dead-handle scenario surfaces here as an
-                        # empty response.  If any runner restarted, purge its
-                        # handles and raise StaleServerError so the upper
-                        # retry layer rebuilds the workflow with a fresh handle.
-                        from graph.errors import StaleServerError
+                        # empty response.  The probe + StaleServerError raise
+                        # inside maybe_retry_on_empty bubbles up through the
+                        # connection-retry layer and reaches the stale-server
+                        # retry in _build_and_run on the next pass.
                         from services.runner_client import runner_client
-                        purged = await runner_client.revalidate_runner_handles()
-                        if purged > 0:
-                            logger.warning(
-                                "Empty response coincided with detected runner "
-                                "restart — invalidating workflow and re-acquiring",
-                                extra={
-                                    "model": model_name,
-                                    "purged_handles": purged,
-                                },
-                            )
-                            raise StaleServerError(
-                                f"runner restart detected via empty response ({purged} handles purged)"
-                            )
-                        logger.warning(
-                            "Model produced empty response — retrying with same messages",
-                            extra={"model": model_name},
-                        )
-                        empty_response_retries_total.inc()
-                        async for event, acc in CompletionService._stream_secondary_pass(
+
+                        async def _revalidate() -> int:
+                            return await runner_client.revalidate_runner_handles()
+
+                        async for event, acc in maybe_retry_on_empty(
+                            CompletionService._build_and_run,
                             acc,
                             user_id,
                             messages,
@@ -678,34 +566,9 @@ class CompletionService:
                             client_tools,
                             tool_choice,
                             server_tool_names,
+                            revalidate_runner_handles=_revalidate,
                         ):
                             yield event, acc
-
-                        if (
-                            not acc.has_content
-                            and not acc.has_tool_calls
-                            and not acc.final_content
-                        ):
-                            logger.warning(
-                                "Retry also produced empty response — sending nudge prompt",
-                                extra={"model": model_name},
-                            )
-                            nudge_messages = build_followup_messages(
-                                messages,
-                                EMPTY_RESPONSE_NUDGE,
-                            )
-                            async for event, acc in CompletionService._stream_secondary_pass(
-                                acc,
-                                user_id,
-                                nudge_messages,
-                                model_name,
-                                workflow_type,
-                                conversation_id,
-                                client_tools,
-                                "auto",
-                                server_tool_names,
-                            ):
-                                yield event, acc
         except asyncio.CancelledError:
             logger.warning("Stream cancelled (client disconnect) — stopping retries")
             return
@@ -769,61 +632,22 @@ class CompletionService:
                 return result
 
             if result.has_content and not result.has_tool_calls:
-                accumulated_text = extract_text(
-                    result.chat_response.message
-                )
+                accumulated_text = extract_text(result.chat_response.message)
                 if is_truncated(
                     accumulated_text,
                     result.chat_response.finish_reason or "",
                 ):
-                    logger.info(
-                        "Non-streaming: model response appears truncated — sending continuation prompt",
-                        extra={
-                            "content_len": len(accumulated_text),
-                            "finish_reason": result.chat_response.finish_reason,
-                        },
-                    )
-                    truncation_messages = build_followup_messages(
-                        messages,
-                        TRUNCATION_CONTINUATION_PROMPT,
-                        assistant_text=accumulated_text,
-                    )
-                    response = await CompletionService._collect_response(
+                    await maybe_continue_on_truncation_nonstream(
+                        CompletionService._build_and_run,
+                        result,
                         user_id,
-                        truncation_messages,
+                        messages,
                         model_name,
                         workflow_type,
                         conversation_id,
                         client_tools,
-                        "auto",
                         server_tool_names,
                     )
-                    if response and response.message:
-                        continuation_text = extract_text(
-                            response.message
-                        )
-                        merged_text = accumulated_text + continuation_text
-                        non_text_content = [
-                            content
-                            for content in (response.message.content or [])
-                            if content.type != MessageContentType.TEXT
-                        ]
-                        response.message.content = [
-                            MessageContent(
-                                type=MessageContentType.TEXT,
-                                text=merged_text,
-                            ),
-                            *non_text_content,
-                        ]
-                        if response.eval_count and result.chat_response:
-                            response.eval_count = (
-                                result.chat_response.eval_count or 0
-                            ) + int(response.eval_count)
-                        set_result_response(
-                            result,
-                            response,
-                            server_tool_names,
-                        )
 
             skip_continuation = (
                 result.chat_response
@@ -836,38 +660,17 @@ class CompletionService:
                 and result.has_content
                 and not skip_continuation
             ):
-                accumulated_text = extract_text(
-                    result.chat_response.message
+                await maybe_continue_on_missing_tool_call_nonstream(
+                    CompletionService._build_and_run,
+                    result,
+                    user_id,
+                    messages,
+                    model_name,
+                    workflow_type,
+                    conversation_id,
+                    client_tools,
+                    server_tool_names,
                 )
-                if accumulated_text:
-                    logger.info(
-                        "Non-streaming: model produced text without tool calls — sending single continuation check",
-                        extra={
-                            "content_len": len(accumulated_text),
-                            "content_preview": accumulated_text[:200],
-                        },
-                    )
-                    continuation_messages = build_followup_messages(
-                        messages,
-                        CONTINUATION_PROMPT,
-                        assistant_text=accumulated_text,
-                    )
-                    response = await CompletionService._collect_response(
-                        user_id,
-                        continuation_messages,
-                        model_name,
-                        workflow_type,
-                        conversation_id,
-                        client_tools,
-                        "auto",
-                        server_tool_names,
-                    )
-                    if response and response.message and response.message.tool_calls:
-                        set_result_response(
-                            result,
-                            response,
-                            server_tool_names,
-                        )
 
             if (
                 not result.has_content
@@ -899,12 +702,9 @@ class CompletionService:
                         },
                     )
                 else:
-                    logger.warning(
-                        "Non-streaming: model produced empty response — retrying",
-                        extra={"model": model_name},
-                    )
-                    empty_response_retries_total.inc()
-                    response = await CompletionService._collect_response(
+                    await maybe_retry_on_empty_nonstream(
+                        CompletionService._build_and_run,
+                        result,
                         user_id,
                         messages,
                         model_name,
@@ -914,37 +714,5 @@ class CompletionService:
                         tool_choice,
                         server_tool_names,
                     )
-                    if response:
-                        set_result_response(
-                            result,
-                            response,
-                            server_tool_names,
-                        )
-
-                    if not result.has_content and not result.has_tool_calls:
-                        logger.warning(
-                            "Non-streaming: retry also empty — sending nudge prompt",
-                            extra={"model": model_name},
-                        )
-                        nudge_messages = build_followup_messages(
-                            messages,
-                            EMPTY_RESPONSE_NUDGE,
-                        )
-                        response = await CompletionService._collect_response(
-                            user_id,
-                            nudge_messages,
-                            model_name,
-                            workflow_type,
-                            conversation_id,
-                            client_tools,
-                            "auto",
-                            server_tool_names,
-                        )
-                        if response:
-                            set_result_response(
-                                result,
-                                response,
-                                server_tool_names,
-                            )
 
         return result
