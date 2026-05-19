@@ -738,7 +738,9 @@ class CompletionService:
             queue_item, _ = await priority_queue.enqueue(meta)
             if session_id:
                 try:
-                    _in_flight_tasks[session_id] = asyncio.current_task()
+                    cur_task = asyncio.current_task()
+                    if cur_task is not None:
+                        _in_flight_tasks[session_id] = cur_task
                 except RuntimeError:
                     pass
 
