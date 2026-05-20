@@ -174,8 +174,13 @@ class BaseAgent:
                 else self._node_metadata.node_name
             ),
             middleware=middleware or [],
-            debug=config.LOG_LEVEL.lower() == "debug"
-            or config.LOG_LEVEL.lower() == "trace",
+            # LangGraph's debug=True prints every workflow-state transition
+            # (including full message content) to stdout, bypassing our
+            # structured logger.  In production with LOG_LEVEL=debug this
+            # firehose dumps every OpenClaw cron job's full prompt template
+            # into the logs, polluting them with markdown content that
+            # looks like errors.  Gate on the rarer "trace" level only.
+            debug=config.LOG_LEVEL.lower() == "trace",
         )
 
         return agent
