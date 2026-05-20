@@ -50,6 +50,7 @@ from .response_modalities import ResponseModalities
 from .service_tier import ServiceTier
 from .stop_configuration import StopConfiguration
 from .verbosity import Verbosity
+from ..model_parameters import ModelParameters
 from .voice_ids_shared import VoiceIdsShared
 from .web_search_context_size import WebSearchContextSize
 from .web_search_location import WebSearchLocation
@@ -106,6 +107,7 @@ class CreateChatCompletionRequest(BaseModel):
     """The maximum number of [tokens](/tokenizer) that can be generated in the chat completion. This value can be used to control [costs](https://openai.com/api/pricing/) for text generated via API.  This value is now deprecated in favor of `max_completion_tokens`, and is not compatible with [o-series models](https://platform.openai.com/docs/guides/reasoning). """
     messages: Annotated[List[ChatCompletionRequestMessage], Field(..., description="A list of messages comprising the conversation so far. Depending on the [model](https://platform.openai.com/docs/models) you use, different message types (modalities) are supported, like [text](https://platform.openai.com/docs/guides/text-generation), [images](https://platform.openai.com/docs/guides/vision), and [audio](https://platform.openai.com/docs/guides/audio). ")]
     """A list of messages comprising the conversation so far. Depending on the [model](https://platform.openai.com/docs/models) you use, different message types (modalities) are supported, like [text](https://platform.openai.com/docs/guides/text-generation), [images](https://platform.openai.com/docs/guides/vision), and [audio](https://platform.openai.com/docs/guides/audio). """
+    model_parameters: Annotated[Optional[ModelParameters], Field(default=None, description="Override model inference parameters for this request. Non-None values override the model's static defaults.")] = None
     modalities: Annotated[Optional[ResponseModalities], Field(default=None)] = None
     model: Annotated[ModelIdsShared, Field(..., description="Model ID used to generate the response, like `gpt-4o` or `o3`. OpenAI offers a wide range of models with different capabilities, performance characteristics, and price points. Refer to the [model guide](https://platform.openai.com/docs/models) to browse and compare available models. ")]
     """Model ID used to generate the response, like `gpt-4o` or `o3`. OpenAI offers a wide range of models with different capabilities, performance characteristics, and price points. Refer to the [model guide](https://platform.openai.com/docs/models) to browse and compare available models. """

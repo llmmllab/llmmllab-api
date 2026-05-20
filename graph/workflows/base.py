@@ -11,6 +11,7 @@ from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, SecretStr
 
 from models import Message, ModelTask, UserConfig
+from models.model_parameters import ModelParameters
 from utils.logging import _session_id_ctx, llmmllogger
 
 from ..state import WorkflowState
@@ -195,6 +196,7 @@ class GraphBuilder(ABC):
         model_def: "Model",
         system_prompt_default: str,
         component_name: str,
+        model_parameters: "ModelParameters | None" = None,
     ) -> Tuple["ChatAgent", Any]:
         """Acquire a server for the resolved primary model and build a ChatAgent.
 
@@ -215,10 +217,18 @@ class GraphBuilder(ABC):
 
         assert model_def.id is not None, "Model definition must have an ID"
 
+        # Merge request-level model parameters override onto model defaults
+        if model_parameters and model_def.parameters:
+            effective_params = model_def.parameters.model_copy(
+                update=model_parameters.model_dump(exclude_none=True)
+            )
+        elif model_parameters:
+            effective_params = model_parameters
+        else:
+            effective_params = model_def.parameters
+
         num_ctx = (
-            model_def.parameters.num_ctx
-            if model_def.parameters
-            else DEFAULT_NUM_CTX
+            effective_params.num_ctx if effective_params else DEFAULT_NUM_CTX
         )
         server_handle = await rc.acquire_server(
             model_id=model_def.id,
@@ -239,9 +249,7 @@ class GraphBuilder(ABC):
         primary_agent = chat_agent_cls(
             model=cast(BaseChatModel, primary_model),
             system_prompt=model_def.system_prompt or system_prompt_default,
-            num_ctx=(
-                model_def.parameters.num_ctx if model_def.parameters else None
-            )
+            num_ctx=(effective_params.num_ctx if effective_params else None)
             or DEFAULT_NUM_CTX,
             component_name=component_name,
         )
@@ -254,6 +262,7 @@ class GraphBuilder(ABC):
         model_name: Optional[str],
         system_prompt_default: str,
         component_name: str,
+        model_parameters: "ModelParameters | None" = None,
     ) -> Tuple["Model", "ChatAgent", Any]:
         """One-shot: resolve primary model, acquire server, build ChatAgent.
 
@@ -269,6 +278,7 @@ class GraphBuilder(ABC):
             model_def=model_def,
             system_prompt_default=system_prompt_default,
             component_name=component_name,
+            model_parameters=model_parameters,
         )
         return model_def, primary_agent, primary_model
 

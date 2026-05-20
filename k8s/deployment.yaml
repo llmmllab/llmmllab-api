@@ -93,14 +93,6 @@ spec:
               value: "6"
             - name: SUMMARIES_BEFORE_CONSOLIDATION
               value: "3"
-            - name: SUMMARY_MODEL
-              value: "qwen3:0.6b"
-            - name: SUMMARY_SYSTEM_PROMPT
-              value: "compress the following conversation so far into a concise paragraph.
-                Include key points and conclusions, but omit redundant details.
-                The summary will be used as context for future interaction. It
-                should be as small as possible and does not need to be human
-                readable."
             - name: MAX_SUMMARY_LEVELS
               value: "3"
             - name: SUMMARY_WEIGHT_COEFFICIENT
@@ -129,12 +121,23 @@ spec:
             - name: SEARX_HOST
               value: "http://searxng.searxng.svc.cluster.local:8080"
             - name: RUNNER_ENDPOINTS
-              value: "http://llmmllab-runner.llmmllab.svc.cluster.local:8000,http://llmmllab-\
+              value:
+                "http://llmmllab-runner.llmmllab.svc.cluster.local:8000,http://llmmllab-\
                 runner-small.llmmllab.svc.cluster.local:8000"
             - name: RUNNER_RETRIES
-              value: "3"
+              value: "5"
             - name: RUNNER_RETRY_BACKOFF_BASE
-              value: "2"
+              value: "3"
+            - name: STALE_SERVER_RETRIES
+              value: "3"
+            - name: RUNNER_MAX_ACQUIRE_FAILURES
+              value: "5"
+            - name: RUNNER_UNHEALTHY_WINDOW_SEC
+              value: "120"
+            - name: RUNNER_ACQUIRE_RETRIES
+              value: "3"
+            - name: RUNNER_ACQUIRE_TIMEOUT_SEC
+              value: "300"
             - name: PORT
               value: "9999"
             - name: TEMPO_ENDPOINT

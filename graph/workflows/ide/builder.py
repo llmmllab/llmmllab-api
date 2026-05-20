@@ -30,6 +30,7 @@ from models import (
     MessageContentType,
     WorkflowConfig,
 )
+from models.model_parameters import ModelParameters
 from services.runner_client import runner_client
 
 from agents.chat import ChatAgent
@@ -145,7 +146,19 @@ class IdeGraphBuilder(GraphBuilder):
                 model_name=model_name,
                 system_prompt_default=IDE_PRIMARY_SYSTEM_PROMPT,
                 component_name="PrimaryCodingAgent",
+                model_parameters=kwargs.get("model_parameters"),
             )
+
+            # Merge request-level model parameters override onto model defaults
+            request_params: ModelParameters | None = kwargs.get("model_parameters")
+            if request_params and model_def.parameters:
+                effective_params = model_def.parameters.model_copy(
+                    update=request_params.model_dump(exclude_none=True)
+                )
+            elif request_params:
+                effective_params = request_params
+            else:
+                effective_params = model_def.parameters
 
             # Bind client tools to the pipeline so the LLM can generate tool_calls.
             # We rebuild the ChatAgent only when binding actually changes the model.
@@ -156,7 +169,7 @@ class IdeGraphBuilder(GraphBuilder):
                 # generates tool_calls. Use the same system prompt / num_ctx
                 # logic the base helper used.
                 num_ctx = (
-                    model_def.parameters.num_ctx if model_def.parameters else None
+                    effective_params.num_ctx if effective_params else None
                 ) or 90000
                 primary_agent = ChatAgent(
                     model=primary_model,
