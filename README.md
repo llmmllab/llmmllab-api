@@ -254,10 +254,12 @@ When enabled, writes every raw model token (no stripping/modification) plus all 
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PORT` | *(Makefile)* | Server port, passed via Makefile to uvicorn (not read by config.py) |
-| `LOG_LEVEL` | `WARNING` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`). Read directly in `utils/logging.py` (bootstrapped before config.py). |
-| `LOG_FORMAT` | `console` | Log format (`console` human-readable, `json` structured). Same bootstrap-order constraint as `LOG_LEVEL`. |
-| `FORCE_COLOR` | `0` | Force ANSI colors in console log output even without TTY (`1` to enable). Read in `utils/logging.py`. |
+| `PORT` | `9999` | Server port (passed via Makefile to uvicorn) |
+| `API_VERSION` | `v1` | API version prefix |
+| `LOG_LEVEL` | `WARNING` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`). Read directly by `utils/logging.py` because logging is bootstrapped before `config.py` loads. |
+| `LOG_FORMAT` | `console` | Log format (`console` for human-readable, `json` for structured). Same bootstrap-order constraint as `LOG_LEVEL`. |
+| `FORCE_COLOR` | `0` | Force ANSI colors in console log output even without TTY (`1` to enable) |
+| `TEMPO_ENDPOINT` | `http://tempo.llmmllab.svc.cluster.local:4317` | Jaeger/Tempo OTLP endpoint for distributed tracing |
 
 ### Container / Runner Environment
 
@@ -265,7 +267,6 @@ These variables are not consumed by the Python API directly but are set in the d
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CUDA_LAUNCH_BLOCKING` | `0` | Force synchronous CUDA kernel launches (`1` to enable) |
 | `CUDA_VISIBLE_DEVICES` | *(unset)* | GPU device IDs visible to the process |
 | `CUDA_DEVICE_ORDER` | `PCI_BUS_ID` | CUDA device ordering |
 | `PYTHONMALLOC` | `malloc` | Python memory allocator |
