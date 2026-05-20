@@ -136,6 +136,7 @@ class RunnerClient:
         path: str,
         *,
         json: Optional[Dict[str, Any]] = None,
+        stream: bool = False,
         timeout: float = 120.0,  # total backoff budget in seconds
     ) -> httpx.Response:
         """Send a request to a server handle, respecting Retry-After on 503.
