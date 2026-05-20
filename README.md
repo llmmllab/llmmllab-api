@@ -256,6 +256,7 @@ These variables are not consumed by the Python API directly but are set in the d
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `CUDA_LAUNCH_BLOCKING` | `0` | Force synchronous CUDA kernel launches (`1` to enable, set by the API at startup) |
 | `CUDA_VISIBLE_DEVICES` | *(unset)* | GPU device IDs visible to the process |
 | `CUDA_DEVICE_ORDER` | `PCI_BUS_ID` | CUDA device ordering |
 | `PYTHONMALLOC` | `malloc` | Python memory allocator |
