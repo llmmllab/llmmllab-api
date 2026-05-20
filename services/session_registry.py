@@ -9,10 +9,11 @@ from typing import Optional
 
 
 class SessionState:
-    __slots__ = ("model_id", "source", "start_time", "turn_count")
+    __slots__ = ("model_id", "source", "start_time", "last_activity", "turn_count")
     model_id: str
     source: str
     start_time: float
+    last_activity: float  # updated on every turn; drives stale-cleanup + gauge dec
     turn_count: int
 
 
