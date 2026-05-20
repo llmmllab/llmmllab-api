@@ -41,7 +41,18 @@ async def _get_parallel_for_model(model_id: str) -> int:
 
 
 async def _can_proceed(metadata) -> bool:
-    """Check whether a queued request can proceed (slot available)."""
+    """Check whether a queued request can proceed (slot available).
+
+    USER requests always proceed — the runner-side slot LRU pins each
+    session to a slot and llama.cpp queues per-slot internally, so
+    admitting a user request just routes it to its slot's local queue.
+    Blocking here only adds latency.
+
+    SCHEDULED/SYSTEM requests respect a per-model scheduled cap (one
+    fewer than --parallel) so they can't starve interactive users, and
+    additionally consult ``check_slot_availability`` to avoid kicking
+    off a fresh batch when nothing is ready.
+    """
     if not metadata.model_id:
         return True
     from models.request_priority_metadata import RequestSource
@@ -51,10 +62,13 @@ async def _can_proceed(metadata) -> bool:
         scheduled_cap = max(1, parallel - 1)
         if _active_counts[metadata.model_id] >= scheduled_cap:
             return False
-    try:
-        return await runner_client.check_slot_availability(metadata.model_id)
-    except Exception:
-        return True
+        try:
+            return await runner_client.check_slot_availability(metadata.model_id)
+        except Exception:
+            return True
+
+    # USER source: always admit
+    return True
 
 
 def _on_release(metadata) -> None:

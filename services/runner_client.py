@@ -964,14 +964,30 @@ class RunnerClient:
     async def check_slot_availability(self, model_id: str) -> bool:
         """Check if a request for *model_id* can proceed without hitting 503.
 
-        Returns ``True`` if an existing server has free slots, or if
-        sufficient VRAM exists on a runner to start a new server.
-        Returns ``True`` on any check failure (fail-open).
+        Returns ``True`` if an existing server has free slots OR sufficient
+        VRAM exists on a runner to start a new server, OR if the check is
+        inconclusive (fail-open).
+
+        ``False`` is reserved for the case where we POSITIVELY know all
+        slots are busy AND no runner has enough free VRAM to start a new
+        server.  Even then, the next chunk of work llama.cpp completes
+        will free a slot — so a False here just means "wait a moment" not
+        "this will never succeed."
+
+        Slots reporting ``is_processing: true`` are still acceptable when
+        the busy slot is owned by THIS request's session_id, because
+        the slot-pinning LRU on the runner side will route the new
+        request onto the same llama.cpp slot which handles its own
+        internal queue.  We don't have session_id here, so we treat
+        ``processing`` slots as "possibly free for this session" and
+        fail-open in ambiguous cases.
         """
         _slots_timeout = httpx.Timeout(3.0)
         client = self._get_client()
 
-        # Case 1: Check active handles for free slots
+        # Case 1: Any active server with at least one slot reported idle?
+        # Bail out True on the first such server.
+        any_server_responded = False
         for handle in self._active_handles:
             try:
                 resp = await client.get(
@@ -979,6 +995,7 @@ class RunnerClient:
                     timeout=_slots_timeout,
                 )
                 if resp.status_code == 200:
+                    any_server_responded = True
                     slots = resp.json()
                     if slots and any(
                         not s.get("is_processing", False) for s in slots
@@ -987,9 +1004,10 @@ class RunnerClient:
             except Exception:
                 continue
 
-        # Case 2: No active server with free slots — check if a new one
-        # can be started (VRAM vs model size)
+        # Case 2: No idle slot found, but maybe a runner has free VRAM to
+        # start a new server for this model.
         endpoints = self._model_map.get(model_id, list(self._endpoints))
+        any_endpoint_responded = False
         for endpoint in endpoints:
             try:
                 health_resp = await client.get(
@@ -998,9 +1016,9 @@ class RunnerClient:
                 )
                 if health_resp.status_code != 200:
                     continue
+                any_endpoint_responded = True
                 health = health_resp.json()
                 gpu_info = health.get("gpu", {})
-                # Sum free_mb across all GPUs, convert to bytes
                 available_vram = sum(
                     v.get("free_mb", 0)
                     for v in gpu_info.values()
@@ -1015,14 +1033,33 @@ class RunnerClient:
                     continue
                 model_data = model_resp.json()
                 model_size = model_data.get("details", {}).get("size", 0) or 0
-                # 128 MB overhead for context, KV cache, etc.
                 required = model_size + (128 * 1024 * 1024)
                 if available_vram >= required:
                     return True
             except Exception:
                 continue
 
-        return False
+        # Reached here = (no active server had an idle slot) AND
+        # (no runner reported enough free VRAM for a fresh server).
+        # If neither cohort even responded to us, we know nothing — fail
+        # open so the queue doesn't stall on a transient network blip.
+        if not any_server_responded and not any_endpoint_responded:
+            logger.warning(
+                "check_slot_availability: neither active servers nor "
+                "endpoints responded — failing open to avoid queue stall",
+                extra={"model_id": model_id},
+            )
+            return True
+
+        # Positively-known constrained state.  Still return True for now:
+        # llama.cpp serializes its own per-slot queue, so admitting one
+        # more request just means it'll wait inside llama.cpp instead of
+        # in our priority queue.  Blocking here causes 5-minute timeouts
+        # in the priority queue when a slot is mid-prefill, which is the
+        # bug observed 2026-05-19T22:31.  Keep the throttle for
+        # SCHEDULED/SYSTEM sources via the per-model active_counts cap
+        # in queue_callbacks._can_proceed.
+        return True
 
     # ------------------------------------------------------------------
     # Model discovery
