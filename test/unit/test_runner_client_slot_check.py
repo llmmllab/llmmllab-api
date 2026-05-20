@@ -73,9 +73,13 @@ class TestCheckSlotAvailability:
             )
         )
         client._model_map = {"model-a": ["http://r1:8000"]}
-        # All slots busy + model not found on runner -> returns False
+        # All slots busy + model not found on runner. New semantics: we
+        # still admit the request and let llama.cpp's internal per-slot
+        # queue handle ordering — the priority queue is not the right
+        # layer to block on "is this slot mid-prefill?" status. Avoids
+        # the 5-minute timeout cascade observed 2026-05-19T22:31.
         result = await client.check_slot_availability("model-a")
-        assert result is False
+        assert result is True
 
     @pytest.mark.asyncio
     async def test_no_server_enough_vram(self):
@@ -151,8 +155,12 @@ class TestCheckSlotAvailability:
         client = RunnerClient(endpoints=["http://r1:8000"])
         client._client = mock
         client._model_map = {"model-a": ["http://r1:8000"]}
+        # No active server AND insufficient VRAM to start one.  New
+        # semantics: still admit — the next slot release on another
+        # model or the eviction reaper will free room.  Blocking here
+        # produced 5-minute queue timeouts on transient VRAM dips.
         result = await client.check_slot_availability("model-a")
-        assert result is False
+        assert result is True
 
     @pytest.mark.asyncio
     async def test_runner_unreachable_returns_true(self):
@@ -160,8 +168,12 @@ class TestCheckSlotAvailability:
         mock = _mock_client(get=AsyncMock(side_effect=Exception("connection refused")))
         client = RunnerClient(endpoints=["http://r1:8000"])
         client._client = mock
+        # Per the test name, the docstring, and the function's
+        # documented contract.  Asserting False was a long-standing
+        # bug in this test (caught and fixed alongside the semantics
+        # change in the production code).
         result = await client.check_slot_availability("model-a")
-        assert result is False
+        assert result is True
 
     @pytest.mark.asyncio
     async def test_no_active_handles_checks_vram(self):
