@@ -26,6 +26,7 @@ from graph.state import ServerToolEvent
 from httpx import ConnectError, RemoteProtocolError
 from models.chat_response import ChatResponse
 from models.message import Message
+from models.model_parameters import ModelParameters
 from utils.logging import llmmllogger
 
 logger = llmmllogger.bind(component="retry_policies")
@@ -46,6 +47,7 @@ async def stream_with_connection_retry(
     client_tools: list | None,
     tool_choice: str | None,
     server_tool_names: set[str] | None,
+    model_parameters: ModelParameters | None = None,
     max_retries: int,
     backoff_base: float,
     refresh_model_map: Callable[[], Awaitable[None]],
@@ -73,6 +75,7 @@ async def stream_with_connection_retry(
                 client_tools,
                 tool_choice,
                 server_tool_names,
+                model_parameters,
             ):
                 yield event
             return

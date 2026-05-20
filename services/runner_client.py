@@ -51,9 +51,13 @@ for _lib_name in (
 logger = llmmllogger.bind(component="runner_client")
 
 # Timeouts for different request categories (configurable via env)
-_HEALTH_TIMEOUT = httpx.Timeout(float(os.environ.get("RUNNER_HEALTH_TIMEOUT_SEC", "5.0")))
+_HEALTH_TIMEOUT = httpx.Timeout(
+    float(os.environ.get("RUNNER_HEALTH_TIMEOUT_SEC", "5.0"))
+)
 _FAST_TIMEOUT = httpx.Timeout(float(os.environ.get("RUNNER_FAST_TIMEOUT_SEC", "10.0")))
-_ACQUIRE_TIMEOUT = httpx.Timeout(float(os.environ.get("RUNNER_ACQUIRE_TIMEOUT_SEC", "150.0")))
+_ACQUIRE_TIMEOUT = httpx.Timeout(
+    float(os.environ.get("RUNNER_ACQUIRE_TIMEOUT_SEC", "150.0"))
+)
 
 # Circuit breaker thresholds (configurable via env)
 _MAX_ACQUIRE_FAILURES = int(os.environ.get("RUNNER_MAX_ACQUIRE_FAILURES", "3"))
@@ -132,7 +136,6 @@ class RunnerClient:
         path: str,
         *,
         json: Optional[Dict[str, Any]] = None,
-        stream: bool = False,
         timeout: float = 120.0,  # total backoff budget in seconds
     ) -> httpx.Response:
         """Send a request to a server handle, respecting Retry-After on 503.
@@ -350,9 +353,7 @@ class RunnerClient:
             return
 
         handles_to_shutdown = list(self._active_handles)
-        logger.info(
-            f"Shutting down {len(handles_to_shutdown)} active server handle(s)"
-        )
+        logger.info(f"Shutting down {len(handles_to_shutdown)} active server handle(s)")
 
         for handle in handles_to_shutdown:
             try:
@@ -508,18 +509,25 @@ class RunnerClient:
         client = self._get_client()
         for sid in server_ids:
             try:
-                await client.delete(f"{endpoint}/v1/server/{sid}", timeout=_FAST_TIMEOUT)
+                await client.delete(
+                    f"{endpoint}/v1/server/{sid}", timeout=_FAST_TIMEOUT
+                )
                 logger.info(f"Cleaned up server {sid} on {endpoint}")
             except Exception as e:
-                logger.warning(
-                    f"Failed to clean up server {sid} on {endpoint}: {e}"
-                )
+                logger.warning(f"Failed to clean up server {sid} on {endpoint}: {e}")
 
     def _is_connection_error(self, exc: Exception) -> bool:
         """Check if the exception is a connection-level error (disconnect, timeout, etc.)."""
-        return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout,
-                                httpx.ReadTimeout, httpx.RemoteProtocolError,
-                                ConnectionError))
+        return isinstance(
+            exc,
+            (
+                httpx.ConnectError,
+                httpx.ConnectTimeout,
+                httpx.ReadTimeout,
+                httpx.RemoteProtocolError,
+                ConnectionError,
+            ),
+        )
 
     async def _health(self, endpoint: str) -> Optional[dict]:
         """Check health of a single runner. Returns health dict or None."""
@@ -544,7 +552,7 @@ class RunnerClient:
             logger.warning(f"Runner {endpoint} health check failed: {e}")
             if endpoint in self._healthy:
                 self._healthy.remove(endpoint)
-           # Connection-level errors indicate an unreachable runner —
+            # Connection-level errors indicate an unreachable runner —
             # trip the circuit breaker and attempt to clean up orphaned
             # servers so VRAM isn't wasted.
             if self._is_connection_error(e):
@@ -745,7 +753,9 @@ class RunnerClient:
         """Unregister a server handle after it has been released/shutdown."""
         self._active_handles.discard(handle)
 
-    async def acquire_server(self, model_id: str, num_ctx: Optional[int] = None, **kwargs) -> ServerHandle:
+    async def acquire_server(
+        self, model_id: str, num_ctx: Optional[int] = None, **kwargs
+    ) -> ServerHandle:
         """Acquire a new llama.cpp server from a runner.
 
         Uses the cached model map for fast routing. Falls back to
@@ -843,7 +853,9 @@ class RunnerClient:
                     )
                     logger.info(f"Acquired server {handle.server_id} from {endpoint}")
                     self._record_acquire_success(endpoint)
-                    self._active_servers_by_endpoint.setdefault(endpoint, set()).add(data["server_id"])
+                    self._active_servers_by_endpoint.setdefault(endpoint, set()).add(
+                        data["server_id"]
+                    )
                     self._active_handles.add(handle)
                     self._schedule_refresh()
                     return handle
@@ -924,6 +936,7 @@ class RunnerClient:
         client = self._get_client()
         tasks = []
         for endpoint in self._endpoints:
+
             async def fetch_models(ep=endpoint):
                 try:
                     resp = await client.get(f"{ep}/v1/models")
@@ -932,6 +945,7 @@ class RunnerClient:
                 except Exception as e:
                     logger.warning(f"Failed to list models from {ep}: {e}")
                 return []
+
             tasks.append(fetch_models())
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for result in results:
@@ -941,12 +955,15 @@ class RunnerClient:
                         new_map[model_id] = []
                     new_map[model_id].append(endpoint)
         self._model_map = new_map
-        logger.info(f"Model map refreshed: {len(new_map)} models across {len(self._endpoints)} endpoints")
+        logger.info(
+            f"Model map refreshed: {len(new_map)} models across {len(self._endpoints)} endpoints"
+        )
 
     def _schedule_refresh(self) -> None:
         """Schedule a model-map refresh after a delay, cancelling any pending one."""
         if self._refresh_task is not None:
             self._refresh_task.cancel()
+
         async def _do_refresh():
             try:
                 await asyncio.sleep(MODEL_CACHE_REFRESH_SEC)
@@ -955,6 +972,7 @@ class RunnerClient:
                 pass
             finally:
                 self._refresh_task = None
+
         self._refresh_task = asyncio.create_task(_do_refresh())
 
     # ------------------------------------------------------------------
@@ -980,9 +998,7 @@ class RunnerClient:
                 )
                 if resp.status_code == 200:
                     slots = resp.json()
-                    if slots and any(
-                        not s.get("is_processing", False) for s in slots
-                    ):
+                    if slots and any(not s.get("is_processing", False) for s in slots):
                         return True
             except Exception:
                 continue
@@ -1001,11 +1017,15 @@ class RunnerClient:
                 health = health_resp.json()
                 gpu_info = health.get("gpu", {})
                 # Sum free_mb across all GPUs, convert to bytes
-                available_vram = sum(
-                    v.get("free_mb", 0)
-                    for v in gpu_info.values()
-                    if isinstance(v, dict)
-                ) * 1024 * 1024
+                available_vram = (
+                    sum(
+                        v.get("free_mb", 0)
+                        for v in gpu_info.values()
+                        if isinstance(v, dict)
+                    )
+                    * 1024
+                    * 1024
+                )
 
                 model_resp = await client.get(
                     f"{endpoint}/v1/models/{model_id}",

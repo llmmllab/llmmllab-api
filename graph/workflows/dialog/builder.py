@@ -32,6 +32,7 @@ from models import (
     MessageContentType,
     UserConfig,
 )
+from models.model_parameters import ModelParameters
 from services.runner_client import runner_client
 from langchain_openai import OpenAIEmbeddings
 
@@ -106,6 +107,7 @@ class DialogGraphBuilder(GraphBuilder):
                 model_def=primary_model_def,
                 system_prompt_default="",
                 component_name="PrimaryChatAgent",
+                model_parameters=kwargs.get("model_parameters"),
             )
 
             embedding_handle = await runner_client.acquire_server(

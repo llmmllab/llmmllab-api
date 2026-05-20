@@ -26,6 +26,7 @@ from graph.state import ServerToolEvent
 from middleware.api_metrics import empty_response_retries_total
 from models.chat_response import ChatResponse
 from models.message import Message, MessageContent, MessageContentType
+from models.model_parameters import ModelParameters
 from services.completion_state import CompletionResult, StreamAccumulator
 from services.prompt_templates import (
     CONTINUATION_PROMPT,
@@ -64,6 +65,7 @@ async def collect_response(
     client_tools: list | None,
     tool_choice: str | None,
     server_tool_names: set[str] | None,
+    model_parameters: ModelParameters | None = None,
 ) -> Optional[ChatResponse]:
     """Run a workflow and return only the final ChatResponse."""
     async for event in build_and_run(
@@ -75,6 +77,7 @@ async def collect_response(
         client_tools,
         tool_choice,
         server_tool_names,
+        model_parameters,
     ):
         if isinstance(event, ServerToolEvent):
             continue
@@ -99,6 +102,7 @@ async def stream_secondary_pass(
     client_tools: list | None,
     tool_choice: str | None,
     server_tool_names: set[str] | None,
+    model_parameters: ModelParameters | None = None,
     *,
     content_prefix: str = "",
 ) -> AsyncIterator[tuple[Union[ChatResponse, ServerToolEvent], StreamAccumulator]]:
@@ -117,6 +121,7 @@ async def stream_secondary_pass(
         client_tools,
         tool_choice,
         server_tool_names,
+        model_parameters,
     ):
         if isinstance(event, ServerToolEvent):
             continue
@@ -143,6 +148,7 @@ async def maybe_continue_on_truncation(
     conversation_id: int,
     client_tools: list | None,
     server_tool_names: set[str] | None,
+    model_parameters: ModelParameters | None = None,
 ) -> AsyncIterator[tuple[Union[ChatResponse, ServerToolEvent], StreamAccumulator]]:
     """Send a truncation-continuation prompt and stream the follow-up."""
     accumulated_text = acc.final_content or ""
@@ -170,6 +176,7 @@ async def maybe_continue_on_truncation(
         client_tools,
         "auto",
         server_tool_names,
+        model_parameters,
         content_prefix=accumulated_text,
     ):
         yield event, acc
@@ -185,6 +192,7 @@ async def maybe_continue_on_missing_tool_call(
     conversation_id: int,
     client_tools: list | None,
     server_tool_names: set[str] | None,
+    model_parameters: ModelParameters | None = None,
 ) -> AsyncIterator[tuple[Union[ChatResponse, ServerToolEvent], StreamAccumulator]]:
     """Send a tool-continuation prompt and stream the follow-up."""
     accumulated_text = acc.final_content or ""
@@ -213,6 +221,7 @@ async def maybe_continue_on_missing_tool_call(
         client_tools,
         "auto",
         server_tool_names,
+        model_parameters,
     ):
         yield event, acc
 
@@ -228,6 +237,7 @@ async def maybe_retry_on_empty(
     client_tools: list | None,
     tool_choice: str | None,
     server_tool_names: set[str] | None,
+    model_parameters: ModelParameters | None = None,
     *,
     revalidate_runner_handles: Callable[[], Awaitable[int]],
 ) -> AsyncIterator[tuple[Union[ChatResponse, ServerToolEvent], StreamAccumulator]]:
@@ -270,6 +280,7 @@ async def maybe_retry_on_empty(
         client_tools,
         tool_choice,
         server_tool_names,
+        model_parameters,
     ):
         yield event, acc
 
@@ -297,6 +308,7 @@ async def maybe_retry_on_empty(
             client_tools,
             "auto",
             server_tool_names,
+            model_parameters,
         ):
             yield event, acc
 
@@ -316,6 +328,7 @@ async def maybe_continue_on_truncation_nonstream(
     conversation_id: int,
     client_tools: list | None,
     server_tool_names: set[str] | None,
+    model_parameters: ModelParameters | None = None,
 ) -> None:
     """Send a truncation-continuation prompt and merge the response into ``result``."""
     accumulated_text = extract_text(result.chat_response.message)
@@ -341,6 +354,7 @@ async def maybe_continue_on_truncation_nonstream(
         client_tools,
         "auto",
         server_tool_names,
+        model_parameters,
     )
     if response and response.message:
         continuation_text = extract_text(response.message)
@@ -374,6 +388,7 @@ async def maybe_continue_on_missing_tool_call_nonstream(
     conversation_id: int,
     client_tools: list | None,
     server_tool_names: set[str] | None,
+    model_parameters: ModelParameters | None = None,
 ) -> None:
     """Send a tool-continuation prompt and adopt the response if it has tool calls."""
     accumulated_text = extract_text(result.chat_response.message)
@@ -401,6 +416,7 @@ async def maybe_continue_on_missing_tool_call_nonstream(
         client_tools,
         "auto",
         server_tool_names,
+        model_parameters,
     )
     if response and response.message and response.message.tool_calls:
         set_result_response(result, response, server_tool_names)
@@ -417,6 +433,7 @@ async def maybe_retry_on_empty_nonstream(
     client_tools: list | None,
     tool_choice: str | None,
     server_tool_names: set[str] | None,
+    model_parameters: ModelParameters | None = None,
 ) -> None:
     """Retry on empty response and follow up with a nudge if still empty."""
     logger.warning(
@@ -434,6 +451,7 @@ async def maybe_retry_on_empty_nonstream(
         client_tools,
         tool_choice,
         server_tool_names,
+        model_parameters,
     )
     if response:
         set_result_response(result, response, server_tool_names)
@@ -457,6 +475,7 @@ async def maybe_retry_on_empty_nonstream(
             client_tools,
             "auto",
             server_tool_names,
+            model_parameters,
         )
         if response:
             set_result_response(result, response, server_tool_names)

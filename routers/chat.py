@@ -16,6 +16,7 @@ from models import (
     ChatResponse,
     Message,
 )
+from models.model_parameters import ModelParameters
 from graph.state import ServerToolEvent
 from graph.workflows.factory import WorkFlowType
 from models.request_priority_metadata import Priority, RequestSource
@@ -33,6 +34,7 @@ async def composer_chat_completion(
     conversation_id: int,
     request_id: str,
     model_name: Optional[str] = None,
+    model_parameters: Optional[ModelParameters] = None,
     priority: Optional[Priority] = None,
     max_queue_wait: Optional[float] = None,
     source: Optional[RequestSource] = None,
@@ -52,6 +54,7 @@ async def composer_chat_completion(
         model_name=model_name or "",
         workflow_type=WorkFlowType.DIALOG,
         conversation_id=conversation_id,
+        model_parameters=model_parameters,
         priority=priority,
         max_queue_wait=max_queue_wait,
         source=source,
@@ -84,6 +87,7 @@ class ChatCompletionBody(BaseModel):
 
     message: Message
     model_name: Optional[str] = None
+    model_parameters: Optional[ModelParameters] = None
     response_format: Optional[Dict[str, Any]] = None
 
 
@@ -133,7 +137,7 @@ async def chat_completion(
         await message_service.add_message(msg)
         return StreamingResponse(
             composer_chat_completion(
-                user_id, msg.conversation_id, request_id, body.model_name,  # type: ignore
+                user_id, msg.conversation_id, request_id, body.model_name, body.model_parameters,  # type: ignore
                 priority=priority,
                 max_queue_wait=max_queue_wait,
                 source=req_source,
