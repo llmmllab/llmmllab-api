@@ -136,6 +136,13 @@ Copy `.env.example` to `.env` and set the required values. See `config.py` for d
 | `LOG_FORMAT` | `console` | Log format (`console` for human-readable, `json` for structured) |
 | `FORCE_COLOR` | `0` | Force colored output even without TTY (`1` to enable) |
 | `TEMPO_ENDPOINT` | `http://tempo.llmmllab.svc.cluster.local:4317` | Jaeger/Tempo OTLP endpoint for distributed tracing |
+
+### Container / Runner Environment
+
+These variables are not consumed by the Python API directly but are set in the deployment environment (e.g. `k8s/env.yaml`, `.env.example`) for the container and llama.cpp runner process.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
 | `CUDA_VISIBLE_DEVICES` | *(unset)* | GPU device IDs visible to the process |
 | `CUDA_DEVICE_ORDER` | `PCI_BUS_ID` | CUDA device ordering |
 | `PYTHONMALLOC` | `malloc` | Python memory allocator |
