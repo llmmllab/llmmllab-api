@@ -704,9 +704,17 @@ async def createMessage(
                 kw in error_msg
                 for kw in ("connection", "runner", "unavailable", "refused", "protocol")
             ):
+                # Generally fires when the runner is loading a model for
+                # the first time this session and the http client timed
+                # out waiting (model load can take 45-90s on cold start).
+                # Retry once the model is loaded.
                 raise HTTPException(
                     status_code=503,
-                    detail="Runner service is temporarily unavailable. Please retry.",
+                    detail=(
+                        "Runner busy starting the model. This usually means a "
+                        "model server is still loading (~45-90s on cold start). "
+                        "Please retry in 30-60 seconds."
+                    ),
                 ) from e
             if "model" in error_msg and "not found" in error_msg:
                 raise HTTPException(
@@ -752,6 +760,13 @@ async def createMessage(
     except ValidationError as ve:
         logger.error(f"Validation error in createMessage request: {ve.json()}")
         raise HTTPException(status_code=422, detail=json.loads(ve.json())) from ve
+
+    except HTTPException:
+        # Inner code already raised an HTTPException with the correct status
+        # code (e.g. 503 for runner-unavailable, 404 for unknown model).
+        # Propagate it unchanged — DO NOT wrap it in a 400, which produces
+        # the confusing "400 {detail: '503: ...'}" surface bug.
+        raise
 
     except Exception as e:
         logger.error(f"Error processing createMessage request: {str(e)}")
