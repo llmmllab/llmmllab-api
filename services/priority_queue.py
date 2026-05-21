@@ -350,15 +350,41 @@ class AsyncPriorityQueue:
         return released
 
     def _has_higher_priority_waiting(self, released_idx: int) -> bool:
-        """Check if any higher-priority item waits behind the released item.
+        """Check if any higher-priority item waits behind the released item
+        for the SAME model.
+
+        Backpressure exists to prevent low-priority work from starving
+        higher-priority work that's stuck waiting on a shared resource —
+        but two requests for different models target completely
+        independent llama.cpp servers (potentially on different runner
+        endpoints), so a HIGH request for model A should not block a
+        LOW request for model B from being released.  Without the
+        model-id filter, a single transiently-blocked HIGH request
+        gates ALL subsequent work in the queue.
+
+        Items without a model_id (None) are treated as competing with
+        everything — conservative fallback for legacy paths that don't
+        populate the field.
 
         Must be called while holding self._lock.
         """
-        released_priority = self._queue[released_idx].metadata.priority
-        if released_priority == Priority.LOW:
-            for i in range(released_idx + 1, len(self._queue)):
-                if self._queue[i].metadata.priority == Priority.HIGH:
-                    return True
+        released_meta = self._queue[released_idx].metadata
+        if released_meta.priority != Priority.LOW:
+            return False
+        released_model = released_meta.model_id
+        for i in range(released_idx + 1, len(self._queue)):
+            cand = self._queue[i].metadata
+            if cand.priority != Priority.HIGH:
+                continue
+            # Different model => independent resources => not blocking.
+            # Either side unset => assume competition (conservative).
+            if (
+                released_model is not None
+                and cand.model_id is not None
+                and cand.model_id != released_model
+            ):
+                continue
+            return True
         return False
 
     def _select_by_session_rr(

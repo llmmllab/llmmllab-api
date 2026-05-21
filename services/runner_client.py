@@ -726,9 +726,22 @@ class RunnerClient:
     # ------------------------------------------------------------------
 
     async def _select_runner(self, model_id: str) -> Optional[str]:
-        """Iterate endpoints, pick highest VRAM runner with matching model."""
-        best_url = None
-        best_vram = -1
+        """Pick the best endpoint that hosts *model_id*.
+
+        Ranking is a tuple ``(-active_handles_here, available_vram)``:
+        prefer the endpoint with the FEWEST handles we already hold
+        there (least competing in-flight work), and break ties by
+        most free VRAM.  An endpoint that doesn't host the model is
+        skipped entirely; an endpoint that doesn't respond to /health
+        is skipped too.
+
+        Without the load-spread term, every request to a model
+        available on multiple endpoints would pile onto whichever
+        endpoint had the most VRAM at the moment of the first call,
+        leaving other endpoints idle.
+        """
+        best_url: Optional[str] = None
+        best_key: Optional[tuple[int, int]] = None  # (negated handle count, vram)
         for endpoint in self._endpoints:
             health = await self._health(endpoint)
             if not health:
@@ -736,9 +749,14 @@ class RunnerClient:
             models = health.get("models", [])
             if model_id not in models:
                 continue
-            vram = health.get("gpu", {}).get("available_vram_bytes", 0)
-            if vram > best_vram:
-                best_vram = vram
+            vram = int(health.get("gpu", {}).get("available_vram_bytes", 0))
+            here_count = sum(
+                1 for h in self._active_handles if h.runner_host == endpoint
+            )
+            # Higher tuple = better.  Negate here_count so fewer is higher.
+            key = (-here_count, vram)
+            if best_key is None or key > best_key:
+                best_key = key
                 best_url = endpoint
         return best_url
 
