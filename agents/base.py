@@ -471,7 +471,7 @@ The current date is {current_date}."""
                         self.logger.warning(
                             f"Transient error ({type(e).__name__}), retrying in {backoff}s "
                             f"(attempt {attempt + 1}/{max_attempts})",
-                            extra={"error": str(e)},
+                            extra={"transient_error_detail": str(e)},
                         )
                         import asyncio as _asyncio
 
@@ -636,7 +636,7 @@ The current date is {current_date}."""
                         self.logger.warning(
                             f"Transient error ({type(e).__name__}), retrying in {backoff}s "
                             f"(attempt {attempt + 1}/{max_attempts})",
-                            extra={"error": str(e)},
+                            extra={"transient_error_detail": str(e)},
                         )
                         import asyncio as _asyncio
 
