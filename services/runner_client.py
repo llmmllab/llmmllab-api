@@ -825,9 +825,13 @@ class RunnerClient:
                 ordered = list(self._endpoints)
 
         last_error = None
+        skipped_circuit_breaker = []
         for endpoint in ordered:
             # Skip runners with open circuit breaker
             if self._is_circuit_open(endpoint):
+                skipped_circuit_breaker.append(
+                    f"{endpoint} ({self._acquire_failures.get(endpoint, 0)} failures)"
+                )
                 logger.warning(
                     f"Skipping {endpoint}: circuit breaker open "
                     f"({self._acquire_failures.get(endpoint, 0)} failures)"
@@ -897,6 +901,15 @@ class RunnerClient:
                         )
                     self._trip_circuit_and_cleanup(endpoint)
                     break  # move to next endpoint
+
+        # Build a meaningful last_error when all endpoints were skipped
+        if last_error is None and skipped_circuit_breaker:
+            last_error = (
+                f"All {len(skipped_circuit_breaker)} runner(s) skipped "
+                f"(circuit breaker open): {', '.join(skipped_circuit_breaker)}"
+            )
+        elif last_error is None:
+            last_error = "No endpoints available"
 
         raise RuntimeError(
             f"No healthy runner available for model {model_id}. "
