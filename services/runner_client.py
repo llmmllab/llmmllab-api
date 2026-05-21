@@ -568,15 +568,23 @@ class RunnerClient:
                     # immediately and clean up orphaned servers so VRAM isn't
                     # wasted.
                     if is_conn_err:
+                        # For transient connection errors, retry before tripping circuit breaker
+                        # This handles temporary network issues without marking the runner unhealthy
                         logger.warning(
-                            f"Connection error from {endpoint}, tripping circuit breaker: {e}"
+                            f"Transient connection error from {endpoint}, retrying: {e}"
                         )
+                        if attempt < max_retries - 1:
+                            continue  # retry this endpoint
+                        else:
+                            # All retries exhausted, trip circuit breaker
+                            self._trip_circuit_and_cleanup(endpoint)
+                            break
                     else:
                         logger.warning(
                             f"Acquire error from {endpoint}, tripping circuit breaker: {e}"
                         )
-                    self._trip_circuit_and_cleanup(endpoint)
-                    break  # move to next endpoint
+                        self._trip_circuit_and_cleanup(endpoint)
+                        break  # move to next endpoint
 
         # Build a meaningful last_error when all endpoints were skipped
         if last_error is None and skipped_circuit_breaker:
