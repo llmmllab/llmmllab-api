@@ -639,7 +639,65 @@ async def createMessage(
     logger.debug("Anthropic headers", extra={"headers": dict(request.headers)})
 
     try:
+        # Diagnostic fingerprint: hash the raw IN body, hash the body
+        # post-strip, and count how many strippable content blocks were
+        # removed.  Combined with the OUT-side fingerprint in
+        # graph/workflows/base.py, this gives a complete picture of
+        # where between claude-cli and the runner the prompt content
+        # changes.
+        try:
+            import hashlib as _hashlib
+            import json as _json
+
+            raw_bytes = _json.dumps(req_body, sort_keys=False).encode("utf-8")
+            raw_hash_full = _hashlib.sha256(raw_bytes).hexdigest()[:16]
+            raw_hash_8k = _hashlib.sha256(raw_bytes[:8192]).hexdigest()[:16]
+            # Count strippable blocks per type BEFORE strip
+            strippable_counts: Dict[str, int] = {}
+            messages_raw = req_body.get("messages") or []
+            msg_count_in = len(messages_raw)
+            for m in messages_raw:
+                c = m.get("content")
+                if isinstance(c, list):
+                    for blk in c:
+                        if isinstance(blk, dict):
+                            t = blk.get("type", "")
+                            if t in (
+                                _SERVER_TOOL_BLOCK_TYPES | _THINKING_BLOCK_TYPES
+                            ):
+                                strippable_counts[t] = (
+                                    strippable_counts.get(t, 0) + 1
+                                )
+        except Exception:
+            raw_hash_full = raw_hash_8k = "?"
+            strippable_counts = {}
+            msg_count_in = -1
+
         req_body = _strip_server_tool_blocks(req_body)
+
+        try:
+            stripped_bytes = _json.dumps(req_body, sort_keys=False).encode("utf-8")
+            stripped_hash_full = _hashlib.sha256(stripped_bytes).hexdigest()[:16]
+            stripped_hash_8k = _hashlib.sha256(
+                stripped_bytes[:8192]
+            ).hexdigest()[:16]
+            logger.info(
+                "Anthropic body fingerprint",
+                extra={
+                    "raw_bytes": len(raw_bytes),
+                    "raw_hash_full": raw_hash_full,
+                    "raw_hash_8k": raw_hash_8k,
+                    "stripped_bytes": len(stripped_bytes),
+                    "stripped_hash_full": stripped_hash_full,
+                    "stripped_hash_8k": stripped_hash_8k,
+                    "strippable_block_counts": strippable_counts,
+                    "msg_count_in": msg_count_in,
+                    "bytes_removed_by_strip": len(raw_bytes) - len(stripped_bytes),
+                },
+            )
+        except Exception:
+            pass
+
         body = CreateMessageRequest.model_validate(req_body)
         internal_messages = messages_from_anthropic(body.messages, system=body.system)
         _priority_meta = getattr(request.state, "request_priority_metadata", None)
