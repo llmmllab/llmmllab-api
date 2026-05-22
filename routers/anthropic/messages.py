@@ -681,6 +681,48 @@ async def createMessage(
             stripped_hash_8k = _hashlib.sha256(
                 stripped_bytes[:8192]
             ).hexdigest()[:16]
+
+            # Per-message hash chain: hash each message individually with
+            # sorted JSON keys so the result is independent of any
+            # incidental key-order changes.  This is the absolute-certainty
+            # test for claude-cli mutation: on two consecutive turns of
+            # the same session, the first-N message hashes MUST be
+            # identical if claude-cli is sending a stable conversation
+            # history.  If any earlier hash differs, that exact message
+            # was mutated between turns.
+            stripped_messages = req_body.get("messages") or []
+            stripped_system = req_body.get("system")
+            per_message_hashes: list[str] = []
+            for m in stripped_messages:
+                try:
+                    canon = _json.dumps(m, sort_keys=True, default=str).encode(
+                        "utf-8"
+                    )
+                    per_message_hashes.append(
+                        _hashlib.sha256(canon).hexdigest()[:12]
+                    )
+                except Exception:
+                    per_message_hashes.append("?")
+            system_hash = "-"
+            if stripped_system is not None:
+                try:
+                    sys_canon = _json.dumps(
+                        stripped_system, sort_keys=True, default=str
+                    ).encode("utf-8")
+                    system_hash = _hashlib.sha256(sys_canon).hexdigest()[:12]
+                except Exception:
+                    pass
+            tools_hash = "-"
+            tools_raw = req_body.get("tools")
+            if tools_raw:
+                try:
+                    tools_canon = _json.dumps(
+                        tools_raw, sort_keys=True, default=str
+                    ).encode("utf-8")
+                    tools_hash = _hashlib.sha256(tools_canon).hexdigest()[:12]
+                except Exception:
+                    pass
+
             logger.info(
                 "Anthropic body fingerprint",
                 extra={
@@ -693,6 +735,10 @@ async def createMessage(
                     "strippable_block_counts": strippable_counts,
                     "msg_count_in": msg_count_in,
                     "bytes_removed_by_strip": len(raw_bytes) - len(stripped_bytes),
+                    # The decisive evidence:
+                    "per_message_hashes": per_message_hashes,
+                    "system_hash": system_hash,
+                    "tools_hash": tools_hash,
                 },
             )
         except Exception:
