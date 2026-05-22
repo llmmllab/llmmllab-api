@@ -127,6 +127,18 @@ class WorkflowState(BaseModel):
         description="Counter for server tool loop iterations",
     )
 
+    # Result cache keyed by canonical "name|json(args)" so that repeated
+    # tool calls (within the same workflow, across iterations) reuse the
+    # previous result instead of re-firing the network request.  Reducer
+    # is a left-biased dict union: nodes set the *delta* and LangGraph
+    # merges it onto the running cache.
+    server_tool_call_cache: Annotated[
+        Dict[str, str], lambda a, b: {**(a or {}), **(b or {})}
+    ] = Field(
+        default_factory=dict,
+        description="Cache of server-tool results keyed by (name, args)",
+    )
+
 
 def assemble_context_messages(state: WorkflowState) -> List[Message]:
     """

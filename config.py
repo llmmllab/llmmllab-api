@@ -92,6 +92,26 @@ RUNNER_ENDPOINTS = os.environ.get("RUNNER_ENDPOINTS", "http://localhost:9000").s
 
 MODEL_CACHE_REFRESH_SEC = int(os.environ.get("MODEL_CACHE_REFRESH_SEC", "60"))
 
+# ── Server-side tool execution ─────────────────────────────────────────
+# Master switch for the server-side execution of "web_search" / "web_fetch"
+# style tools.  When false, the API leaves all tools to the client even if
+# they match the locally-executable name set — used for tenants that want
+# to own their own web access.  Per-request override:
+# ``X-Server-Side-Tools: false`` header (Anthropic router).  Per-tool
+# override: include ``{"execute": "client"}`` in the tool definition.
+SERVER_SIDE_TOOLS_ENABLED = os.environ.get(
+    "SERVER_SIDE_TOOLS_ENABLED", "true"
+).lower() in {"1", "true", "yes", "on"}
+
+# Hard cap on the number of Agent ↔ ServerToolNode loops within a single
+# completion.  Prevents a model from spinning the tool loop indefinitely
+# when its results don't satisfy the prompt.  Hitting the cap routes the
+# graph to END; the assistant message produced on that iteration is what
+# the client sees.
+SERVER_TOOL_MAX_ITERATIONS = int(
+    os.environ.get("SERVER_TOOL_MAX_ITERATIONS", "4")
+)
+
 # - Priority Queue -
 PRIORITY_QUEUE_ENABLED = (
     os.environ.get("PRIORITY_QUEUE_ENABLED", "true").lower() == "true"

@@ -11,6 +11,8 @@ This module:
 3. Returns results in a format the model can consume as tool results
 """
 
+import asyncio
+import json
 import re
 from typing import Any, Dict, List, Tuple
 
@@ -19,6 +21,54 @@ from models.tool_call import ToolCall
 from utils.logging import llmmllogger
 
 logger = llmmllogger.bind(component="ServerToolExecutor")
+
+# Per-tool execution timeouts (seconds).  Any single tool call exceeding
+# its budget surfaces a structured error string to the model instead of
+# stalling the stream until the upstream gives up.
+_TOOL_TIMEOUTS = {
+    "web_search": 30.0,
+    "web_fetch": 60.0,
+}
+
+# Sentinel for tools whose definition explicitly opts out of server-side
+# execution.  Clients can set this on a per-tool basis to keep the tool
+# in the bound-tools list (so the model knows about it) while letting the
+# client own its execution.
+_CLIENT_EXEC_FLAG_VALUES = {"client", "client_side", "client-side"}
+
+
+def tool_call_cache_key(name: str, args: Dict[str, Any] | None) -> str:
+    """Build a stable cache key from a tool call's canonical name and args.
+
+    Canonical-name lookup (`_CLIENT_TOOL_NAME_MAP`) folds Pascal/snake-case
+    aliases together so ``WebSearch(query=q)`` and ``web_search(query=q)``
+    share the same cache slot.  Args are JSON-encoded with sorted keys for
+    determinism.
+    """
+    canonical = _CLIENT_TOOL_NAME_MAP.get(name, name)
+    try:
+        args_str = json.dumps(args or {}, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        args_str = repr(args or {})
+    return f"{canonical}|{args_str}"
+
+
+def dedupe_tool_calls(calls: List[ToolCall]) -> List[ToolCall]:
+    """Drop duplicate ToolCalls (same canonical name + same args) preserving order.
+
+    The first occurrence wins; subsequent matches are dropped.  Used by
+    ``ServerToolNode`` to avoid firing the same `web_search` twice when a
+    model emits the call multiple times in one assistant turn.
+    """
+    seen: set[str] = set()
+    out: List[ToolCall] = []
+    for tc in calls:
+        key = tool_call_cache_key(tc.name, tc.args)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(tc)
+    return out
 
 # Server tool type patterns — versioned tool types that are normally
 # executed by an upstream API. We intercept and execute locally.
@@ -102,12 +152,20 @@ def find_locally_executable_tools(
     "WebFetch" that wrap what the Anthropic API handles server-side.  This
     function detects them by name so we can intercept their tool calls.
 
+    A tool may opt out of server-side execution by setting
+    ``{"execute": "client"}`` (or ``client_side`` / ``client-side``) in
+    the tool definition — in that case the API leaves the tool entirely
+    to the client, even when the name otherwise matches.
+
     Returns:
         Set of tool names that should be executed locally.
     """
     names = set()
     for tool in tools:
         name = tool.get("name", "")
+        execute = tool.get("execute")
+        if isinstance(execute, str) and execute.lower() in _CLIENT_EXEC_FLAG_VALUES:
+            continue
         if name in _CLIENT_TOOL_NAME_MAP:
             names.add(name)
     return names
@@ -227,10 +285,17 @@ async def _execute_web_search(args: Dict[str, Any]) -> str:
         return "Error: No search query provided"
 
     logger.info(f"🔍 Executing server-side web_search: {query}")
+    timeout = _TOOL_TIMEOUTS["web_search"]
     try:
-        result = await web_search.ainvoke({"query": query})
+        result = await asyncio.wait_for(
+            web_search.ainvoke({"query": query}), timeout=timeout
+        )
         logger.info(f"✅ Web search completed for: {query}")
         return _format_search_result(result, query)
+    except asyncio.TimeoutError:
+        error_msg = f"Web search timed out after {timeout:.0f}s"
+        logger.warning(error_msg, query=query)
+        return f"Error: {error_msg}"
     except Exception as e:
         error_msg = f"Web search failed: {str(e)}"
         logger.error(error_msg, query=query)
@@ -284,10 +349,17 @@ async def _execute_web_fetch(args: Dict[str, Any]) -> str:
         return "Error: No URL provided"
 
     logger.info(f"📖 Executing server-side web_fetch: {url}")
+    timeout = _TOOL_TIMEOUTS["web_fetch"]
     try:
-        result = await read_web_content.ainvoke({"url": url})
+        result = await asyncio.wait_for(
+            read_web_content.ainvoke({"url": url}), timeout=timeout
+        )
         logger.info(f"✅ Web fetch completed for: {url}")
         return str(result)
+    except asyncio.TimeoutError:
+        error_msg = f"Web fetch timed out after {timeout:.0f}s"
+        logger.warning(error_msg, url=url)
+        return f"Error: {error_msg}"
     except Exception as e:
         error_msg = f"Web fetch failed: {str(e)}"
         logger.error(error_msg, url=url)

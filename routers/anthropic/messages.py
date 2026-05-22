@@ -301,6 +301,24 @@ def anthropic_response_from_chat_response(
     )
 
 
+def _server_tools_enabled_from_header(request: Request) -> bool | None:
+    """Parse the per-request ``X-Server-Side-Tools`` override.
+
+    Returns ``True`` / ``False`` when the client explicitly asks for or
+    opts out of server-side tool execution; ``None`` when the header is
+    absent (caller should fall back to the env default).
+    """
+    raw = request.headers.get("x-server-side-tools")
+    if raw is None:
+        return None
+    val = raw.strip().lower()
+    if val in {"0", "false", "no", "off"}:
+        return False
+    if val in {"1", "true", "yes", "on"}:
+        return True
+    return None  # malformed → ignore, fall back to default
+
+
 async def stream_message(
     user_id: str,
     messages: list[Message],
@@ -311,6 +329,7 @@ async def stream_message(
     max_queue_wait: float | None = None,
     source: RequestSource | None = None,
     session_id: str | None = None,
+    server_tools_enabled: bool | None = None,
 ) -> AsyncIterator[str]:
     """Stream composer events as Anthropic SSE message chunks.
 
@@ -320,9 +339,12 @@ async def stream_message(
 
     Retry, continuation, and nudge logic is handled by CompletionService.
     Server-tool separation is handled by ToolService.
+
+    ``server_tools_enabled`` overrides ``config.SERVER_SIDE_TOOLS_ENABLED``
+    for this request (driven by the ``X-Server-Side-Tools`` header).
     """
     # Prepare tools via shared service
-    prepared = ToolService.prepare_tools(client_tools)
+    prepared = ToolService.prepare_tools(client_tools, enabled=server_tools_enabled)
     client_tools = prepared.client_tools
     server_tool_names = prepared.server_tool_names
 
@@ -662,6 +684,8 @@ async def createMessage(
         else:
             raw_client_tools = None
 
+        server_tools_enabled = _server_tools_enabled_from_header(request)
+
         if body.stream:
             return StreamingResponse(
                 stream_message(
@@ -674,6 +698,7 @@ async def createMessage(
                     max_queue_wait=max_queue_wait,
                     source=req_source,
                     session_id=req_session_id,
+                    server_tools_enabled=server_tools_enabled,
                 ),
                 media_type="text/event-stream",
                 headers={
@@ -684,7 +709,7 @@ async def createMessage(
             )
 
         # Non-streaming path — delegate to CompletionService
-        prepared = ToolService.prepare_tools(client_tools)
+        prepared = ToolService.prepare_tools(client_tools, enabled=server_tools_enabled)
         try:
             result = await CompletionService.run_completion(
                 user_id=user_id,

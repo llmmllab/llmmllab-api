@@ -9,6 +9,7 @@ streaming paths need this.
 
 from dataclasses import dataclass
 
+import config
 from tools.server_tool_executor import (
     separate_server_tools,
     get_server_tool_names,
@@ -35,17 +36,36 @@ class ToolService:
     """Stateless helpers for tool preparation."""
 
     @staticmethod
-    def prepare_tools(client_tools: list | None) -> PreparedTools:
+    def prepare_tools(
+        client_tools: list | None,
+        *,
+        enabled: bool | None = None,
+    ) -> PreparedTools:
         """Separate server-side tools from client tools and return the
         combined definitions list plus the set of server-tool names.
+
+        ``enabled`` defaults to ``config.SERVER_SIDE_TOOLS_ENABLED``.  When
+        false, the caller has opted out of server-side execution entirely
+        (env kill-switch or per-request ``X-Server-Side-Tools: false``
+        header) and the tools pass through untouched.
 
         If *client_tools* is ``None`` or empty, returns an empty result
         with no server tools.
         """
-        server_tool_names: set[str] = set()
+        if enabled is None:
+            enabled = config.SERVER_SIDE_TOOLS_ENABLED
 
         if not client_tools:
             return PreparedTools(client_tools=client_tools, server_tool_names=set())
+
+        if not enabled:
+            logger.debug(
+                "Server-side tool execution disabled; passing tools through",
+                extra={"tool_count": len(client_tools)},
+            )
+            return PreparedTools(client_tools=client_tools, server_tool_names=set())
+
+        server_tool_names: set[str] = set()
 
         only_client, server_tools = separate_server_tools(client_tools)
         if server_tools:
@@ -62,7 +82,7 @@ class ToolService:
             )
 
         # Also detect client tools like WebSearch/WebFetch that should be
-        # executed locally.
+        # executed locally.  Per-tool {"execute": "client"} opts back out.
         local_names = find_locally_executable_tools(client_tools)
         if local_names:
             server_tool_names |= local_names
