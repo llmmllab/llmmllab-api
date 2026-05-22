@@ -628,7 +628,6 @@ async def stream_message(
 
 @router.post("", response_model=None)
 async def createMessage(
-    req_body: Dict[str, Any],
     request: Request,
 ) -> Union[MessageResponse, StreamingResponse]:
     """Operation ID: createMessage"""
@@ -637,6 +636,33 @@ async def createMessage(
         raise HTTPException(status_code=401, detail="User ID not found in request")
 
     logger.debug("Anthropic headers", extra={"headers": dict(request.headers)})
+
+    # Read the raw wire bytes BEFORE any Python parsing so the fingerprint
+    # below is an honest reflection of what claude-cli put on the wire —
+    # not a Python re-serialization of what we parsed.  This closes the
+    # last residual ambiguity in attribution: if the raw-bytes per-message
+    # hash chain on consecutive turns differs at a given position, that
+    # position's content was mutated UPSTREAM of any of our code, full
+    # stop.
+    try:
+        _raw_wire_bytes = await request.body()
+        import hashlib as _hl_raw
+        raw_wire_hash_full = _hl_raw.sha256(_raw_wire_bytes).hexdigest()[:16]
+        raw_wire_bytes_len = len(_raw_wire_bytes)
+    except Exception:
+        _raw_wire_bytes = b""
+        raw_wire_hash_full = "?"
+        raw_wire_bytes_len = -1
+
+    # Parse JSON ourselves (FastAPI normally does this via the body param)
+    import json as _json_parse
+
+    try:
+        req_body: Dict[str, Any] = _json_parse.loads(_raw_wire_bytes)
+    except Exception as parse_err:
+        raise HTTPException(
+            status_code=400, detail=f"Invalid JSON body: {parse_err}"
+        )
 
     try:
         # Diagnostic fingerprint: hash the raw IN body, hash the body
@@ -668,10 +694,26 @@ async def createMessage(
                                 strippable_counts[t] = (
                                     strippable_counts.get(t, 0) + 1
                                 )
+            # Per-message hashes BEFORE strip — these reflect what
+            # claude-cli put on the wire, byte-faithful (modulo
+            # canonical JSON key ordering).  Comparing across turns
+            # tells us whether claude-cli mutated.
+            raw_per_message_hashes: list[str] = []
+            for m in messages_raw:
+                try:
+                    canon = _json.dumps(m, sort_keys=True, default=str).encode(
+                        "utf-8"
+                    )
+                    raw_per_message_hashes.append(
+                        _hashlib.sha256(canon).hexdigest()[:12]
+                    )
+                except Exception:
+                    raw_per_message_hashes.append("?")
         except Exception:
             raw_hash_full = raw_hash_8k = "?"
             strippable_counts = {}
             msg_count_in = -1
+            raw_per_message_hashes = []
 
         req_body = _strip_server_tool_blocks(req_body)
 
@@ -726,6 +768,11 @@ async def createMessage(
             logger.info(
                 "Anthropic body fingerprint",
                 extra={
+                    # Wire-level hash — what claude-cli put on the
+                    # socket, before ANY Python parsing.  Definitively
+                    # immune to API-side transformation.
+                    "wire_bytes": raw_wire_bytes_len,
+                    "wire_hash_full": raw_wire_hash_full,
                     "raw_bytes": len(raw_bytes),
                     "raw_hash_full": raw_hash_full,
                     "raw_hash_8k": raw_hash_8k,
@@ -735,7 +782,15 @@ async def createMessage(
                     "strippable_block_counts": strippable_counts,
                     "msg_count_in": msg_count_in,
                     "bytes_removed_by_strip": len(raw_bytes) - len(stripped_bytes),
-                    # The decisive evidence:
+                    # Per-message hashes BEFORE strip — what claude-cli
+                    # sent for each message individually.  Hash difference
+                    # at position i between consecutive turns = claude-cli
+                    # mutated message i.  No ambiguity.
+                    "raw_per_message_hashes": raw_per_message_hashes,
+                    # Per-message hashes AFTER strip.  If raw[i] differs
+                    # but stripped[i] matches, the strip canonicalized
+                    # something away.  If raw[i] matches but stripped[i]
+                    # differs, the strip is non-deterministic (bug).
                     "per_message_hashes": per_message_hashes,
                     "system_hash": system_hash,
                     "tools_hash": tools_hash,
