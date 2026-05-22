@@ -110,7 +110,7 @@ SERVER_SIDE_TOOLS_ENABLED = os.environ.get(
 # Service; override to "" for fully inline behaviour.
 MCP_WEB_TOOLS_URL = os.environ.get(
     "MCP_WEB_TOOLS_URL",
-    "http://mcp-server-web.llmmllab-mcp.svc.cluster.local:8000",
+    "http://mcp-server-web.llmmllab.svc.cluster.local:8000",
 )
 
 # Hard cap on the number of Agent ↔ ServerToolNode loops within a single
