@@ -813,6 +813,8 @@ class RunnerClient:
         mapped_endpoints = self._model_map.get(model_id)
         if mapped_endpoints:
             ordered = list(mapped_endpoints)
+            # Model is in the map, so it's available on at least one runner
+            model_available = True
         else:
             # Fallback: health-check scan
             best = await self._select_runner(model_id)
@@ -823,7 +825,16 @@ class RunnerClient:
                         ordered.append(ep)
             else:
                 ordered = list(self._endpoints)
-
+            # Model not in map, need to check if it's available on any healthy runner
+            model_available = False
+            for endpoint in self._endpoints:
+                health = await self._health(endpoint)
+                if health:
+                    models = health.get("models", [])
+                    if model_id in models:
+                        model_available = True
+                        break
+        
         last_error = None
         skipped_circuit_breaker = []
         for endpoint in ordered:
@@ -902,6 +913,15 @@ class RunnerClient:
                     self._trip_circuit_and_cleanup(endpoint)
                     break  # move to next endpoint
 
+        # Only check model availability if the model map is populated.
+        # If the model map is empty, it means runners are unhealthy and we should
+        # use the original error message about no healthy runners.
+        if self._model_map and not model_available:
+            raise RuntimeError(
+                f"Model '{model_id}' is not available on any runner. "
+                f"Available models: {', '.join(self._model_map.keys())}"
+            )
+
         # Build a meaningful last_error when all endpoints were skipped
         if last_error is None and skipped_circuit_breaker:
             last_error = (
@@ -910,7 +930,6 @@ class RunnerClient:
             )
         elif last_error is None:
             last_error = "No endpoints available"
-
         raise RuntimeError(
             f"No healthy runner available for model {model_id}. "
             f"Last error: {last_error}"
