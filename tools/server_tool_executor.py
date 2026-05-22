@@ -275,22 +275,55 @@ async def execute_server_tool(tool_call: ToolCall) -> str:
 
 
 async def _execute_web_search(args: Dict[str, Any]) -> str:
-    """Execute web_search using the existing SearxNG implementation."""
-    from tools.static.web_search_tool import (  # pylint: disable=import-outside-toplevel
-        web_search,
-    )
-
+    """Execute web_search via the mcp-server-web MCP server, falling back
+    to the inline SearxNG implementation when no MCP URL is configured."""
     query = args.get("query", "")
     if not query:
         return "Error: No search query provided"
 
     logger.info(f"🔍 Executing server-side web_search: {query}")
     timeout = _TOOL_TIMEOUTS["web_search"]
+
+    # Prefer the deployed MCP server.  Its JSON envelope already matches
+    # the shape ``_format_search_result`` expects (``contents``: [...]),
+    # so we just need to call the tool and reformat the result.
+    from tools.mcp_client import get_default, MCPCallError  # pylint: disable=import-outside-toplevel
+
+    mcp = get_default()
+    if mcp is not None:
+        try:
+            raw = await asyncio.wait_for(
+                mcp.call_tool("web_search", {"query": query}), timeout=timeout
+            )
+            logger.info(f"✅ Web search via MCP completed for: {query}")
+            return _format_search_result(raw, query)
+        except asyncio.TimeoutError:
+            error_msg = f"Web search (MCP) timed out after {timeout:.0f}s"
+            logger.warning(error_msg, query=query)
+            return f"Error: {error_msg}"
+        except MCPCallError as e:
+            # Surface as inline error — the model can recover or retry.
+            error_msg = f"Web search (MCP) failed: {e}"
+            logger.warning(error_msg, query=query)
+            return f"Error: {error_msg}"
+        except Exception as e:  # pragma: no cover — defensive
+            logger.warning(
+                "MCP web_search raised unexpected error; falling back to inline",
+                error=str(e),
+                query=query,
+            )
+            # fall through to inline path below
+
+    # Inline fallback (no MCP configured, or MCP raised unexpectedly).
+    from tools.static.web_search_tool import (  # pylint: disable=import-outside-toplevel
+        web_search,
+    )
+
     try:
         result = await asyncio.wait_for(
             web_search.ainvoke({"query": query}), timeout=timeout
         )
-        logger.info(f"✅ Web search completed for: {query}")
+        logger.info(f"✅ Web search (inline) completed for: {query}")
         return _format_search_result(result, query)
     except asyncio.TimeoutError:
         error_msg = f"Web search timed out after {timeout:.0f}s"
@@ -339,22 +372,53 @@ def _format_search_result(raw: str, query: str) -> str:
 
 
 async def _execute_web_fetch(args: Dict[str, Any]) -> str:
-    """Execute web_fetch using the existing web reader implementation."""
-    from tools.static.web_reader_tool import (  # pylint: disable=import-outside-toplevel
-        read_web_content,
-    )
+    """Execute web_fetch via the mcp-server-web MCP server, falling back
+    to the inline web-reader implementation when no MCP URL is configured.
 
+    The MCP server's tool is named ``fetch_page`` (vs the API's
+    ``web_fetch``); we translate transparently."""
     url = args.get("url", "")
     if not url:
         return "Error: No URL provided"
 
     logger.info(f"📖 Executing server-side web_fetch: {url}")
     timeout = _TOOL_TIMEOUTS["web_fetch"]
+
+    from tools.mcp_client import get_default, MCPCallError  # pylint: disable=import-outside-toplevel
+
+    mcp = get_default()
+    if mcp is not None:
+        try:
+            result = await asyncio.wait_for(
+                mcp.call_tool("fetch_page", {"url": url}), timeout=timeout
+            )
+            logger.info(f"✅ Web fetch via MCP completed for: {url}")
+            return result
+        except asyncio.TimeoutError:
+            error_msg = f"Web fetch (MCP) timed out after {timeout:.0f}s"
+            logger.warning(error_msg, url=url)
+            return f"Error: {error_msg}"
+        except MCPCallError as e:
+            error_msg = f"Web fetch (MCP) failed: {e}"
+            logger.warning(error_msg, url=url)
+            return f"Error: {error_msg}"
+        except Exception as e:  # pragma: no cover — defensive
+            logger.warning(
+                "MCP fetch_page raised unexpected error; falling back to inline",
+                error=str(e),
+                url=url,
+            )
+            # fall through to inline path below
+
+    from tools.static.web_reader_tool import (  # pylint: disable=import-outside-toplevel
+        read_web_content,
+    )
+
     try:
         result = await asyncio.wait_for(
             read_web_content.ainvoke({"url": url}), timeout=timeout
         )
-        logger.info(f"✅ Web fetch completed for: {url}")
+        logger.info(f"✅ Web fetch (inline) completed for: {url}")
         return str(result)
     except asyncio.TimeoutError:
         error_msg = f"Web fetch timed out after {timeout:.0f}s"

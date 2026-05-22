@@ -103,6 +103,16 @@ SERVER_SIDE_TOOLS_ENABLED = os.environ.get(
     "SERVER_SIDE_TOOLS_ENABLED", "true"
 ).lower() in {"1", "true", "yes", "on"}
 
+# MCP server for web_search / web_fetch.  When set, server-side tool
+# execution delegates to this MCP server instead of running the SearxNG
+# + Playwright code inline.  Empty falls back to the inline path (handy
+# for local dev without a deployed MCP).  Default points at the in-cluster
+# Service; override to "" for fully inline behaviour.
+MCP_WEB_TOOLS_URL = os.environ.get(
+    "MCP_WEB_TOOLS_URL",
+    "http://mcp-server-web.llmmllab-mcp.svc.cluster.local:8000",
+)
+
 # Hard cap on the number of Agent ↔ ServerToolNode loops within a single
 # completion.  Prevents a model from spinning the tool loop indefinitely
 # when its results don't satisfy the prompt.  Hitting the cap routes the

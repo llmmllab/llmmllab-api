@@ -269,6 +269,73 @@ async def test_server_tool_node_runs_distinct_calls_in_parallel():
 
 
 @pytest.mark.asyncio
+async def test_execute_web_search_uses_mcp_when_configured():
+    """When tools.mcp_client.get_default() returns a client, _execute_web_search
+    delegates to MCP and reformats the result."""
+    import json
+    from tools.server_tool_executor import _execute_web_search
+
+    class FakeMCP:
+        async def call_tool(self, name: str, arguments: dict) -> str:
+            assert name == "web_search"
+            assert arguments == {"query": "kubernetes"}
+            return json.dumps(
+                {
+                    "query": "kubernetes",
+                    "contents": [
+                        {
+                            "title": "K8s docs",
+                            "url": "https://k8s.io",
+                            "content": "Container orchestration",
+                            "relevance": 1.0,
+                        }
+                    ],
+                }
+            )
+
+    with patch("tools.mcp_client.get_default", return_value=FakeMCP()):
+        result = await _execute_web_search({"query": "kubernetes"})
+
+    assert "K8s docs" in result
+    assert "https://k8s.io" in result
+
+
+@pytest.mark.asyncio
+async def test_execute_web_fetch_uses_mcp_when_configured():
+    """fetch_page on MCP returns text directly; _execute_web_fetch passes through."""
+    from tools.server_tool_executor import _execute_web_fetch
+
+    class FakeMCP:
+        async def call_tool(self, name: str, arguments: dict) -> str:
+            assert name == "fetch_page"
+            assert arguments == {"url": "https://example.com"}
+            return "Content from https://example.com:\n\nHello world"
+
+    with patch("tools.mcp_client.get_default", return_value=FakeMCP()):
+        result = await _execute_web_fetch({"url": "https://example.com"})
+
+    assert "Hello world" in result
+
+
+@pytest.mark.asyncio
+async def test_execute_web_search_handles_mcp_call_error_gracefully():
+    """MCPCallError from the client surfaces as an inline error string,
+    not a raised exception."""
+    from tools.server_tool_executor import _execute_web_search
+    from tools.mcp_client import MCPCallError
+
+    class BrokenMCP:
+        async def call_tool(self, name: str, arguments: dict) -> str:
+            raise MCPCallError("server gone")
+
+    with patch("tools.mcp_client.get_default", return_value=BrokenMCP()):
+        result = await _execute_web_search({"query": "x"})
+
+    assert result.startswith("Error:")
+    assert "server gone" in result
+
+
+@pytest.mark.asyncio
 async def test_server_tool_node_increments_iterations_and_extends_cache():
     state = _make_state(
         messages=[

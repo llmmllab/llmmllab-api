@@ -211,6 +211,17 @@ async def lifespan(_: FastAPI):
         except Exception as e:
             logger.info(f"Error closing runner client: {e}")
 
+        # Close MCP web client (web_search / fetch_page upstream)
+        try:
+            from tools.mcp_client import (  # pylint: disable=import-outside-toplevel
+                shutdown_default,
+            )
+
+            await shutdown_default()
+            logger.info("MCP web client closed")
+        except Exception as e:
+            logger.info(f"Error closing MCP web client: {e}")
+
         # Close priority queue (stops background recheck task)
         try:
             from services.priority_queue import (
