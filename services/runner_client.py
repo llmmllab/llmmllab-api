@@ -106,6 +106,13 @@ class RunnerClient:
         # callers can't both observe an unchanged epoch, miss the purge,
         # and race on `_active_handles`.
         self._epoch_lock: asyncio.Lock = asyncio.Lock()
+        # Sticky model→endpoint pinning.  Once a model is first acquired
+        # from an endpoint, future acquires for the same model_id prefer
+        # that same endpoint as long as it's still healthy + still hosts
+        # the model.  Maximises KV-cache reuse on the runner side (the
+        # llama.cpp server stays warm for the same model and benefits
+        # from cache_prompt across sessions).
+        self._last_endpoint_for_model: Dict[str, str] = {}
 
     def _get_client(self) -> httpx.AsyncClient:
         """Lazily create a shared ``httpx.AsyncClient``."""
@@ -728,18 +735,44 @@ class RunnerClient:
     async def _select_runner(self, model_id: str) -> Optional[str]:
         """Pick the best endpoint that hosts *model_id*.
 
-        Ranking is a tuple ``(-active_handles_here, available_vram)``:
-        prefer the endpoint with the FEWEST handles we already hold
-        there (least competing in-flight work), and break ties by
-        most free VRAM.  An endpoint that doesn't host the model is
-        skipped entirely; an endpoint that doesn't respond to /health
-        is skipped too.
+        Selection priority (highest first):
+          1. **Sticky preference** — if we've previously acquired this
+             ``model_id`` from an endpoint and it's still healthy + still
+             hosts the model, return it.  Maximises KV-cache reuse on the
+             runner: every session targeting the same model lands on the
+             same llama.cpp server, sharing prefix cache, slot LRU, and
+             saved-KV snapshots.
+          2. **Fallback** — among the remaining eligible endpoints,
+             rank by ``(-active_handles_here, available_vram)``:
+             prefer the endpoint with the FEWEST handles we already
+             hold there, breaking ties by most free VRAM.  This still
+             spreads first-time-loaded models across runners so they
+             don't all pile onto one box.
 
-        Without the load-spread term, every request to a model
-        available on multiple endpoints would pile onto whichever
-        endpoint had the most VRAM at the moment of the first call,
-        leaving other endpoints idle.
+        An endpoint that doesn't host the model or doesn't respond to
+        ``/health`` is skipped entirely.
+
+        The sticky preference DOES NOT lock us in forever — when the
+        sticky endpoint becomes unhealthy or loses the model, the next
+        call falls back to ranking and resets the pin (in
+        ``acquire_server`` on success).
         """
+        # --- Sticky path ---------------------------------------------
+        sticky = self._last_endpoint_for_model.get(model_id)
+        if sticky and not self._is_circuit_open(sticky):
+            health = await self._health(sticky)
+            if health and model_id in health.get("models", []):
+                return sticky
+            # Sticky endpoint no longer eligible — drop the pin so the
+            # ranking below can choose freshly and ``acquire_server``
+            # re-pins on next success.
+            self._last_endpoint_for_model.pop(model_id, None)
+        elif sticky:
+            # Sticky has a tripped circuit; clear the pin so the next
+            # ranked path doesn't try it.
+            self._last_endpoint_for_model.pop(model_id, None)
+
+        # --- Ranked fallback -----------------------------------------
         best_url: Optional[str] = None
         best_key: Optional[tuple[int, int]] = None  # (negated handle count, vram)
         for endpoint in self._endpoints:
@@ -880,6 +913,10 @@ class RunnerClient:
                         data["server_id"]
                     )
                     self._active_handles.add(handle)
+                    # Pin this model to the endpoint we just used so
+                    # follow-up acquires (different sessions, same model)
+                    # land here and benefit from the warm KV cache.
+                    self._last_endpoint_for_model[model_id] = endpoint
                     self._schedule_refresh()
                     return handle
 

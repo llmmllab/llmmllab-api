@@ -82,29 +82,20 @@ class ComposerService:
             # 2. Use per-user cache if enabled
             user_cache = None
 
-            # Build cache key that incorporates model + session.
-            #
-            # Session is part of the key because GraphBuilder constructs
-            # ``ChatOpenAI(..., default_headers={"X-Session-ID": sid})`` at
-            # workflow build time — the session_id is captured statically
-            # from the contextvar.  If we cached by (user, model) alone,
-            # two distinct claude-code sessions for the same user on the
-            # same model would share one cached CompiledStateGraph and
-            # the second session's traffic would carry the first session's
-            # X-Session-ID header all the way to the runner, contaminating
-            # the slot LRU and trashing each other's KV cache.
-            #
-            # Including the session_id keeps each session's ChatOpenAI
-            # binding isolated.  Memory cost: one CompiledStateGraph per
-            # active (user, model, session) tuple — bounded by
-            # WorkflowCache.max_size (1000) and TTL'd at 5 min.
-            from utils.logging import _session_id_ctx
-            sid = _session_id_ctx.get() or "nosession"
-
+            # Cache key is (user, model) — session id is no longer part
+            # of it.  The historical reason for adding session id was that
+            # GraphBuilder used to bake ``X-Session-ID`` into
+            # ChatOpenAI(default_headers=...) at build time, so a cached
+            # workflow reused by another session would carry the wrong
+            # session id to the runner.  That binding is now dynamic via
+            # an httpx event_hook (graph/workflows/base.py
+            # ``_inject_session_id_header``), so one CompiledStateGraph
+            # safely serves every session targeting the same (user, model).
+            # Result: N sessions for one model share ONE workflow build
+            # / one acquire_server call instead of N.
             cache_key = f"workflow_{user_id}"
             if model_name:
                 cache_key += f"_{model_name}"
-            cache_key += f"_{sid}"
 
             if user_config.workflow.enable_workflow_caching:
                 if user_id not in self.workflow_caches:
@@ -156,18 +147,15 @@ class ComposerService:
         """Build the same cache key used in ``compose_workflow``.
 
         Kept in one place so :meth:`invalidate_workflow` is guaranteed to
-        match the key used when the entry was inserted.  Reads
-        ``_session_id_ctx`` so the result matches the build-time key
-        when invalidate is called from within the same request context
-        (e.g. the stale-handle retry path in completion_service).
+        match the key used when the entry was inserted.  Cache key
+        scopes to ``(user_id, model_name)`` — session id is intentionally
+        out of the key because ``X-Session-ID`` is set dynamically per
+        request via httpx event_hook rather than baked into the cached
+        ChatOpenAI instance.
         """
-        from utils.logging import _session_id_ctx
-        sid = _session_id_ctx.get() or "nosession"
-
         cache_key = f"workflow_{user_id}"
         if model_name:
             cache_key += f"_{model_name}"
-        cache_key += f"_{sid}"
         return cache_key
 
     async def invalidate_workflow(

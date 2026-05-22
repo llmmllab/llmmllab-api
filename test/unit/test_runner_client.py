@@ -8,6 +8,7 @@ the ``httpx.AsyncClient`` constructor.
 """
 
 import asyncio
+import time
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -974,3 +975,117 @@ class TestRunnerClientCircuitBreaker:
 
         assert "http://r1:8000" not in client._healthy
         assert client._is_circuit_open("http://r1:8000")
+
+
+class TestRunnerClientStickyEndpoint:
+    """Pin the sticky model→endpoint routing introduced 2026-05-22.
+
+    Maximises KV-cache reuse on the runner side: once the first
+    acquire for model X picks endpoint E, every subsequent acquire
+    for X is steered back to E unless E becomes ineligible.
+    """
+
+    @pytest.mark.asyncio
+    async def test_acquire_pins_model_to_endpoint_on_success(self):
+        """A successful acquire records ``_last_endpoint_for_model``."""
+        health = MagicMock(status_code=200)
+        health.json.return_value = {
+            "status": "ok",
+            "gpu": {"available_vram_bytes": 12000000000},
+            "models": ["m1"],
+        }
+        create = MagicMock(status_code=201)
+        create.json.return_value = {
+            "server_id": "s1",
+            "base_url": "http://r1:8000/v1/server/s1",
+            "model": "m1",
+        }
+        create.raise_for_status = MagicMock()
+
+        mock = _mock_client(
+            get=AsyncMock(return_value=health),
+            post=AsyncMock(return_value=create),
+        )
+        client = RunnerClient(endpoints=["http://r1:8000"])
+        client._client = mock
+        await client.acquire_server("m1", task=ModelTask.TEXTTOTEXT, config_override={})
+        assert client._last_endpoint_for_model["m1"] == "http://r1:8000"
+
+    @pytest.mark.asyncio
+    async def test_select_runner_prefers_sticky_endpoint(self):
+        """``_select_runner`` returns the pinned endpoint when healthy."""
+        health = MagicMock(status_code=200)
+        health.json.return_value = {
+            "status": "ok",
+            "gpu": {"available_vram_bytes": 12000000000},
+            "models": ["m1"],
+        }
+        mock = _mock_client(get=AsyncMock(return_value=health))
+        client = RunnerClient(
+            endpoints=["http://r1:8000", "http://r2:8000"]
+        )
+        client._client = mock
+        client._last_endpoint_for_model["m1"] = "http://r2:8000"
+
+        chosen = await client._select_runner("m1")
+        assert chosen == "http://r2:8000"
+
+    @pytest.mark.asyncio
+    async def test_select_runner_drops_pin_when_sticky_unhealthy(self):
+        """If the sticky endpoint stops hosting the model, drop the pin
+        and let the ranking pick a healthy alternative."""
+        async def health_for(url):
+            resp = MagicMock(status_code=200)
+            if "r2" in url:
+                # r2 lost the model
+                resp.json.return_value = {
+                    "status": "ok",
+                    "gpu": {"available_vram_bytes": 100},
+                    "models": [],
+                }
+            else:
+                resp.json.return_value = {
+                    "status": "ok",
+                    "gpu": {"available_vram_bytes": 12000000000},
+                    "models": ["m1"],
+                }
+            return resp
+
+        async def get_(url, *args, **kwargs):
+            return await health_for(url)
+
+        mock = _mock_client(get=AsyncMock(side_effect=get_))
+        client = RunnerClient(
+            endpoints=["http://r1:8000", "http://r2:8000"]
+        )
+        client._client = mock
+        client._last_endpoint_for_model["m1"] = "http://r2:8000"
+
+        chosen = await client._select_runner("m1")
+        # Sticky r2 unhealthy → fall back to r1; pin dropped.
+        assert chosen == "http://r1:8000"
+        assert "m1" not in client._last_endpoint_for_model
+
+    @pytest.mark.asyncio
+    async def test_select_runner_drops_pin_when_circuit_open(self):
+        """A sticky endpoint with a tripped circuit breaker is not
+        returned; the pin is cleared."""
+        health = MagicMock(status_code=200)
+        health.json.return_value = {
+            "status": "ok",
+            "gpu": {"available_vram_bytes": 12000000000},
+            "models": ["m1"],
+        }
+        mock = _mock_client(get=AsyncMock(return_value=health))
+        client = RunnerClient(
+            endpoints=["http://r1:8000", "http://r2:8000"]
+        )
+        client._client = mock
+        client._last_endpoint_for_model["m1"] = "http://r2:8000"
+        # Force r2's circuit open.
+        client._acquire_failures["http://r2:8000"] = client._MAX_ACQUIRE_FAILURES + 1
+        client._unhealthy_since["http://r2:8000"] = time.monotonic()
+
+        chosen = await client._select_runner("m1")
+        assert chosen == "http://r1:8000"
+        assert "m1" not in client._last_endpoint_for_model

@@ -47,10 +47,37 @@ def should_generate_title(state: WorkflowState) -> str:
     return "skip_title"
 
 
-def _get_session_id_header():
-    """Inject the current session id as a default header on outbound requests."""
+async def _inject_session_id_header(request) -> None:  # type: ignore[no-untyped-def]
+    """httpx ``event_hooks["request"]`` callback.
+
+    Reads ``_session_id_ctx`` at request time (NOT at client construction
+    time) and stamps ``X-Session-ID`` on each outbound runner request.
+    Reading the contextvar dynamically is what lets one cached workflow /
+    one ChatOpenAI instance serve many sessions correctly — each request
+    runs in its own asyncio task with its own contextvar value, so the
+    right session id reaches the runner's SlotLRU.
+
+    Set per-request without touching ``default_headers`` so we don't
+    statically bake a session id into the ChatOpenAI instance (which
+    would be wrong the moment the workflow gets cached and re-used).
+    """
     sid = _session_id_ctx.get()
-    return {"X-Session-ID": sid} if sid else None
+    if sid:
+        request.headers["X-Session-ID"] = sid
+
+
+def _make_runner_http_client(timeout: float = 120.0):
+    """Build an ``httpx.AsyncClient`` with the session-id event hook.
+
+    Lazy-import so test mocks that patch ``langchain_openai`` don't have
+    to also patch httpx.
+    """
+    import httpx  # local import — httpx is already a runtime dep
+
+    return httpx.AsyncClient(
+        timeout=httpx.Timeout(timeout),
+        event_hooks={"request": [_inject_session_id_header]},
+    )
 
 
 # Default fallback context window when a model definition has no explicit
@@ -242,7 +269,11 @@ class GraphBuilder(ABC):
             model=model_def.name,
             stream_usage=True,
             max_retries=self._chat_openai_max_retries,
-            default_headers=_get_session_id_header(),
+            # X-Session-ID is set per-request by the httpx event hook so a
+            # cached workflow can be shared across sessions without
+            # baking one session's id into every request.  See
+            # ``_inject_session_id_header`` above.
+            http_async_client=_make_runner_http_client(),
         )
         self.server_handle = server_handle
 
