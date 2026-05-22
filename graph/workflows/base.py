@@ -66,8 +66,49 @@ async def _inject_session_id_header(request) -> None:  # type: ignore[no-untyped
         request.headers["X-Session-ID"] = sid
 
 
+async def _log_prompt_fingerprint(request) -> None:  # type: ignore[no-untyped-def]
+    """httpx ``event_hooks["request"]`` callback — diagnostic.
+
+    Logs SHA256 + prefix hashes of every outbound runner POST.  Lets us
+    correlate "cache invalidated on slot N" warnings on the runner side
+    with "did the prompt body change at byte X between turns" on the API
+    side, without needing to dump multi-hundred-KB request bodies.
+
+    Three rolling-window hashes are emitted (first 256 bytes, first 8 KiB,
+    full body) so the comparison can pinpoint *where* two consecutive
+    requests diverge: if the 256-byte hash matches but the 8 KiB hash
+    doesn't, the divergence is in bytes 256-8192 (typically the
+    system prompt / tool definitions region).  If the 256-byte hash
+    differs too, the divergence is at the very front (chat template /
+    first system tokens).
+    """
+    # Skip non-POST or zero-body requests so we don't log /v1/status etc.
+    if request.method != "POST":
+        return
+    body = request.content
+    if not body:
+        return
+    import hashlib
+
+    full = hashlib.sha256(body).hexdigest()[:16]
+    prefix_256 = hashlib.sha256(body[:256]).hexdigest()[:16]
+    prefix_8k = hashlib.sha256(body[:8192]).hexdigest()[:16]
+
+    sid = _session_id_ctx.get() or "none"
+    llmmllogger.logger.bind(component="RunnerRequestFingerprint").info(
+        "Runner request fingerprint",
+        session_id=sid,
+        url_path=str(request.url.path),
+        body_bytes=len(body),
+        hash_full=full,
+        hash_8k=prefix_8k,
+        hash_256=prefix_256,
+    )
+
+
 def _make_runner_http_client(timeout: float = 120.0):
-    """Build an ``httpx.AsyncClient`` with the session-id event hook.
+    """Build an ``httpx.AsyncClient`` with the session-id event hook +
+    the prompt-fingerprint diagnostic hook.
 
     Lazy-import so test mocks that patch ``langchain_openai`` don't have
     to also patch httpx.
@@ -76,7 +117,12 @@ def _make_runner_http_client(timeout: float = 120.0):
 
     return httpx.AsyncClient(
         timeout=httpx.Timeout(timeout),
-        event_hooks={"request": [_inject_session_id_header]},
+        event_hooks={
+            "request": [
+                _inject_session_id_header,
+                _log_prompt_fingerprint,
+            ]
+        },
     )
 
 
