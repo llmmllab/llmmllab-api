@@ -14,7 +14,10 @@ from .evals import router as evals_router
 # files router moved to common
 # from .files import router as files_router
 from .fine_tuning import router as fine_tuning_router
-# from .images import router as images_router  # requires heavy image deps (belongs in runner)
+# Image generation + img2-3D — the api just forwards to the runner, so no
+# heavy image deps land in this process.  Backed by stable-diffusion.cpp
+# (txt2img) and TRELLIS (img2-3D), both running in the runner.
+from .images import router as images_router
 
 # models router moved to common
 # from .models import router as models_router
@@ -41,7 +44,7 @@ ROUTERS = [
     embeddings_router,
     evals_router,
     fine_tuning_router,
-    # images_router,  # requires heavy image deps
+    images_router,
     moderations_router,
     organization_router,
     projects_router,

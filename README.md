@@ -1,8 +1,34 @@
 # llmmllab-api
 
-Python FastAPI inference service with OpenAI- and Anthropic-compatible endpoints, backed by `llama.cpp` (via a separate runner service) and LangGraph agent orchestration.
+Python FastAPI inference service with OpenAI- and Anthropic-compatible endpoints. Backed by a separate runner service that hosts:
 
-The Ollama-compatible router was removed; only the OpenAI (`/v1/chat/completions`, `/v1/embeddings`, ...) and Anthropic (`/v1/messages`) wire protocols are exposed.
+- **`llama.cpp`** — text completion + embeddings
+- **`stable-diffusion.cpp`** — text-to-image (`POST /v1/images/generations`)
+- **TRELLIS** — image-to-3D (`POST /v1/images/3d`)
+
+Plus LangGraph agent orchestration. The Ollama-compatible router was removed; only the OpenAI (`/v1/chat/completions`, `/v1/embeddings`, `/v1/images/generations`, …) and Anthropic (`/v1/messages`) wire protocols are exposed.
+
+### Image generation
+
+```bash
+curl http://localhost:8000/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"a teacup with steam","model":"qwen-image-2512","size":"1024x1024"}'
+# -> {"created": ..., "data": [{"b64_json": "iVBORw0K..."}], "output_format": "png"}
+```
+
+The `model` field is forwarded to the runner; any model registered as `provider: stable_diffusion_cpp` is eligible. Default sampling parameters (40 steps, cfg 2.5, sampler `euler`) are tuned for Qwen-Image-2512 Q4_K_M; override in the runner's `.models.yaml` to target SDXL/SD3.
+
+### Image-to-3D
+
+```bash
+curl http://localhost:8000/v1/images/3d \
+  -H "Content-Type: application/json" \
+  -d '{"image_b64":"<base64 PNG>","formats":["mesh","gaussian"]}'
+# -> {"id":"abc123","elapsed_sec":48.2,"mesh_path":"/data/sd-out/3d/abc123.glb", ...}
+```
+
+Backed by TRELLIS in the runner. Runs synchronously and can take minutes per image — clients should set long HTTP timeouts.
 
 ## Quick Start
 

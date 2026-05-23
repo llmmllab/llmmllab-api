@@ -4,9 +4,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-FastAPI inference service with OpenAI- and Anthropic-compatible endpoints. Backed by `llama.cpp` (local, via a separate runner service), Flux (image generation), and LangGraph agent orchestration. Python 3.12+, managed via `uv`.
+FastAPI inference service with OpenAI- and Anthropic-compatible endpoints. Backed by a runner service that hosts `llama.cpp` (text), `stable-diffusion.cpp` (image generation, e.g. Qwen-Image-2512 GGUF), and an in-process TRELLIS pipeline (image-to-3D). LangGraph agent orchestration for chat. Python 3.12+, managed via `uv`.
 
 The Ollama-compatible router was removed; only OpenAI and Anthropic wire protocols are exposed.
+
+### Image / 3D endpoints
+
+| Endpoint | Backend | Notes |
+|----------|---------|-------|
+| `POST /v1/images/generations` | runner sd-server (stable-diffusion.cpp) | OpenAI-compatible `CreateImageRequest`. Returns `b64_json`. |
+| `POST /v1/images/3d` | runner pipeline `img23d` (TRELLIS) | Returns `mesh_path` (`.glb`) and/or `gaussian_path` (`.ply`). Long-running. |
+
+`services/image_service.py` is the single bridge: `generate_image` acquires a runner server and hits `/sdapi/v1/txt2img`; `generate_3d` hits `/v1/pipelines/img23d/run` (no server acquisition, the pipeline is in-process on the runner). Tests live in `test/unit/test_image_service.py` and `test/unit/test_images_router.py`.
 
 ## Commands
 
