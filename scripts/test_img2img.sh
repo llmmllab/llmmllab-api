@@ -51,7 +51,7 @@ echo "  denoising_strength = $DENOISE"
 
 curl -sS -X POST "$API_BASE/v1/images/edits" \
     -H "Content-Type: application/json" \
-    "${AUTH_HEADER[@]}" \
+    "${AUTH_HEADER[@]+"${AUTH_HEADER[@]}"}" \
     --max-time 900 \
     -d "$(jq -n \
         --arg prompt "$PROMPT" \

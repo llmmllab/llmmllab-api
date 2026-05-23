@@ -37,7 +37,7 @@ echo "  size   = $SIZE"
 
 curl -sS -X POST "$API_BASE/v1/images/generations" \
     -H "Content-Type: application/json" \
-    "${AUTH_HEADER[@]}" \
+    "${AUTH_HEADER[@]+"${AUTH_HEADER[@]}"}" \
     -d "$(jq -n \
         --arg prompt "$PROMPT" \
         --arg model "$MODEL" \

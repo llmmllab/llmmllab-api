@@ -55,7 +55,7 @@ echo "  (this can take minutes; TRELLIS doesn't stream)"
 
 curl -sS -X POST "$API_BASE/v1/images/3d" \
     -H "Content-Type: application/json" \
-    "${AUTH_HEADER[@]}" \
+    "${AUTH_HEADER[@]+"${AUTH_HEADER[@]}"}" \
     --max-time 1200 \
     -d "$(jq -n \
         --arg img "$B64_IN" \
@@ -92,7 +92,7 @@ download_url() {
     fname=$(basename "$rel_url")
     local out_file="$OUT_DIR/$fname"
     echo "  ↓ GET $API_BASE$rel_url"
-    curl -sSL "${AUTH_HEADER[@]}" "$API_BASE$rel_url" -o "$out_file"
+    curl -sSL "${AUTH_HEADER[@]+"${AUTH_HEADER[@]}"}" "$API_BASE$rel_url" -o "$out_file"
     echo "    → $out_file ($(wc -c < "$out_file") bytes)"
 }
 
