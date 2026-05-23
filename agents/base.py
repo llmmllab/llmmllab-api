@@ -37,7 +37,9 @@ from utils.message_conversion import (
     extract_text_from_message,
 )
 from utils.grammar_generator import parse_structured_output
-from utils.token_estimation import estimate_tokens, estimate_message_tokens
+# services.token_counter is imported lazily inside ``_trim_messages_to_context``
+# to avoid a module-load cycle: services.token_counter → services.runner_client
+# → graph.* → agents.chat → agents.base.  The trim path is the only consumer.
 
 asyncio_logger = logging.getLogger("asyncio")
 # Set the logging level to WARNING or higher (e.g., ERROR, CRITICAL)
@@ -296,7 +298,25 @@ The current date is {current_date}."""
 
         return system_prompt, convo
 
-    def _trim_messages_to_context(
+    def _resolve_runner_base_url(self) -> Optional[str]:
+        """Pull the runner base URL off the LangChain ChatOpenAI we wrap.
+
+        ChatOpenAI exposes the configured endpoint as ``openai_api_base``
+        (set from the ``base_url=`` constructor arg in
+        ``graph/workflows/base.py``).  Reaching through ``self.model``
+        keeps us decoupled from the workflow plumbing — every agent
+        already has its chat model.
+        """
+        model = getattr(self, "model", None)
+        if model is None:
+            return None
+        for attr in ("openai_api_base", "base_url", "_base_url"):
+            value = getattr(model, attr, None)
+            if value:
+                return str(value)
+        return None
+
+    async def _trim_messages_to_context(
         self, messages: List[Message], system_prompt: str
     ) -> List[Message]:
         """
@@ -306,28 +326,57 @@ The current date is {current_date}."""
         the combined system prompt + conversation stays under the context limit.
         Leaves a 10% headroom for the model's response tokens.
 
-        Args:
-            messages: Conversation messages (without system messages)
-            system_prompt: The system prompt text
-
-        Returns:
-            Trimmed message list that fits within context window
+        Counts use llama.cpp's ``/tokenize`` endpoint via the runner proxy —
+        the previous ``len // 3`` heuristic over-counted dense JSON / tool
+        payloads by ~2× and triggered false context-overflow trims under
+        claude-cli traffic.  If the tokenizer call fails (network blip,
+        runner unreachable) we skip the trim and let llama-server itself
+        decide whether the prompt fits — its own context guard will refuse
+        a request that genuinely doesn't fit.
         """
         if not self.num_ctx or self.num_ctx <= 0:
+            return messages
+
+        # Lazy import — see the note next to the token_counter import line.
+        from services.token_counter import count_tokens, count_message_tokens
+
+        base_url = self._resolve_runner_base_url()
+        if not base_url:
+            # No runner handle threaded through — defer to llama-server's
+            # own context guard rather than fall back to estimates.
+            self.logger.debug(
+                "No base_url on chat model; skipping pre-trim",
+                message_count=len(messages),
+            )
             return messages
 
         # Reserve 10% of context for the model's response
         headroom_ratio = 0.10
         max_input_tokens = int(self.num_ctx * (1 - headroom_ratio))
 
-        # Estimate system prompt tokens
-        system_tokens = estimate_tokens(system_prompt)
+        # Real token count from llama.cpp's tokenizer
+        system_tokens = await count_tokens(system_prompt, base_url=base_url)
+        if system_tokens is None:
+            self.logger.warning(
+                "Tokenizer unavailable; skipping pre-trim (llama-server will guard)",
+                num_ctx=self.num_ctx,
+                message_count=len(messages),
+            )
+            return messages
 
-        # Calculate total conversation tokens
+        per_message_tokens: List[int] = []
         total_tokens = system_tokens
-        per_message_tokens = []
         for msg in messages:
-            msg_tokens = estimate_message_tokens(msg)
+            msg_tokens = await count_message_tokens(msg, base_url=base_url)
+            if msg_tokens is None:
+                # Per-message tokenize failed mid-stream — abandon proactive
+                # trim and let llama-server's own guard handle it.
+                self.logger.warning(
+                    "Per-message tokenize failed; skipping pre-trim",
+                    num_ctx=self.num_ctx,
+                    message_count=len(messages),
+                )
+                return messages
             per_message_tokens.append(msg_tokens)
             total_tokens += msg_tokens
 
@@ -427,8 +476,11 @@ The current date is {current_date}."""
                 self.logger.error("🚨 Agent is None after _get_or_create_agent call!")
                 raise ValueError("Agent creation failed - agent is None")
 
-            # Trim conversation to fit within context window before sending
-            convo = self._trim_messages_to_context(convo, system_prompt)
+            # Trim conversation to fit within context window before sending.
+            # Uses llama.cpp's /tokenize endpoint for exact counts; skips the
+            # trim entirely if the tokenizer call fails (llama-server's own
+            # guard catches genuine overflows).
+            convo = await self._trim_messages_to_context(convo, system_prompt)
 
             # Convert messages to LangChain format
             normalized_messages = messages_to_lc_messages(convo)
@@ -596,8 +648,11 @@ The current date is {current_date}."""
                 self.logger.error("🚨 Agent is None after _get_or_create_agent call!")
                 raise ValueError("Agent creation failed - agent is None")
 
-            # Trim conversation to fit within context window before sending
-            convo = self._trim_messages_to_context(convo, system_prompt)
+            # Trim conversation to fit within context window before sending.
+            # Uses llama.cpp's /tokenize endpoint for exact counts; skips the
+            # trim entirely if the tokenizer call fails (llama-server's own
+            # guard catches genuine overflows).
+            convo = await self._trim_messages_to_context(convo, system_prompt)
 
             # Convert messages to LangChain format
             normalized_messages = messages_to_lc_messages(convo)
