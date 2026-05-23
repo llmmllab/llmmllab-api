@@ -13,7 +13,13 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from routers.openai.images import router
-from services.image_service import GeneratedImage, ImageServiceError, ImageTo3DResult, TxtToImageResult
+from services.image_service import (
+    GeneratedImage,
+    ImageServiceError,
+    ImageTo3DResult,
+    ImageToImageResult,
+    TxtToImageResult,
+)
 
 
 @pytest.fixture
@@ -104,6 +110,83 @@ def test_generations_upstream_failure_returns_502(client: TestClient):
 
 
 # ---------------------------------------------------------------------------
+# /images/edits  (img2img / instruction edit)
+# ---------------------------------------------------------------------------
+
+
+def test_edits_returns_b64_json(client: TestClient):
+    fake_b64 = base64.b64encode(b"edited-png").decode("ascii")
+    fake = ImageToImageResult(
+        images=[GeneratedImage(b64_png=fake_b64)],
+        created=1700000123, parameters={},
+    )
+    with patch(
+        "routers.openai.images.edit_image", new=AsyncMock(return_value=fake)
+    ):
+        response = client.post(
+            "/images/edits",
+            json={
+                "prompt": "make it autumn",
+                "image": "aGVsbG8=",
+                "model": "qwen-image-edit-2511",
+                "denoising_strength": 0.75,
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["data"][0]["b64_json"] == fake_b64
+    assert body["created"] == 1700000123
+
+
+def test_edits_passes_denoising_strength(client: TestClient):
+    fake = ImageToImageResult(
+        images=[GeneratedImage(b64_png="x")], created=1, parameters={},
+    )
+    mock = AsyncMock(return_value=fake)
+    with patch("routers.openai.images.edit_image", new=mock):
+        client.post(
+            "/images/edits",
+            json={
+                "prompt": "p",
+                "image": "aGVsbG8=",
+                "model": "m",
+                "denoising_strength": 0.5,
+            },
+        )
+
+    _, kwargs = mock.call_args
+    assert kwargs["denoising_strength"] == 0.5
+    assert kwargs["image_b64"] == "aGVsbG8="
+    assert kwargs["model_id"] == "m"
+
+
+def test_edits_rejects_out_of_range_denoising(client: TestClient):
+    response = client.post(
+        "/images/edits",
+        json={
+            "prompt": "p",
+            "image": "aGVsbG8=",
+            "model": "m",
+            "denoising_strength": 2.0,  # > 1.0
+        },
+    )
+    assert response.status_code == 422
+
+
+def test_edits_upstream_failure_returns_502(client: TestClient):
+    with patch(
+        "routers.openai.images.edit_image",
+        new=AsyncMock(side_effect=ImageServiceError("boom", status_code=500)),
+    ):
+        response = client.post(
+            "/images/edits",
+            json={"prompt": "p", "image": "aGVsbG8=", "model": "m"},
+        )
+    assert response.status_code == 502
+
+
+# ---------------------------------------------------------------------------
 # /images/3d
 # ---------------------------------------------------------------------------
 
@@ -127,8 +210,31 @@ def test_image_to_3d_returns_paths(client: TestClient):
     assert body["id"] == "abc123"
     assert body["mesh_path"].endswith(".glb")
     assert body["gaussian_path"] is None
+    # Download URL is derived from the basename of mesh_path so clients
+    # don't need pod access to fetch the artefact.
+    assert body["mesh_url"] == "/v1/images/3d/abc123.glb"
+    assert body["gaussian_url"] is None
     assert body["preview_b64"] == "cHJldmlldw=="
     assert body["elapsed_sec"] == 15.4
+
+
+def test_image_to_3d_returns_both_urls_when_both_formats_requested(client: TestClient):
+    fake = ImageTo3DResult(
+        id="abc123",
+        elapsed_sec=20.0,
+        mesh_path="/data/sd-out/3d/abc123.glb",
+        gaussian_path="/data/sd-out/3d/abc123.ply",
+        preview_b64=None,
+    )
+    with patch("routers.openai.images.generate_3d", new=AsyncMock(return_value=fake)):
+        response = client.post(
+            "/images/3d",
+            json={"image_b64": "aGVsbG8=", "formats": ["mesh", "gaussian"]},
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["mesh_url"] == "/v1/images/3d/abc123.glb"
+    assert body["gaussian_url"] == "/v1/images/3d/abc123.ply"
 
 
 def test_image_to_3d_503_when_pipeline_missing(client: TestClient):
@@ -152,3 +258,63 @@ def test_image_to_3d_other_failures_are_502(client: TestClient):
             "/images/3d", json={"image_b64": "aGVsbG8="}
         )
     assert response.status_code == 502
+
+
+# ---------------------------------------------------------------------------
+# GET /images/3d/{filename} — proxy download
+# ---------------------------------------------------------------------------
+
+
+def _make_stream_artifact_mock(content: bytes, media_type: str = "model/gltf-binary"):
+    """Build an AsyncMock matching ``stream_3d_artifact``'s return shape."""
+
+    async def _iter():
+        yield content
+
+    async def _stream_3d_artifact(filename, **kwargs):
+        return media_type, _iter()
+
+    return AsyncMock(side_effect=_stream_3d_artifact)
+
+
+def test_download_3d_streams_glb_through(client: TestClient):
+    with patch(
+        "routers.openai.images.stream_3d_artifact",
+        new=_make_stream_artifact_mock(b"glb-bytes"),
+    ):
+        response = client.get("/images/3d/abc123.glb")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("model/gltf-binary")
+    assert "abc123.glb" in response.headers["content-disposition"]
+    assert response.content == b"glb-bytes"
+
+
+def test_download_3d_404_when_artifact_missing(client: TestClient):
+    with patch(
+        "routers.openai.images.stream_3d_artifact",
+        new=AsyncMock(side_effect=ImageServiceError("not here", status_code=404)),
+    ):
+        response = client.get("/images/3d/missing.glb")
+    assert response.status_code == 404
+
+
+def test_download_3d_400_when_filename_rejected(client: TestClient):
+    # Use a simple filename (no path separators after URL decode) so the
+    # FastAPI router matches the route — the rejection comes from the
+    # service layer's regex check, not from path matching.
+    with patch(
+        "routers.openai.images.stream_3d_artifact",
+        new=AsyncMock(side_effect=ImageServiceError("bad name", status_code=400)),
+    ):
+        response = client.get("/images/3d/bad.exe")
+    assert response.status_code == 400
+
+
+def test_download_3d_503_when_no_runner(client: TestClient):
+    with patch(
+        "routers.openai.images.stream_3d_artifact",
+        new=AsyncMock(side_effect=ImageServiceError("no runner", status_code=503)),
+    ):
+        response = client.get("/images/3d/abc.glb")
+    assert response.status_code == 503

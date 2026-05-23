@@ -16,6 +16,7 @@ import pytest
 
 from services.image_service import (
     ImageServiceError,
+    edit_image,
     generate_3d,
     generate_image,
 )
@@ -122,6 +123,103 @@ def test_generate_image_rejects_empty_response_payload():
     assert "no images" in str(exc.value).lower()
 
 
+def test_generate_image_resolves_defaults_from_model_parameters():
+    """When the caller omits steps/cfg/etc., values from the model's
+    YAML ``parameters`` block must flow into the request body."""
+    client = _make_runner_client_for_txt2img({"images": ["b64"], "parameters": {}})
+
+    # Stub list_models so _resolve_sd_defaults reads model-level defaults.
+    fake_model = MagicMock()
+    fake_model.id = "qwen-image-2512"
+    fake_model.parameters = MagicMock(
+        steps=40,
+        cfg_scale=2.5,
+        sampler_name="euler",
+        width=1024,
+        height=1024,
+        denoising_strength=None,
+    )
+    client.list_models = AsyncMock(return_value=[fake_model])
+
+    _run(generate_image(
+        prompt="hi", model_id="qwen-image-2512", client=client,
+    ))
+
+    _, kwargs = client.proxy_request.call_args
+    payload = kwargs["json"]
+    assert payload["steps"] == 40
+    assert payload["cfg_scale"] == 2.5
+    assert payload["sampler_name"] == "euler"
+    assert payload["width"] == 1024
+    assert payload["height"] == 1024
+
+
+def test_generate_image_caller_kwargs_win_over_model_defaults():
+    """Explicit kwargs from the router must override model-level defaults."""
+    client = _make_runner_client_for_txt2img({"images": ["b64"], "parameters": {}})
+
+    fake_model = MagicMock()
+    fake_model.id = "qwen-image-2512"
+    fake_model.parameters = MagicMock(steps=40, cfg_scale=2.5, sampler_name="euler", width=1024, height=1024, denoising_strength=None)
+    client.list_models = AsyncMock(return_value=[fake_model])
+
+    _run(generate_image(
+        prompt="hi", model_id="qwen-image-2512",
+        steps=20, cfg_scale=8.0,  # caller overrides
+        client=client,
+    ))
+
+    _, kwargs = client.proxy_request.call_args
+    payload = kwargs["json"]
+    assert payload["steps"] == 20  # caller wins
+    assert payload["cfg_scale"] == 8.0  # caller wins
+    assert payload["sampler_name"] == "euler"  # model default flows through
+
+
+# ---------------------------------------------------------------------------
+# img2img
+# ---------------------------------------------------------------------------
+
+
+def test_edit_image_targets_sdapi_img2img_with_init_images():
+    fake_b64 = base64.b64encode(b"edited-png").decode("ascii")
+    client = _make_runner_client_for_txt2img(
+        {"images": [fake_b64], "parameters": {}}
+    )
+
+    result = _run(edit_image(
+        prompt="make it autumn",
+        image_b64="aGVsbG8=",
+        model_id="qwen-image-edit-2511",
+        denoising_strength=0.8,
+        client=client,
+    ))
+
+    assert result.images[0].b64_png == fake_b64
+
+    _, kwargs = client.proxy_request.call_args
+    assert kwargs["path"] == "sdapi/v1/img2img"
+    payload = kwargs["json"]
+    assert payload["prompt"] == "make it autumn"
+    assert payload["init_images"] == ["aGVsbG8="]
+    assert payload["denoising_strength"] == 0.8
+
+
+def test_edit_image_releases_server_on_failure():
+    client = _make_runner_client_for_txt2img({})
+    client.proxy_request = AsyncMock(
+        return_value=_mock_response(500, text="boom")
+    )
+
+    with pytest.raises(ImageServiceError) as exc:
+        _run(edit_image(
+            prompt="x", image_b64="aGVsbG8=",
+            model_id="qwen-image-edit-2511", client=client,
+        ))
+    assert exc.value.status_code == 500
+    client.release_server.assert_awaited_once()
+
+
 # ---------------------------------------------------------------------------
 # img23d
 # ---------------------------------------------------------------------------
@@ -202,3 +300,130 @@ def test_generate_3d_raises_when_no_runner_configured():
 
     assert exc.value.status_code == 503
     assert "No runner" in str(exc.value)
+
+
+def test_generate_3d_result_records_runner_endpoint():
+    """The runner that ran the generation must be remembered so the
+    later download streams from the same pod (the file only exists
+    there)."""
+    client = _make_runner_client_for_img23d({"id": "abc", "elapsed_sec": 0.1})
+
+    result = _run(generate_3d(image_b64="aGVsbG8=", client=client))
+
+    assert result.runner_endpoint == "http://runner-1:8000"
+
+
+# ---------------------------------------------------------------------------
+# stream_3d_artifact
+# ---------------------------------------------------------------------------
+
+
+class _AsyncCM:
+    """Tiny async-context-manager wrapper around an existing mock response."""
+    def __init__(self, response):
+        self.response = response
+
+    async def __aenter__(self):
+        return self.response
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def _make_runner_client_for_stream(
+    head_status: int = 200,
+    get_status: int = 200,
+    chunks=(b"chunk-1", b"chunk-2"),
+):
+    from services.image_service import stream_3d_artifact  # noqa: F401
+
+    client = MagicMock()
+    client._endpoints = ["http://runner-1:8000"]
+    http = MagicMock()
+    head_resp = MagicMock()
+    head_resp.status_code = head_status
+    http.request = AsyncMock(return_value=head_resp)
+
+    stream_resp = MagicMock()
+    stream_resp.status_code = get_status
+
+    async def _aiter_bytes():
+        for c in chunks:
+            yield c
+
+    stream_resp.aiter_bytes = MagicMock(side_effect=_aiter_bytes)
+    http.stream = MagicMock(return_value=_AsyncCM(stream_resp))
+    client._get_client = MagicMock(return_value=http)
+    return client
+
+
+def test_stream_3d_artifact_streams_glb_with_correct_media_type():
+    from services.image_service import stream_3d_artifact
+
+    client = _make_runner_client_for_stream(chunks=(b"glb-bytes",))
+
+    async def _drain():
+        mt, body = await stream_3d_artifact("abc123.glb", client=client)
+        out = b""
+        async for chunk in body:
+            out += chunk
+        return mt, out
+
+    media_type, body = _run(_drain())
+    assert media_type == "model/gltf-binary"
+    assert body == b"glb-bytes"
+
+
+def test_stream_3d_artifact_rejects_invalid_filename():
+    from services.image_service import stream_3d_artifact
+
+    client = _make_runner_client_for_stream()
+
+    for bad in ["../etc/passwd", "abc.exe", "abc/def.glb", "no-extension"]:
+        with pytest.raises(ImageServiceError) as exc:
+            _run(stream_3d_artifact(bad, client=client))
+        assert exc.value.status_code == 400, f"expected 400 for {bad!r}"
+
+
+def test_stream_3d_artifact_404_when_runner_says_not_found():
+    from services.image_service import stream_3d_artifact
+
+    client = _make_runner_client_for_stream(head_status=404)
+
+    with pytest.raises(ImageServiceError) as exc:
+        _run(stream_3d_artifact("abc123.glb", client=client))
+
+    assert exc.value.status_code == 404
+
+
+def test_stream_3d_artifact_raises_when_no_runner_configured():
+    from services.image_service import stream_3d_artifact
+
+    client = MagicMock()
+    client._endpoints = []
+
+    with pytest.raises(ImageServiceError) as exc:
+        _run(stream_3d_artifact("abc123.glb", client=client))
+
+    assert exc.value.status_code == 503
+
+
+def test_stream_3d_artifact_targets_pipeline_files_endpoint():
+    from services.image_service import stream_3d_artifact
+
+    client = _make_runner_client_for_stream()
+
+    async def _drain():
+        _, body = await stream_3d_artifact("abc.glb", client=client)
+        async for _chunk in body:
+            pass
+
+    _run(_drain())
+
+    http = client._get_client.return_value
+    # HEAD first
+    head_args, _ = http.request.call_args
+    assert head_args == ("HEAD", "http://runner-1:8000/v1/pipelines/img23d/files/abc.glb")
+    # Then streaming GET
+    stream_args, _ = http.stream.call_args
+    assert stream_args == ("GET", "http://runner-1:8000/v1/pipelines/img23d/files/abc.glb")

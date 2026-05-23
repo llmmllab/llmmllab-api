@@ -32,6 +32,7 @@ import time
 from typing import List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from models.openai.create_image_request import CreateImageRequest
@@ -39,8 +40,10 @@ from models.openai.image import Image
 from models.openai.images_response import ImagesResponse
 from services.image_service import (
     ImageServiceError,
+    edit_image,
     generate_3d,
     generate_image,
+    stream_3d_artifact,
 )
 
 logger = logging.getLogger(__name__)
@@ -63,10 +66,59 @@ def _parse_size(size: Optional[str]) -> Tuple[int, int]:
     return int(m.group(1)), int(m.group(2))
 
 
+class CreateImageEditRequest(BaseModel):
+    """Img2img / instruction-edit request body.
+
+    Departs from OpenAI's multipart/form-data ``image-edits`` shape on
+    purpose — every other image endpoint in this api is JSON with
+    base64 inline, and matching that style keeps the test scripts
+    consistent.  ``image`` accepts a base64-encoded PNG or JPEG.
+    """
+
+    prompt: str = Field(..., description="Edit instruction / new prompt")
+    image: str = Field(..., description="Base64-encoded source image (PNG or JPEG)")
+    model: str = Field(..., description="Runner model_id (e.g. 'qwen-image-edit-2511')")
+    negative_prompt: Optional[str] = Field(None)
+    size: Optional[str] = Field("1024x1024", description="WIDTHxHEIGHT")
+    denoising_strength: Optional[float] = Field(
+        0.75,
+        ge=0.0,
+        le=1.0,
+        description="0.0 reproduces input, 1.0 ignores it. 0.65–0.8 is the sweet spot for prompt-guided edits.",
+    )
+    seed: Optional[int] = Field(-1, description="-1 for random")
+
+
 @router.post("/edits")
-async def createImageEdit() -> ImagesResponse:
-    """Operation ID: createImageEdit"""
-    raise NotImplementedError("Endpoint not yet implemented")
+async def createImageEdit(body: CreateImageEditRequest) -> ImagesResponse:
+    """Edit an image with stable-diffusion.cpp's img2img endpoint.
+
+    Backed by Qwen-Image-Edit-2511-GGUF when ``model=qwen-image-edit-2511``;
+    any sd-server model registered in the runner's ``.models.yaml`` with
+    ``task: ImageToImage`` is eligible.
+    """
+    width, height = _parse_size(body.size)
+
+    try:
+        result = await edit_image(
+            prompt=body.prompt,
+            image_b64=body.image,
+            model_id=body.model,
+            negative_prompt=body.negative_prompt,
+            denoising_strength=body.denoising_strength or 0.75,
+            width=width,
+            height=height,
+            seed=body.seed if body.seed is not None else -1,
+        )
+    except ImageServiceError as e:
+        logger.error("Image edit failed: %s", e)
+        raise HTTPException(status_code=502, detail=str(e)) from e
+
+    return ImagesResponse(
+        created=result.created,
+        data=[Image(b64_json=img.b64_png) for img in result.images],
+        output_format="png",
+    )
 
 
 @router.post("/generations")
@@ -131,8 +183,10 @@ class CreateImageTo3DResponse(BaseModel):
     id: str = Field(..., description="Generation ID — also the stem of the persisted file(s)")
     created: int = Field(..., description="Unix timestamp (seconds)")
     elapsed_sec: float = Field(..., description="Server-reported wall-clock time")
-    mesh_path: Optional[str] = Field(None, description="Path to the .glb mesh on the runner filesystem")
-    gaussian_path: Optional[str] = Field(None, description="Path to the .ply gaussian-splat on the runner filesystem")
+    mesh_path: Optional[str] = Field(None, description="Path to the .glb mesh on the runner filesystem (debug-only — use mesh_url to download)")
+    gaussian_path: Optional[str] = Field(None, description="Path to the .ply gaussian-splat on the runner filesystem (debug-only — use gaussian_url to download)")
+    mesh_url: Optional[str] = Field(None, description="Relative URL to download the .glb via /v1/images/3d/{id}.glb")
+    gaussian_url: Optional[str] = Field(None, description="Relative URL to download the .ply via /v1/images/3d/{id}.ply")
     preview_b64: Optional[str] = Field(None, description="Optional rendered preview frame (base64 PNG)")
 
 
@@ -161,11 +215,57 @@ async def createImageTo3D(body: CreateImageTo3DRequest) -> CreateImageTo3DRespon
             raise HTTPException(status_code=503, detail=str(e)) from e
         raise HTTPException(status_code=502, detail=str(e)) from e
 
+    # Build relative download URLs so clients don't need pod access.  We
+    # derive them from the artefact filename (basename of mesh_path /
+    # gaussian_path) rather than rebuilding from result.id because that
+    # leaves a single source of truth — whatever the pipeline named the
+    # file is what we serve.
+    import os as _os
+
+    mesh_url = None
+    if result.mesh_path:
+        mesh_url = f"/v1/images/3d/{_os.path.basename(result.mesh_path)}"
+    gaussian_url = None
+    if result.gaussian_path:
+        gaussian_url = f"/v1/images/3d/{_os.path.basename(result.gaussian_path)}"
+
     return CreateImageTo3DResponse(
         id=result.id,
         created=int(time.time()),
         elapsed_sec=result.elapsed_sec,
         mesh_path=result.mesh_path,
         gaussian_path=result.gaussian_path,
+        mesh_url=mesh_url,
+        gaussian_url=gaussian_url,
         preview_b64=result.preview_b64,
+    )
+
+
+@router.get("/3d/{filename}")
+async def downloadImageTo3D(filename: str):
+    """Download a generated 3D artefact (mesh or gaussian-splat) by filename.
+
+    The :class:`CreateImageTo3DResponse` returned by ``POST /images/3d``
+    includes ``mesh_url`` and ``gaussian_url`` fields pointing here — use
+    those rather than reconstructing the path manually.
+
+    Streams the file from whichever runner ran the generation.  Returns
+    ``model/gltf-binary`` for ``.glb``, ``image/png`` for ``.png``, and
+    ``application/octet-stream`` for ``.ply``.
+    """
+    try:
+        media_type, body = await stream_3d_artifact(filename)
+    except ImageServiceError as e:
+        if e.status_code == 404:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+        if e.status_code == 400:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        if e.status_code == 503:
+            raise HTTPException(status_code=503, detail=str(e)) from e
+        raise HTTPException(status_code=502, detail=str(e)) from e
+
+    return StreamingResponse(
+        body,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )

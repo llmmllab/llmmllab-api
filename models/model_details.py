@@ -50,4 +50,29 @@ class ModelDetails(BaseModel):
     clip_model_size: Annotated[Optional[int], Field(default=None, description="Size of the CLIP model in bytes, if applicable")] = None
     """Size of the CLIP model in bytes, if applicable"""
 
+    # ---------------------------------------------------------------
+    # stable-diffusion.cpp specific paths.
+    #
+    # SD models — unlike LLMs — typically ship as multiple files:
+    #   * diffusion_model_path:  the main UNet/DiT (.gguf)
+    #   * vae_path:              VAE weights (.safetensors)
+    #   * text_encoder_path:     CLIP-L / T5 / Qwen-VL etc. text encoder
+    #   * clip_g_path:           secondary text encoder (SDXL / SD3)
+    #
+    # All four are optional; only the ones the chosen model needs are
+    # forwarded to sd-server's CLI as --diffusion-model, --vae, --llm
+    # (or --clip_l / --t5xxl based on which slot is populated), and
+    # --clip_g.
+    # ---------------------------------------------------------------
+    diffusion_model_path: Annotated[Optional[str], Field(default=None, description="Path to the diffusion model (.gguf) for stable-diffusion.cpp")] = None
+    """Path to the diffusion model file for stable-diffusion.cpp"""
+    vae_path: Annotated[Optional[str], Field(default=None, description="Path to the VAE weights for stable-diffusion.cpp")] = None
+    """Path to the VAE file for stable-diffusion.cpp"""
+    text_encoder_path: Annotated[Optional[str], Field(default=None, description="Path to the text encoder (LLM/CLIP-L/T5XXL) for stable-diffusion.cpp")] = None
+    """Path to the text encoder file"""
+    text_encoder_kind: Annotated[Optional[Literal["llm", "clip_l", "t5xxl"]], Field(default="llm", description="Which sd-server flag receives text_encoder_path (--llm/--clip_l/--t5xxl)")] = "llm"
+    """Determines which sd-server flag receives the text encoder"""
+    clip_g_path: Annotated[Optional[str], Field(default=None, description="Secondary CLIP-G text encoder (for SDXL/SD3)")] = None
+    """Secondary CLIP-G text encoder path"""
+
     model_config = ConfigDict(extra="ignore")

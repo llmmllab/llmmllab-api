@@ -13,9 +13,11 @@ The Ollama-compatible router was removed; only OpenAI and Anthropic wire protoco
 | Endpoint | Backend | Notes |
 |----------|---------|-------|
 | `POST /v1/images/generations` | runner sd-server (stable-diffusion.cpp) | OpenAI-compatible `CreateImageRequest`. Returns `b64_json`. |
-| `POST /v1/images/3d` | runner pipeline `img23d` (TRELLIS) | Returns `mesh_path` (`.glb`) and/or `gaussian_path` (`.ply`). Long-running. |
+| `POST /v1/images/edits` | runner sd-server (img2img, e.g. Qwen-Image-Edit-2511) | Custom JSON body (`prompt`, `image` base64, `denoising_strength`). Returns `b64_json`. |
+| `POST /v1/images/3d` | runner pipeline `img23d` (TRELLIS) | Returns `mesh_path` (`.glb`) and/or `gaussian_path` (`.ply`) plus `mesh_url`/`gaussian_url` for download. Long-running. |
+| `GET  /v1/images/3d/{filename}` | runner pipeline `img23d/files/{filename}` | Streams `.glb` / `.ply` / `.png` back through the api so clients don't need pod access. |
 
-`services/image_service.py` is the single bridge: `generate_image` acquires a runner server and hits `/sdapi/v1/txt2img`; `generate_3d` hits `/v1/pipelines/img23d/run` (no server acquisition, the pipeline is in-process on the runner). Tests live in `test/unit/test_image_service.py` and `test/unit/test_images_router.py`.
+`services/image_service.py` is the single bridge. `generate_image`, `edit_image` acquire a runner server (text/image model handled by `SDCppServerManager`) and hit `/sdapi/v1/txt2img` or `/sdapi/v1/img2img`. `generate_3d` hits `/v1/pipelines/img23d/run` (no server acquisition, the pipeline is in-process on the runner). `stream_3d_artifact` proxies `GET /v1/pipelines/img23d/files/{filename}` for downloads, with a path-traversal-safe regex on filename. Tests live in `test/unit/test_image_service.py` and `test/unit/test_images_router.py`. CLI test scripts under `scripts/` (see `scripts/README.md`).
 
 ## Commands
 

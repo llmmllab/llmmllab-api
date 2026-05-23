@@ -157,6 +157,14 @@ class ModelParameters(BaseModel):
         ),
     ] = "medium"
     """Reasoning effort level for chain-of-thought processing"""
+    reasoning_budget: Annotated[
+        Optional[int],
+        Field(
+            default=None,
+            description="Maximum tokens to spend on reasoning (chain-of-thought) before generating final answer",
+        ),
+    ] = None
+    """Maximum tokens to spend on reasoning (chain-of-thought) before generating final answer"""
     flash_attention: Annotated[
         Optional[bool],
         Field(
@@ -184,14 +192,16 @@ class ModelParameters(BaseModel):
         ),
     ] = 0.5
     """Minimum fraction of num_ctx that llama.cpp --fit is allowed to auto-reduce to (0.0-1.0). Default 0.5 means context can shrink to 50% of requested."""
-    reasoning_budget: Annotated[
-        Optional[int],
+    slot_prompt_similarity: Annotated[
+        Optional[float],
         Field(
             default=None,
-            description="Maximum tokens to spend on reasoning (chain-of-thought) before generating final answer",
+            description="llama.cpp --slot-prompt-similarity threshold (0.0-1.0). Set to 0 to disable LCP slot matching; set to 1.0 to require exact match. None uses llama.cpp default (0.10).",
+            ge=0.0,
+            le=1.0,
         ),
     ] = None
-    """Maximum tokens to spend on reasoning (chain-of-thought) before generating final answer"""
+    """llama.cpp --slot-prompt-similarity threshold (0.0-1.0). Set to 0 to disable LCP slot matching."""
     spec_type_mtp: Annotated[
         Optional[bool],
         Field(
@@ -218,5 +228,103 @@ class ModelParameters(BaseModel):
         ),
     ] = True
     """Use unified key-value cache format for improved performance and future compatibility."""
+
+    cache_reuse: Annotated[
+        Optional[int],
+        Field(
+            default=None,
+            description="Minimum chunk size (in tokens) that llama.cpp will attempt to reuse from "
+            "the KV cache via KV-shifting for near-prefix matches (llama.cpp --cache-reuse, "
+            "request param n_cache_reuse). Requires prompt caching to be enabled. "
+            "0 disables reuse; a reasonable default is 256.",
+            ge=0,
+        ),
+    ] = None
+    """Minimum chunk size for KV-shifting prefix reuse (llama.cpp --cache-reuse). Default 256 when unset."""
+
+    cache_ram: Annotated[
+        Optional[int],
+        Field(
+            default=None,
+            description="Host-memory (system RAM) prompt cache size in MiB (llama.cpp --cache-ram). "
+            "When set, idle slot KV data is cached in system RAM as a secondary tier "
+            "behind VRAM, enabling --cache-idle-slots for automatic save/restore of idle slots. "
+            "Default: 8192 (8 GiB). Set to 0 to disable, -1 for no limit.",
+        ),
+    ] = None
+    """Host-memory prompt cache size in MiB. Active KV always lives in VRAM; this provides a RAM fallback for idle slots."""
+
+    # ------------------------------------------------------------------
+    # stable-diffusion.cpp / sd-server sampling defaults.
+    #
+    # These travel in the request body to ``/sdapi/v1/txt2img`` (or
+    # ``/sdapi/v1/img2img``) — they are NOT CLI flags on sd-server.
+    # The api reads them off ``model.parameters`` when the wire request
+    # omits the corresponding field, so YAML defines per-model defaults
+    # without forcing every caller to know them.
+    # ------------------------------------------------------------------
+    steps: Annotated[
+        Optional[int],
+        Field(
+            default=None,
+            description="Default diffusion sampling steps for SD models (sd-server `steps`). "
+            "Qwen-Image-2512 uses 40.",
+            ge=1,
+        ),
+    ] = None
+    """Default diffusion sampling steps for SD models."""
+
+    cfg_scale: Annotated[
+        Optional[float],
+        Field(
+            default=None,
+            description="Default classifier-free guidance scale (sd-server `cfg_scale`). "
+            "Qwen-Image-2512 uses 2.5; SDXL typically 7.0.",
+            ge=0.0,
+        ),
+    ] = None
+    """Default classifier-free guidance scale for SD models."""
+
+    sampler_name: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="Default sampler for SD models (sd-server `sampler_name`). "
+            "Qwen-Image-2512 uses `euler`.",
+        ),
+    ] = None
+    """Default sampler for SD models."""
+
+    width: Annotated[
+        Optional[int],
+        Field(
+            default=None,
+            description="Default output width (sd-server `width`).",
+            ge=64,
+        ),
+    ] = None
+    """Default output image width in pixels."""
+
+    height: Annotated[
+        Optional[int],
+        Field(
+            default=None,
+            description="Default output height (sd-server `height`).",
+            ge=64,
+        ),
+    ] = None
+    """Default output image height in pixels."""
+
+    denoising_strength: Annotated[
+        Optional[float],
+        Field(
+            default=None,
+            description="Default denoising strength for img2img (sd-server `denoising_strength`, 0.0–1.0). "
+            "Only meaningful for ``task: ImageToImage`` models.",
+            ge=0.0,
+            le=1.0,
+        ),
+    ] = None
+    """Default denoising strength for img2img (sd-server)."""
 
     model_config = ConfigDict(extra="ignore")

@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+#
+# test_img2img.sh — exercise POST /v1/images/edits (Qwen-Image-Edit-2511).
+#
+# Usage:
+#   ./scripts/test_img2img.sh path/to/photo.png "make it autumn"
+#   ./scripts/test_img2img.sh path/to/photo.png "make it autumn" qwen-image-edit-2511 0.75
+#
+# Env overrides:
+#   API_BASE   default http://localhost:8000
+#   API_KEY    bearer token; omit for unauth dev endpoints
+#   OUT_DIR    where to drop the decoded PNG (default ./out)
+
+set -euo pipefail
+
+INPUT="${1:?path to input image required}"
+PROMPT="${2:?edit prompt required}"
+MODEL="${3:-qwen-image-edit-2511}"
+DENOISE="${4:-0.75}"
+
+API_BASE="${API_BASE:-http://localhost:8000}"
+OUT_DIR="${OUT_DIR:-./out}"
+mkdir -p "$OUT_DIR"
+
+if [[ ! -f "$INPUT" ]]; then
+    echo "✘ file not found: $INPUT" >&2
+    exit 1
+fi
+
+AUTH_HEADER=()
+if [[ -n "${API_KEY:-}" ]]; then
+    AUTH_HEADER=(-H "Authorization: Bearer $API_KEY")
+fi
+
+# base64 -w0 on linux, base64 with no wrapping on mac
+if base64 --help 2>&1 | grep -q -- '-w'; then
+    B64_IN=$(base64 -w0 "$INPUT")
+else
+    B64_IN=$(base64 < "$INPUT" | tr -d '\n')
+fi
+
+TS=$(date +%s)
+RESP_FILE="$OUT_DIR/img2img_${TS}.json"
+PNG_FILE="$OUT_DIR/img2img_${TS}.png"
+
+echo "→ POST $API_BASE/v1/images/edits"
+echo "  input              = $INPUT ($(wc -c < "$INPUT") bytes)"
+echo "  prompt             = $PROMPT"
+echo "  model              = $MODEL"
+echo "  denoising_strength = $DENOISE"
+
+curl -sS -X POST "$API_BASE/v1/images/edits" \
+    -H "Content-Type: application/json" \
+    "${AUTH_HEADER[@]}" \
+    --max-time 900 \
+    -d "$(jq -n \
+        --arg prompt "$PROMPT" \
+        --arg image "$B64_IN" \
+        --arg model "$MODEL" \
+        --argjson denoise "$DENOISE" \
+        '{prompt: $prompt, image: $image, model: $model, denoising_strength: $denoise}')" \
+    -o "$RESP_FILE"
+
+B64=$(jq -r '.data[0].b64_json // empty' "$RESP_FILE")
+if [[ -z "$B64" ]]; then
+    echo "✘ no b64_json in response:" >&2
+    cat "$RESP_FILE" >&2
+    exit 1
+fi
+
+echo "$B64" | base64 -d > "$PNG_FILE"
+
+echo "✓ saved $PNG_FILE ($(wc -c < "$PNG_FILE") bytes)"
+echo "  raw response: $RESP_FILE"

@@ -60,25 +60,71 @@ class TxtToImageResult:
     parameters: Dict[str, Any]  # echo of the sd-server parameter dict
 
 
+async def _resolve_sd_defaults(
+    cli: RunnerClient, model_id: str
+) -> Dict[str, Any]:
+    """Pull per-model SD defaults (steps, cfg_scale, sampler_name, …) off
+    the runner's model registry.
+
+    The runner exposes ``GET /v1/models`` which returns each entry's
+    full ``parameters`` block.  We map the SD-relevant fields back into
+    a flat dict that callers merge into their request body.  Returns an
+    empty dict on any failure — callers fall back to their hardcoded
+    defaults, so a transient runner blip doesn't break image generation.
+    """
+    try:
+        # ``list_models`` returns a flat ``List[Model]``-shaped dict per
+        # entry; we look up by id.  The cost is amortised across the
+        # generate_image call (one extra GET to a fast endpoint).
+        models = await cli.list_models()
+    except Exception:  # noqa: BLE001
+        return {}
+
+    target = None
+    for entry in models or []:
+        # Either Pydantic Model object or dict — handle both.
+        entry_id = getattr(entry, "id", None) if not isinstance(entry, dict) else entry.get("id")
+        if entry_id == model_id:
+            target = entry
+            break
+    if target is None:
+        return {}
+
+    params = getattr(target, "parameters", None) if not isinstance(target, dict) else target.get("parameters")
+    if params is None:
+        return {}
+
+    out: Dict[str, Any] = {}
+    for field in ("steps", "cfg_scale", "sampler_name", "width", "height", "denoising_strength"):
+        value = getattr(params, field, None) if not isinstance(params, dict) else params.get(field)
+        if value is not None:
+            out[field] = value
+    return out
+
+
 async def generate_image(
     *,
     prompt: str,
     model_id: str,
     negative_prompt: Optional[str] = None,
-    width: int = 1024,
-    height: int = 1024,
-    steps: int = 40,
-    cfg_scale: float = 2.5,
-    sampler_name: str = "euler",
+    width: Optional[int] = None,
+    height: Optional[int] = None,
+    steps: Optional[int] = None,
+    cfg_scale: Optional[float] = None,
+    sampler_name: Optional[str] = None,
     seed: int = -1,
     batch_size: int = 1,
     client: Optional[RunnerClient] = None,
 ) -> TxtToImageResult:
     """Run a text-to-image generation against the runner's sd-server.
 
-    The defaults match the Qwen-Image-2512 tutorial (Q4_K_M):
-    40 steps, cfg_scale 2.5, sampler ``euler``, 1024×1024.  Callers
-    that target SDXL or SD3 should override these.
+    Resolution order for each sampling parameter:
+
+      1. Explicit kwarg from the caller (router or test).
+      2. Per-model default from the runner's ``.models.yaml``
+         ``parameters`` block (resolved via :func:`_resolve_sd_defaults`).
+      3. Hardcoded fallback (40 steps, cfg_scale 2.5, sampler ``euler``,
+         1024×1024 — tuned for Qwen-Image-2512 Q4_K_M).
 
     Parameters
     ----------
@@ -94,15 +140,24 @@ async def generate_image(
     """
     cli = client or _default_client
 
+    # Layer the resolution chain so any value the caller didn't pass
+    # falls back to model defaults, then global Qwen-Image-tuned defaults.
+    defaults = await _resolve_sd_defaults(cli, model_id)
+    resolved_steps = steps if steps is not None else defaults.get("steps", 40)
+    resolved_cfg = cfg_scale if cfg_scale is not None else defaults.get("cfg_scale", 2.5)
+    resolved_sampler = sampler_name if sampler_name is not None else defaults.get("sampler_name", "euler")
+    resolved_width = width if width is not None else defaults.get("width", 1024)
+    resolved_height = height if height is not None else defaults.get("height", 1024)
+
     handle = await cli.acquire_server(model_id=model_id)
     try:
         payload: Dict[str, Any] = {
             "prompt": prompt,
-            "width": width,
-            "height": height,
-            "steps": steps,
-            "cfg_scale": cfg_scale,
-            "sampler_name": sampler_name,
+            "width": resolved_width,
+            "height": resolved_height,
+            "steps": resolved_steps,
+            "cfg_scale": resolved_cfg,
+            "sampler_name": resolved_sampler,
             "seed": seed,
             "batch_size": batch_size,
         }
@@ -149,12 +204,117 @@ async def generate_image(
 
 
 @dataclass(frozen=True)
+class ImageToImageResult:
+    images: List[GeneratedImage]
+    created: int
+    parameters: Dict[str, Any]
+
+
+async def edit_image(
+    *,
+    prompt: str,
+    image_b64: str,
+    model_id: str,
+    negative_prompt: Optional[str] = None,
+    denoising_strength: Optional[float] = None,
+    width: Optional[int] = None,
+    height: Optional[int] = None,
+    steps: Optional[int] = None,
+    cfg_scale: Optional[float] = None,
+    sampler_name: Optional[str] = None,
+    seed: int = -1,
+    client: Optional[RunnerClient] = None,
+) -> ImageToImageResult:
+    """Run an image edit (img2img) against the runner's sd-server.
+
+    Same resolution chain as :func:`generate_image`: explicit kwargs win,
+    otherwise model-level defaults from the runner's ``.models.yaml``
+    ``parameters`` block, otherwise the Qwen-Image-Edit-2511 tuned
+    fallbacks (40 steps, cfg 2.5, sampler ``euler``, 1024×1024,
+    denoising_strength 0.75).
+
+    ``denoising_strength`` controls how much the model deviates from
+    the input image: 0.0 reproduces the input, 1.0 ignores it.  0.65–0.8
+    is the useful range for prompt-guided edits.
+    """
+    cli = client or _default_client
+
+    defaults = await _resolve_sd_defaults(cli, model_id)
+    resolved_steps = steps if steps is not None else defaults.get("steps", 40)
+    resolved_cfg = cfg_scale if cfg_scale is not None else defaults.get("cfg_scale", 2.5)
+    resolved_sampler = sampler_name if sampler_name is not None else defaults.get("sampler_name", "euler")
+    resolved_width = width if width is not None else defaults.get("width", 1024)
+    resolved_height = height if height is not None else defaults.get("height", 1024)
+    resolved_denoise = denoising_strength if denoising_strength is not None else defaults.get("denoising_strength", 0.75)
+
+    handle = await cli.acquire_server(model_id=model_id)
+    try:
+        payload: Dict[str, Any] = {
+            "prompt": prompt,
+            "init_images": [image_b64],
+            "denoising_strength": resolved_denoise,
+            "width": resolved_width,
+            "height": resolved_height,
+            "steps": resolved_steps,
+            "cfg_scale": resolved_cfg,
+            "sampler_name": resolved_sampler,
+            "seed": seed,
+            "batch_size": 1,
+        }
+        if negative_prompt is not None:
+            payload["negative_prompt"] = negative_prompt
+
+        logger.info(
+            "Submitting img2img request",
+            extra={
+                "model_id": model_id,
+                "size": f"{width}x{height}",
+                "steps": steps,
+                "denoising_strength": denoising_strength,
+            },
+        )
+        response = await cli.proxy_request(
+            handle,
+            method="POST",
+            path="sdapi/v1/img2img",
+            json=payload,
+            timeout=600.0,
+        )
+
+        if response.status_code != 200:
+            raise ImageServiceError(
+                f"sd-server img2img returned {response.status_code}: {response.text[:512]}",
+                status_code=response.status_code,
+            )
+
+        body = response.json()
+        raw_images = body.get("images") or []
+        if not raw_images:
+            raise ImageServiceError("sd-server returned no images", status_code=200)
+
+        return ImageToImageResult(
+            images=[GeneratedImage(b64_png=img) for img in raw_images],
+            created=int(time.time()),
+            parameters=body.get("parameters") or {},
+        )
+    finally:
+        try:
+            await cli.release_server(handle)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"release_server failed: {e}")
+
+
+@dataclass(frozen=True)
 class ImageTo3DResult:
     id: str
     elapsed_sec: float
     mesh_path: Optional[str]
     gaussian_path: Optional[str]
     preview_b64: Optional[str]
+    # The runner endpoint that holds the .glb / .ply on disk.  Stashed so
+    # ``stream_3d_artifact`` can re-target the same runner instead of
+    # round-robining (the file only exists on one pod).
+    runner_endpoint: Optional[str] = None
 
 
 async def generate_3d(
@@ -217,4 +377,89 @@ async def generate_3d(
         mesh_path=body.get("mesh_path"),
         gaussian_path=body.get("gaussian_path"),
         preview_b64=body.get("preview_b64"),
+        runner_endpoint=endpoint,
     )
+
+
+# ---------------------------------------------------------------------------
+# Artefact download — proxies through to whichever runner holds the file.
+# ---------------------------------------------------------------------------
+
+
+_IMG23D_FILENAME_RE = __import__("re").compile(r"^[A-Za-z0-9_-]{1,64}\.(glb|ply|png)$")
+
+
+async def stream_3d_artifact(
+    filename: str,
+    *,
+    client: Optional[RunnerClient] = None,
+):
+    """Stream a generated 3D artefact (.glb / .ply / .png) from the runner.
+
+    Returns an ``(media_type, byte_iterator)`` tuple that the api router
+    wraps in a :class:`StreamingResponse`.  We don't load the whole file
+    into memory — .glb meshes from TRELLIS can be 50+ MiB and we'd rather
+    pass them through transparently.
+
+    Multi-runner caveat: the file lives on the runner that ran the
+    generation; we currently only target ``RunnerClient._endpoints[0]``
+    (the same one ``generate_3d`` uses).  When we scale TRELLIS across
+    multiple runners, fan out a HEAD request to each and return the
+    200 responder.
+    """
+    if not _IMG23D_FILENAME_RE.match(filename):
+        raise ImageServiceError(
+            f"Invalid filename '{filename}'. Expected <id>.{{glb,ply,png}}.",
+            status_code=400,
+        )
+
+    cli = client or _default_client
+
+    if not cli._endpoints:
+        raise ImageServiceError("No runner endpoints configured", status_code=503)
+
+    endpoint = cli._endpoints[0]
+    url = f"{endpoint}/v1/pipelines/img23d/files/{filename}"
+
+    media_types = {
+        ".glb": "model/gltf-binary",
+        ".ply": "application/octet-stream",
+        ".png": "image/png",
+    }
+    import os as _os
+    media_type = media_types.get(_os.path.splitext(filename)[1].lower(), "application/octet-stream")
+
+    http_client = cli._get_client()
+
+    # HEAD-check first so we can surface a clean 404 / 400 without holding
+    # an open stream on the runner side for failure cases.
+    head = await http_client.request("HEAD", url, timeout=10.0)
+    if head.status_code == 404:
+        raise ImageServiceError(
+            f"Artefact '{filename}' not found on runner",
+            status_code=404,
+        )
+    if head.status_code == 400:
+        raise ImageServiceError(
+            f"Runner rejected filename '{filename}'", status_code=400
+        )
+    if head.status_code >= 400:
+        raise ImageServiceError(
+            f"Runner returned {head.status_code} fetching '{filename}'",
+            status_code=502,
+        )
+
+    async def _iter_bytes():
+        # New streaming GET — httpx requires this to be opened inside the
+        # generator so the request stays bound to the consumer's lifetime.
+        async with http_client.stream("GET", url, timeout=120.0) as resp:
+            if resp.status_code != 200:
+                # We already HEAD-checked, but be defensive against TOCTOU.
+                raise ImageServiceError(
+                    f"Runner returned {resp.status_code} mid-stream",
+                    status_code=502,
+                )
+            async for chunk in resp.aiter_bytes():
+                yield chunk
+
+    return media_type, _iter_bytes()
