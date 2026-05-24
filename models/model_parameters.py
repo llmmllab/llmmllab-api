@@ -462,4 +462,20 @@ class ModelParameters(BaseModel):
     ] = None
     """Keep text encoder on CPU (sd-server)."""
 
+    img_cfg_scale: Annotated[
+        Optional[float],
+        Field(
+            default=None,
+            description="Image-conditioning guidance scale for sd-server's edit / instruct-pix2pix "
+            "pipelines (`--img-cfg-scale`).  Controls how strongly the model preserves the input "
+            "image vs. follows the text prompt.  sd-server's /sdapi/v1/img2img request body has "
+            "no field for this, so it MUST be pinned at sd-server launch.  Defaults to the value "
+            "of cfg_scale when unset, which on Qwen-Image-Edit causes the model to over-preserve "
+            "the input and ignore structural prompts ('remove the background' produces a near-"
+            "identical image).  Set to 1.0–1.5 to let txt_cfg dominate.",
+            ge=0.0,
+        ),
+    ] = None
+    """sd-server --img-cfg-scale (image-preservation pressure for Qwen-Image-Edit etc.)."""
+
     model_config = ConfigDict(extra="ignore")
