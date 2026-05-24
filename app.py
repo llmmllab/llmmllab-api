@@ -55,6 +55,7 @@ from routers import (
     db_admin,
     documents,
     api_key,
+    runner_admin,
     metrics as metrics_router,
 )
 from routers.openai import ROUTERS as OPENAI_ROUTERS
@@ -460,6 +461,10 @@ app.include_router(documents.router)
 
 # Import and include the internal router
 app.include_router(db_admin.router)
+# /v1/runner/* — admin endpoints that fan out across the runner pool
+# for ops tooling (e.g. ``scripts/runner_shutdown.sh``).  Gated to
+# admins inside the router.
+app.include_router(runner_admin.router, prefix="/v1")
 
 # Include auto-generated OpenAI-compatible API endpoints (excluding models and files)
 for router in OPENAI_ROUTERS:

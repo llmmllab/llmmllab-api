@@ -10,6 +10,11 @@ and `jq`.
 | [`test_img2img.sh`](#test_img2imgsh) | `POST /v1/images/edits` | stable-diffusion.cpp `sd-server` (img2img) | base64 PNG inline in response |
 | [`test_img2-3d.sh`](#test_img2-3dsh) | `POST /v1/images/3d` + `GET /v1/images/3d/{file}` | Hunyuan3D-2.1 in-process pipeline | `.glb` mesh + `.ply` gaussian, streamed back through api |
 
+> `runner_shutdown.sh` (ops tool to free VRAM by force-evicting runner
+> servers) lives in the **llmmllab-runner** repo's `scripts/` directory.
+> It uses the same `API_BASE` + `API_KEY` env vars as the scripts here,
+> so an admin token reaches it without any port-forward.
+
 ## Common configuration
 
 All three scripts honour the same environment variables:
