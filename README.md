@@ -4,7 +4,7 @@ Python FastAPI inference service with OpenAI- and Anthropic-compatible endpoints
 
 - **`llama.cpp`** — text completion + embeddings
 - **`stable-diffusion.cpp`** — text-to-image (`POST /v1/images/generations`) and image-to-image (`POST /v1/images/edits`, Qwen-Image-Edit-2511)
-- **TRELLIS** — image-to-3D (`POST /v1/images/3d`, download via `GET /v1/images/3d/{filename}`)
+- **Hunyuan3D-2.1** — image-to-3D (`POST /v1/images/3d`, download via `GET /v1/images/3d/{filename}`)
 
 Plus LangGraph agent orchestration. The Ollama-compatible router was removed; only the OpenAI (`/v1/chat/completions`, `/v1/embeddings`, `/v1/images/generations`, …) and Anthropic (`/v1/messages`) wire protocols are exposed.
 
@@ -28,7 +28,7 @@ curl http://localhost:8000/v1/images/3d \
 # -> {"id":"abc123","elapsed_sec":48.2,"mesh_path":"/data/sd-out/3d/abc123.glb", ...}
 ```
 
-Backed by TRELLIS in the runner. Runs synchronously and can take minutes per image — clients should set long HTTP timeouts. The response includes `mesh_url` and `gaussian_url` fields pointing at `GET /v1/images/3d/{filename}`, which streams the binary artefacts back through the api without requiring pod access.
+Backed by Tencent Hunyuan3D-2.1 (shape-only path, ~6 GB VRAM) running in-process on the runner. Returns a `.glb` mesh; gaussian-splat output is not supported by this backbone (the response's `gaussian_url` will be `null`). The response includes `mesh_url` pointing at `GET /v1/images/3d/{filename}`, which streams the binary back through the api without requiring pod access.
 
 ### Test scripts
 

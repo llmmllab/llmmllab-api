@@ -194,10 +194,11 @@ class CreateImageTo3DResponse(BaseModel):
 async def createImageTo3D(body: CreateImageTo3DRequest) -> CreateImageTo3DResponse:
     """Convert a 2D image to a 3D mesh + gaussian-splat representation.
 
-    Backed by TRELLIS running in-process on the runner.  The generation
-    is synchronous and can take minutes — clients should either set
-    long HTTP timeouts or move long-running calls behind their own
-    job queue.
+    Backed by Hunyuan3D-2.1 (shape-only) running in-process on the
+    runner.  Returns a ``.glb`` mesh; ``gaussian_url`` is always
+    ``null`` since Hunyuan3D-2.1 doesn't produce gaussian splats.  The
+    generation is synchronous and can take a couple of minutes per
+    image — clients should set long HTTP timeouts.
     """
     try:
         result = await generate_3d(

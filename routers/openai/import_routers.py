@@ -16,7 +16,7 @@ from .evals import router as evals_router
 from .fine_tuning import router as fine_tuning_router
 # Image generation + img2-3D — the api just forwards to the runner, so no
 # heavy image deps land in this process.  Backed by stable-diffusion.cpp
-# (txt2img) and TRELLIS (img2-3D), both running in the runner.
+# (txt2img/img2img) and Hunyuan3D-2.1 (img2-3D), both running in the runner.
 from .images import router as images_router
 
 # models router moved to common

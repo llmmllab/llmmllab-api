@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-FastAPI inference service with OpenAI- and Anthropic-compatible endpoints. Backed by a runner service that hosts `llama.cpp` (text), `stable-diffusion.cpp` (image generation, e.g. Qwen-Image-2512 GGUF), and an in-process TRELLIS pipeline (image-to-3D). LangGraph agent orchestration for chat. Python 3.12+, managed via `uv`.
+FastAPI inference service with OpenAI- and Anthropic-compatible endpoints. Backed by a runner service that hosts `llama.cpp` (text), `stable-diffusion.cpp` (image generation, e.g. Qwen-Image-2512 GGUF), and an in-process Hunyuan3D-2.1 pipeline (image-to-3D). LangGraph agent orchestration for chat. Python 3.12+, managed via `uv`.
 
 The Ollama-compatible router was removed; only OpenAI and Anthropic wire protocols are exposed.
 
@@ -14,7 +14,7 @@ The Ollama-compatible router was removed; only OpenAI and Anthropic wire protoco
 |----------|---------|-------|
 | `POST /v1/images/generations` | runner sd-server (stable-diffusion.cpp) | OpenAI-compatible `CreateImageRequest`. Returns `b64_json`. |
 | `POST /v1/images/edits` | runner sd-server (img2img, e.g. Qwen-Image-Edit-2511) | Custom JSON body (`prompt`, `image` base64, `denoising_strength`). Returns `b64_json`. |
-| `POST /v1/images/3d` | runner pipeline `img23d` (TRELLIS) | Returns `mesh_path` (`.glb`) and/or `gaussian_path` (`.ply`) plus `mesh_url`/`gaussian_url` for download. Long-running. |
+| `POST /v1/images/3d` | runner pipeline `img23d` (Hunyuan3D-2.1) | Returns `mesh_path` (`.glb`) plus `mesh_url` for download. `gaussian_path`/`gaussian_url` are always `null` — Hunyuan3D-2.1 doesn't produce splats. Long-running. |
 | `GET  /v1/images/3d/{filename}` | runner pipeline `img23d/files/{filename}` | Streams `.glb` / `.ply` / `.png` back through the api so clients don't need pod access. |
 
 `services/image_service.py` is the single bridge. `generate_image`, `edit_image` acquire a runner server (text/image model handled by `SDCppServerManager`) and hit `/sdapi/v1/txt2img` or `/sdapi/v1/img2img`. `generate_3d` hits `/v1/pipelines/img23d/run` (no server acquisition, the pipeline is in-process on the runner). `stream_3d_artifact` proxies `GET /v1/pipelines/img23d/files/{filename}` for downloads, with a path-traversal-safe regex on filename. Tests live in `test/unit/test_image_service.py` and `test/unit/test_images_router.py`. CLI test scripts under `scripts/` (see `scripts/README.md`).

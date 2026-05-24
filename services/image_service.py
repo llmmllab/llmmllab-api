@@ -8,9 +8,9 @@ Bridges the API's wire-protocol routers (``/v1/images/generations``,
     server for the requested model, POST the prompt + sampling params,
     and unwrap the base64 PNG from ``response.images[0]``.
 
-  * **img2-3d** — TRELLIS lives in-process inside the runner under
-    ``/v1/pipelines/img23d/run``.  No server acquisition is needed; we
-    POST the conditioning image and parameters directly.
+  * **img2-3d** — Hunyuan3D-2.1 lives in-process inside the runner
+    under ``/v1/pipelines/img23d/run``.  No server acquisition is
+    needed; we POST the conditioning image and parameters directly.
 
 Both helpers are coroutines and may raise:
 
@@ -328,14 +328,14 @@ async def generate_3d(
     slat_cfg_strength: float = 3.0,
     client: Optional[RunnerClient] = None,
 ) -> ImageTo3DResult:
-    """Submit an image to the runner's TRELLIS-based pipeline.
+    """Submit an image to the runner's Hunyuan3D-2.1-based pipeline.
 
     The pipeline is in-process on the runner, so we bypass
     ``acquire_server`` and hit ``/v1/pipelines/img23d/run`` directly on
     whichever runner currently advertises the pipeline.  We pick the
     first endpoint from :attr:`RunnerClient._endpoints`; if/when we
-    deploy multiple runners with TRELLIS, replace this with a capability
-    query against ``GET /v1/pipelines``.
+    deploy multiple runners with Hunyuan3D, replace this with a
+    capability query against ``GET /v1/pipelines``.
     """
     cli = client or _default_client
 
@@ -362,7 +362,7 @@ async def generate_3d(
     response = await http_client.post(
         f"{endpoint}/v1/pipelines/img23d/run",
         json=payload,
-        timeout=1200.0,  # TRELLIS can run for minutes per image
+        timeout=1200.0,  # Hunyuan3D can run for minutes per image
     )
     if response.status_code != 200:
         raise ImageServiceError(
@@ -398,14 +398,14 @@ async def stream_3d_artifact(
 
     Returns an ``(media_type, byte_iterator)`` tuple that the api router
     wraps in a :class:`StreamingResponse`.  We don't load the whole file
-    into memory — .glb meshes from TRELLIS can be 50+ MiB and we'd rather
-    pass them through transparently.
+    into memory — .glb meshes from Hunyuan3D can be 10+ MiB and we'd
+    rather pass them through transparently.
 
     Multi-runner caveat: the file lives on the runner that ran the
     generation; we currently only target ``RunnerClient._endpoints[0]``
-    (the same one ``generate_3d`` uses).  When we scale TRELLIS across
-    multiple runners, fan out a HEAD request to each and return the
-    200 responder.
+    (the same one ``generate_3d`` uses).  When we scale Hunyuan3D
+    across multiple runners, fan out a HEAD request to each and return
+    the 200 responder.
     """
     if not _IMG23D_FILENAME_RE.match(filename):
         raise ImageServiceError(
