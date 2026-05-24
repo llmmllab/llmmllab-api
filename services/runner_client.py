@@ -189,13 +189,21 @@ class RunnerClient:
             never retry past it.
             """
             try:
+                # ``stream`` was removed from ``AsyncClient.request()`` in
+                # httpx 0.20; the streaming path uses ``client.stream()``
+                # as a context manager instead.  Nothing in the codebase
+                # actually passes ``stream=True`` today — chat completions
+                # stream directly via a separate code path (per
+                # CLAUDE.md → "Runner restart recovery") — so we just
+                # drop the kwarg.  Keeping the public ``stream`` arg on
+                # ``proxy_request`` itself so we can re-implement it via
+                # ``client.stream()`` later without breaking callers.
                 return await client.request(
                     method=method,
                     url=url,
                     json=json,
                     headers=headers,
                     timeout=_ACQUIRE_TIMEOUT,
-                    stream=stream,
                 )
             except asyncio.CancelledError:
                 logger.info(
