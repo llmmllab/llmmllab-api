@@ -17,9 +17,11 @@ PROMPT="${1:-a teacup with steam}"
 MODEL="${2:-qwen-image-2512}"
 SIZE="${3:-1024x1024}"
 
-API_BASE="${API_BASE:-http://localhost:8000}"
+API_BASE="${API_BASE:-http://192.168.0.71:9999}"
 OUT_DIR="${OUT_DIR:-./out}"
 mkdir -p "$OUT_DIR"
+
+API_KEY=$LLMMLL_AUTH_TOKEN
 
 AUTH_HEADER=()
 if [[ -n "${API_KEY:-}" ]]; then

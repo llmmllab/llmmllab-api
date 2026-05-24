@@ -62,3 +62,4 @@ Thumbs.db
 .copilot*
 
 settings.local.json
+out/
