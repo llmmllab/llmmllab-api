@@ -81,10 +81,32 @@ class CreateImageEditRequest(BaseModel):
     negative_prompt: Optional[str] = Field(None)
     size: Optional[str] = Field("1024x1024", description="WIDTHxHEIGHT")
     denoising_strength: Optional[float] = Field(
-        0.75,
+        None,
         ge=0.0,
         le=1.0,
-        description="0.0 reproduces input, 1.0 ignores it. 0.65–0.8 is the sweet spot for prompt-guided edits.",
+        description=(
+            "0.0 reproduces input, 1.0 ignores it. 0.65–0.8 is the sweet "
+            "spot for prompt-guided edits.  Largely a no-op on Qwen-Image-"
+            "Edit since the edit pipeline uses ref-image conditioning "
+            "rather than noise/denoise.  None → defer to model defaults."
+        ),
+    )
+    cfg_scale: Optional[float] = Field(
+        None,
+        ge=0.0,
+        description=(
+            "Classifier-free guidance scale (sd-server ``cfg_scale`` → "
+            "``txt_cfg``).  Higher = stronger adherence to the prompt at "
+            "the cost of fidelity.  Qwen-Image-Edit-2511 ships with 4.0 "
+            "as its default (matching diffusers); push to 6-8 for edits "
+            "the model resists ('remove the background')."
+        ),
+    )
+    steps: Optional[int] = Field(
+        None, ge=1, description="Diffusion sampling steps (model default applies when None)."
+    )
+    sampler_name: Optional[str] = Field(
+        None, description="Sampler name (model default applies when None)."
     )
     seed: Optional[int] = Field(-1, description="-1 for random")
 
@@ -105,9 +127,12 @@ async def createImageEdit(body: CreateImageEditRequest) -> ImagesResponse:
             image_b64=body.image,
             model_id=body.model,
             negative_prompt=body.negative_prompt,
-            denoising_strength=body.denoising_strength or 0.75,
+            denoising_strength=body.denoising_strength,
             width=width,
             height=height,
+            steps=body.steps,
+            cfg_scale=body.cfg_scale,
+            sampler_name=body.sampler_name,
             seed=body.seed if body.seed is not None else -1,
         )
     except ImageServiceError as e:
