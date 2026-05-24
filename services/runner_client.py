@@ -179,6 +179,14 @@ class RunnerClient:
         client = self._get_client()
         headers = self._session_headers()
 
+        # Caller's ``timeout`` is both the 503-backoff budget AND the
+        # per-request httpx timeout — these used to diverge (httpx hard-
+        # coded ``_ACQUIRE_TIMEOUT`` = 150 s regardless of the arg) which
+        # broke long-running image-edit calls.  Use the floor of 150 s so
+        # short-lived requests still get the historical timeout; honour
+        # bigger caller budgets verbatim.
+        per_request_timeout = httpx.Timeout(max(timeout, _ACQUIRE_TIMEOUT.read or 150.0))
+
         async def _send_once() -> httpx.Response:
             """Issue a single upstream request, propagating CancelledError.
 
@@ -203,7 +211,7 @@ class RunnerClient:
                     url=url,
                     json=json,
                     headers=headers,
-                    timeout=_ACQUIRE_TIMEOUT,
+                    timeout=per_request_timeout,
                 )
             except asyncio.CancelledError:
                 logger.info(
