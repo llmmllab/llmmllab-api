@@ -251,7 +251,31 @@ async def edit_image(
     try:
         payload: Dict[str, Any] = {
             "prompt": prompt,
+            # sd-server's /sdapi/v1/img2img reads TWO different image
+            # fields off the body, and they wire to DIFFERENT internal
+            # attributes:
+            #
+            #   init_images:  legacy img2img noise-and-denoise path
+            #                 (populates ``gen_params.init_image``)
+            #   extra_images: QwenImageEditPlusPipeline ref-image
+            #                 conditioning (populates
+            #                 ``gen_params.ref_images``)
+            #
+            # The Qwen-Image-Edit pipeline only fires when ``ref_images``
+            # is non-empty (see ``src/conditioner.hpp`` —
+            # ``if (llm->enable_vision && conditioner_params.ref_images
+            # != nullptr && !conditioner_params.ref_images->empty())``);
+            # missing this is exactly why "remove the background" was
+            # producing wildly different images — sd-server was falling
+            # back to plain Qwen-Image txt2img on the prompt alone, with
+            # the source image only used as a noise seed.
+            #
+            # We send the source image in BOTH fields so the same
+            # endpoint works for edit-aware models (Qwen-Image-Edit-2511,
+            # use ref_images path) and any legacy img2img model that
+            # falls through (uses init_image path).
             "init_images": [image_b64],
+            "extra_images": [image_b64],
             "denoising_strength": resolved_denoise,
             "width": resolved_width,
             "height": resolved_height,

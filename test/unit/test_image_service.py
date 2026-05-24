@@ -181,7 +181,7 @@ def test_generate_image_caller_kwargs_win_over_model_defaults():
 # ---------------------------------------------------------------------------
 
 
-def test_edit_image_targets_sdapi_img2img_with_init_images():
+def test_edit_image_targets_sdapi_img2img_with_ref_images():
     fake_b64 = base64.b64encode(b"edited-png").decode("ascii")
     client = _make_runner_client_for_txt2img(
         {"images": [fake_b64], "parameters": {}}
@@ -201,7 +201,12 @@ def test_edit_image_targets_sdapi_img2img_with_init_images():
     assert kwargs["path"] == "sdapi/v1/img2img"
     payload = kwargs["json"]
     assert payload["prompt"] == "make it autumn"
+    # Source image goes in BOTH fields: ``init_images`` for legacy
+    # img2img models (noise+denoise path) and ``extra_images`` so it
+    # populates sd-server's ``ref_images`` and triggers the
+    # QwenImageEditPlusPipeline on Qwen-Image-Edit-2511.
     assert payload["init_images"] == ["aGVsbG8="]
+    assert payload["extra_images"] == ["aGVsbG8="]
     assert payload["denoising_strength"] == 0.8
 
 
