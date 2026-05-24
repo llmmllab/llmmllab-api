@@ -61,7 +61,7 @@ jq -n \
 echo "→ POST $API_BASE/v1/images/3d"
 echo "  input   = $INPUT ($(wc -c < "$INPUT") bytes)"
 echo "  formats = $FORMATS"
-echo "  (this can take minutes; TRELLIS doesn't stream)"
+echo "  (this can take a few minutes; Hunyuan3D doesn't stream)"
 
 curl -sS -X POST "$API_BASE/v1/images/3d" \
     -H "Content-Type: application/json" \

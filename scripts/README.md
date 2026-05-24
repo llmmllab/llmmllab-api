@@ -175,4 +175,4 @@ artefact. That refactor lives in
 |--------|-------|------------|-------------|-------|
 | `test_txt2img.sh` | `qwen-image-2512` | 1024×1024 | 1.89 MB PNG | clean run, ~40s |
 | `test_img2img.sh` | `qwen-image-edit-2511` | 1024×1024 | 1.80 MB PNG | edited a prior txt2img output with `denoising_strength=0.75` |
-| `test_img2-3d.sh` | TRELLIS | n/a | not yet validated | weights / CUDA extensions still need installation on the runner |
+| `test_img2-3d.sh` | Hunyuan3D-2.1 (shape-only) | n/a | 38.5 MB `.glb` mesh | conditioning image was the txt2img teacup; ~195s generation; mesh streamed back through `/v1/images/3d/{id}.glb` |
