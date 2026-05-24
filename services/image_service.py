@@ -24,13 +24,75 @@ in a stubbed client without monkey-patching the global singleton.
 from __future__ import annotations
 
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional
 
 from services.runner_client import RunnerClient, runner_client as _default_client
 from utils.logging import llmmllogger
 
 logger = llmmllogger.bind(component="image_service")
+
+
+@asynccontextmanager
+async def _queued(
+    user_id: Optional[str],
+    model_id: str,
+    *,
+    priority: Optional[object] = None,
+    source: Optional[object] = None,
+    max_queue_wait: Optional[float] = None,
+    session_id: Optional[str] = None,
+) -> AsyncIterator[str]:
+    """Enqueue an image request through ``priority_queue`` like chat does.
+
+    Image generations (txt2img, img2img, img23d, rembg) are
+    user-initiated requests and share the runner pool with chat
+    completions, so they should be subject to the same fairness +
+    aging mechanism rather than racing past the queue.
+
+    Mirrors ``CompletionService._priority_queue_lifecycle`` but is a
+    plain async context manager (image flows are non-streaming
+    one-shots, so we don't need the generator dance the chat path
+    uses).  Yields the *resolved* model id — `ensure_model_available`
+    may translate `"default"` etc.
+
+    When ``user_id`` is ``None`` (tests, unauthenticated dev paths)
+    OR ``PRIORITY_QUEUE_ENABLED`` is false, this is a transparent
+    pass-through that yields the original ``model_id`` and skips the
+    queue.  This keeps the existing test suite working without
+    rewriting every mock to set up queue state.
+    """
+    from config import PRIORITY_QUEUE_ENABLED
+    from models.request_priority_metadata import (
+        Priority,
+        RequestPriorityMetadata,
+        RequestSource,
+    )
+    from services.priority_queue import priority_queue
+
+    if not PRIORITY_QUEUE_ENABLED or not user_id:
+        yield model_id
+        return
+
+    effective_priority = priority if priority is not None else Priority.MEDIUM
+    effective_source = source if source is not None else RequestSource.USER
+
+    effective_model = await priority_queue.ensure_model_available(model_id, user_id)
+    meta = RequestPriorityMetadata(
+        source=effective_source,
+        priority=effective_priority,
+        user_id=user_id,
+        model_id=effective_model,
+        max_queue_wait=max_queue_wait,
+        session_id=session_id,
+    )
+    queue_item, _ = await priority_queue.enqueue(meta)
+    try:
+        yield effective_model
+    finally:
+        if queue_item is not None:
+            await priority_queue.dequeue(queue_item)
 
 
 class ImageServiceError(RuntimeError):
@@ -115,6 +177,7 @@ async def generate_image(
     seed: int = -1,
     batch_size: int = 1,
     client: Optional[RunnerClient] = None,
+    user_id: Optional[str] = None,
 ) -> TxtToImageResult:
     """Run a text-to-image generation against the runner's sd-server.
 
@@ -149,58 +212,59 @@ async def generate_image(
     resolved_width = width if width is not None else defaults.get("width", 1024)
     resolved_height = height if height is not None else defaults.get("height", 1024)
 
-    handle = await cli.acquire_server(model_id=model_id)
-    try:
-        payload: Dict[str, Any] = {
-            "prompt": prompt,
-            "width": resolved_width,
-            "height": resolved_height,
-            "steps": resolved_steps,
-            "cfg_scale": resolved_cfg,
-            "sampler_name": resolved_sampler,
-            "seed": seed,
-            "batch_size": batch_size,
-        }
-        if negative_prompt is not None:
-            payload["negative_prompt"] = negative_prompt
+    async with _queued(user_id, model_id):
+        handle = await cli.acquire_server(model_id=model_id)
+        try:
+            payload: Dict[str, Any] = {
+                "prompt": prompt,
+                "width": resolved_width,
+                "height": resolved_height,
+                "steps": resolved_steps,
+                "cfg_scale": resolved_cfg,
+                "sampler_name": resolved_sampler,
+                "seed": seed,
+                "batch_size": batch_size,
+            }
+            if negative_prompt is not None:
+                payload["negative_prompt"] = negative_prompt
 
-        logger.info(
-            "Submitting txt2img request",
-            extra={"model_id": model_id, "size": f"{width}x{height}", "steps": steps},
-        )
-        # Long timeout: image diffusion at 40 steps on a low-end card
-        # can take well over a minute, and we don't want backoff to
-        # hide a still-progressing job as a 503.
-        response = await cli.proxy_request(
-            handle,
-            method="POST",
-            path="sdapi/v1/txt2img",
-            json=payload,
-            timeout=600.0,
-        )
-
-        if response.status_code != 200:
-            raise ImageServiceError(
-                f"sd-server returned {response.status_code}: {response.text[:512]}",
-                status_code=response.status_code,
+            logger.info(
+                "Submitting txt2img request",
+                extra={"model_id": model_id, "size": f"{width}x{height}", "steps": steps},
+            )
+            # Long timeout: image diffusion at 40 steps on a low-end card
+            # can take well over a minute, and we don't want backoff to
+            # hide a still-progressing job as a 503.
+            response = await cli.proxy_request(
+                handle,
+                method="POST",
+                path="sdapi/v1/txt2img",
+                json=payload,
+                timeout=600.0,
             )
 
-        body = response.json()
-        raw_images = body.get("images") or []
-        if not raw_images:
-            raise ImageServiceError("sd-server returned no images", status_code=200)
+            if response.status_code != 200:
+                raise ImageServiceError(
+                    f"sd-server returned {response.status_code}: {response.text[:512]}",
+                    status_code=response.status_code,
+                )
 
-        return TxtToImageResult(
-            images=[GeneratedImage(b64_png=img) for img in raw_images],
-            created=int(time.time()),
-            parameters=body.get("parameters") or {},
-        )
-    finally:
-        # Best-effort release — ``release_server`` swallows its own errors.
-        try:
-            await cli.release_server(handle)
-        except Exception as e:  # noqa: BLE001
-            logger.debug(f"release_server failed: {e}")
+            body = response.json()
+            raw_images = body.get("images") or []
+            if not raw_images:
+                raise ImageServiceError("sd-server returned no images", status_code=200)
+
+            return TxtToImageResult(
+                images=[GeneratedImage(b64_png=img) for img in raw_images],
+                created=int(time.time()),
+                parameters=body.get("parameters") or {},
+            )
+        finally:
+            # Best-effort release — ``release_server`` swallows its own errors.
+            try:
+                await cli.release_server(handle)
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"release_server failed: {e}")
 
 
 @dataclass(frozen=True)
@@ -224,6 +288,7 @@ async def edit_image(
     sampler_name: Optional[str] = None,
     seed: int = -1,
     client: Optional[RunnerClient] = None,
+    user_id: Optional[str] = None,
 ) -> ImageToImageResult:
     """Run an image edit (img2img) against the runner's sd-server.
 
@@ -247,85 +312,88 @@ async def edit_image(
     resolved_height = height if height is not None else defaults.get("height", 1024)
     resolved_denoise = denoising_strength if denoising_strength is not None else defaults.get("denoising_strength", 0.75)
 
-    handle = await cli.acquire_server(model_id=model_id)
-    try:
-        payload: Dict[str, Any] = {
-            "prompt": prompt,
-            # sd-server's /sdapi/v1/img2img reads TWO different image
-            # fields off the body, and they wire to DIFFERENT internal
-            # attributes:
-            #
-            #   init_images:  legacy img2img noise-and-denoise path
-            #                 (populates ``gen_params.init_image``)
-            #   extra_images: QwenImageEditPlusPipeline ref-image
-            #                 conditioning (populates
-            #                 ``gen_params.ref_images``)
-            #
-            # The Qwen-Image-Edit pipeline only fires when ``ref_images``
-            # is non-empty (see ``src/conditioner.hpp`` —
-            # ``if (llm->enable_vision && conditioner_params.ref_images
-            # != nullptr && !conditioner_params.ref_images->empty())``);
-            # missing this is exactly why "remove the background" was
-            # producing wildly different images — sd-server was falling
-            # back to plain Qwen-Image txt2img on the prompt alone, with
-            # the source image only used as a noise seed.
-            #
-            # We send the source image in BOTH fields so the same
-            # endpoint works for edit-aware models (Qwen-Image-Edit-2511,
-            # use ref_images path) and any legacy img2img model that
-            # falls through (uses init_image path).
-            "init_images": [image_b64],
-            "extra_images": [image_b64],
-            "denoising_strength": resolved_denoise,
-            "width": resolved_width,
-            "height": resolved_height,
-            "steps": resolved_steps,
-            "cfg_scale": resolved_cfg,
-            "sampler_name": resolved_sampler,
-            "seed": seed,
-            "batch_size": 1,
-        }
-        if negative_prompt is not None:
-            payload["negative_prompt"] = negative_prompt
+    async with _queued(user_id, model_id):
+        handle = await cli.acquire_server(model_id=model_id)
+        try:
+            payload: Dict[str, Any] = {
+                "prompt": prompt,
+                # sd-server's /sdapi/v1/img2img reads TWO different image
+                # fields off the body, and they wire to DIFFERENT internal
+                # attributes:
+                #
+                #   init_images:  legacy img2img noise-and-denoise path
+                #                 (populates ``gen_params.init_image``)
+                #   extra_images: QwenImageEditPlusPipeline ref-image
+                #                 conditioning (populates
+                #                 ``gen_params.ref_images``)
+                #
+                # The Qwen-Image-Edit pipeline only fires when
+                # ``ref_images`` is non-empty (see
+                # ``src/conditioner.hpp`` —
+                # ``if (llm->enable_vision &&
+                # conditioner_params.ref_images != nullptr &&
+                # !conditioner_params.ref_images->empty())``); missing
+                # this is exactly why "remove the background" was
+                # producing wildly different images — sd-server was
+                # falling back to plain Qwen-Image txt2img on the prompt
+                # alone, with the source image only used as a noise
+                # seed.  We send the source image in BOTH fields so the
+                # same endpoint works for edit-aware models
+                # (Qwen-Image-Edit-2511, use ref_images path) and any
+                # legacy img2img model that falls through (uses
+                # init_image path).
+                "init_images": [image_b64],
+                "extra_images": [image_b64],
+                "denoising_strength": resolved_denoise,
+                "width": resolved_width,
+                "height": resolved_height,
+                "steps": resolved_steps,
+                "cfg_scale": resolved_cfg,
+                "sampler_name": resolved_sampler,
+                "seed": seed,
+                "batch_size": 1,
+            }
+            if negative_prompt is not None:
+                payload["negative_prompt"] = negative_prompt
 
-        logger.info(
-            "Submitting img2img request",
-            extra={
-                "model_id": model_id,
-                "size": f"{width}x{height}",
-                "steps": steps,
-                "denoising_strength": denoising_strength,
-            },
-        )
-        response = await cli.proxy_request(
-            handle,
-            method="POST",
-            path="sdapi/v1/img2img",
-            json=payload,
-            timeout=600.0,
-        )
-
-        if response.status_code != 200:
-            raise ImageServiceError(
-                f"sd-server img2img returned {response.status_code}: {response.text[:512]}",
-                status_code=response.status_code,
+            logger.info(
+                "Submitting img2img request",
+                extra={
+                    "model_id": model_id,
+                    "size": f"{width}x{height}",
+                    "steps": steps,
+                    "denoising_strength": denoising_strength,
+                },
+            )
+            response = await cli.proxy_request(
+                handle,
+                method="POST",
+                path="sdapi/v1/img2img",
+                json=payload,
+                timeout=600.0,
             )
 
-        body = response.json()
-        raw_images = body.get("images") or []
-        if not raw_images:
-            raise ImageServiceError("sd-server returned no images", status_code=200)
+            if response.status_code != 200:
+                raise ImageServiceError(
+                    f"sd-server img2img returned {response.status_code}: {response.text[:512]}",
+                    status_code=response.status_code,
+                )
 
-        return ImageToImageResult(
-            images=[GeneratedImage(b64_png=img) for img in raw_images],
-            created=int(time.time()),
-            parameters=body.get("parameters") or {},
-        )
-    finally:
-        try:
-            await cli.release_server(handle)
-        except Exception as e:  # noqa: BLE001
-            logger.debug(f"release_server failed: {e}")
+            body = response.json()
+            raw_images = body.get("images") or []
+            if not raw_images:
+                raise ImageServiceError("sd-server returned no images", status_code=200)
+
+            return ImageToImageResult(
+                images=[GeneratedImage(b64_png=img) for img in raw_images],
+                created=int(time.time()),
+                parameters=body.get("parameters") or {},
+            )
+        finally:
+            try:
+                await cli.release_server(handle)
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"release_server failed: {e}")
 
 
 @dataclass(frozen=True)
@@ -351,22 +419,17 @@ async def generate_3d(
     ss_cfg_strength: float = 7.5,
     slat_cfg_strength: float = 3.0,
     client: Optional[RunnerClient] = None,
+    user_id: Optional[str] = None,
 ) -> ImageTo3DResult:
     """Submit an image to the runner's Hunyuan3D-2.1-based pipeline.
 
     The pipeline is in-process on the runner, so we bypass
     ``acquire_server`` and hit ``/v1/pipelines/img23d/run`` directly on
-    whichever runner currently advertises the pipeline.  We pick the
-    first endpoint from :attr:`RunnerClient._endpoints`; if/when we
-    deploy multiple runners with Hunyuan3D, replace this with a
-    capability query against ``GET /v1/pipelines``.
+    whichever runner advertises the ``img23d`` pipeline (queried via
+    ``_pipeline_map``, populated from each runner's /v1/models).
     """
     cli = client or _default_client
-
-    if not cli._endpoints:
-        raise ImageServiceError("No runner endpoints configured", status_code=503)
-
-    endpoint = cli._endpoints[0]
+    endpoint = await _pick_pipeline_endpoint(cli, "img23d")
     payload: Dict[str, Any] = {
         "image_b64": image_b64,
         "seed": seed,
@@ -383,11 +446,12 @@ async def generate_3d(
     )
 
     http_client = cli._get_client()
-    response = await http_client.post(
-        f"{endpoint}/v1/pipelines/img23d/run",
-        json=payload,
-        timeout=1200.0,  # Hunyuan3D can run for minutes per image
-    )
+    async with _queued(user_id, "hunyuan3d-2.1"):
+        response = await http_client.post(
+            f"{endpoint}/v1/pipelines/img23d/run",
+            json=payload,
+            timeout=1200.0,  # Hunyuan3D can run for minutes per image
+        )
     if response.status_code != 200:
         raise ImageServiceError(
             f"runner img23d returned {response.status_code}: {response.text[:512]}",
@@ -413,6 +477,21 @@ async def generate_3d(
 # ---------------------------------------------------------------------------
 
 
+async def _pick_pipeline_endpoint(cli: RunnerClient, pipeline_name: str) -> str:
+    """Choose a runner endpoint for an in-process pipeline.
+
+    Thin async wrapper around ``RunnerClient.select_pipeline_endpoint``
+    so callers in this module only deal with ``ImageServiceError`` on
+    the "no endpoints configured" path.  The runner client does the
+    actual map-lookup + health-ranked selection from
+    ``refresh_model_map`` data — the api never needs to know which
+    deployment hosts which pipeline; the runners' own yamls drive it.
+    """
+    if not cli._endpoints:
+        raise ImageServiceError("No runner endpoints configured", status_code=503)
+    return await cli.select_pipeline_endpoint(pipeline_name)
+
+
 @dataclass(frozen=True)
 class RembgResult:
     id: str
@@ -431,6 +510,7 @@ async def remove_image_background(
     mask_only: bool = False,
     size: Optional[int] = None,
     client: Optional[RunnerClient] = None,
+    user_id: Optional[str] = None,
 ) -> RembgResult:
     """Remove the background of an image via briaai/RMBG-2.0.
 
@@ -441,10 +521,7 @@ async def remove_image_background(
     ``/v1/images/remove-bg/{id}.png``.
     """
     cli = client or _default_client
-    if not cli._endpoints:
-        raise ImageServiceError("No runner endpoints configured", status_code=503)
-
-    endpoint = cli._endpoints[0]
+    endpoint = await _pick_pipeline_endpoint(cli, "rembg")
     payload: Dict[str, Any] = {"image_b64": image_b64, "mask_only": bool(mask_only)}
     if size is not None:
         payload["size"] = int(size)
@@ -452,11 +529,12 @@ async def remove_image_background(
     logger.info("Submitting rembg request", extra={"endpoint": endpoint})
 
     http_client = cli._get_client()
-    response = await http_client.post(
-        f"{endpoint}/v1/pipelines/rembg/run",
-        json=payload,
-        timeout=120.0,  # RMBG-2.0 is a single forward pass; ~1-3 s on GPU
-    )
+    async with _queued(user_id, "rmbg-2.0"):
+        response = await http_client.post(
+            f"{endpoint}/v1/pipelines/rembg/run",
+            json=payload,
+            timeout=120.0,  # RMBG-2.0 is a single forward pass; ~1-3 s on GPU
+        )
     if response.status_code != 200:
         raise ImageServiceError(
             f"runner rembg returned {response.status_code}: {response.text[:512]}",
@@ -499,10 +577,7 @@ async def stream_rembg_artifact(
         )
 
     cli = client or _default_client
-    if not cli._endpoints:
-        raise ImageServiceError("No runner endpoints configured", status_code=503)
-
-    endpoint = cli._endpoints[0]
+    endpoint = await _pick_pipeline_endpoint(cli, "rembg")
     url = f"{endpoint}/v1/pipelines/rembg/files/{filename}"
     http_client = cli._get_client()
 
@@ -556,10 +631,9 @@ async def stream_3d_artifact(
     rather pass them through transparently.
 
     Multi-runner caveat: the file lives on the runner that ran the
-    generation; we currently only target ``RunnerClient._endpoints[0]``
-    (the same one ``generate_3d`` uses).  When we scale Hunyuan3D
-    across multiple runners, fan out a HEAD request to each and return
-    the 200 responder.
+    generation, so we route through the ``img23d`` pipeline_map.  If
+    Hunyuan3D scales across multiple runners later, replace the single
+    endpoint pick with a HEAD-fan-out and return the 200 responder.
     """
     if not _IMG23D_FILENAME_RE.match(filename):
         raise ImageServiceError(
@@ -568,11 +642,7 @@ async def stream_3d_artifact(
         )
 
     cli = client or _default_client
-
-    if not cli._endpoints:
-        raise ImageServiceError("No runner endpoints configured", status_code=503)
-
-    endpoint = cli._endpoints[0]
+    endpoint = await _pick_pipeline_endpoint(cli, "img23d")
     url = f"{endpoint}/v1/pipelines/img23d/files/{filename}"
 
     media_types = {

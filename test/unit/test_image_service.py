@@ -234,6 +234,11 @@ def _make_runner_client_for_img23d(body: Dict[str, Any], status_code: int = 200,
                                    text: str = "") -> MagicMock:
     client = MagicMock()
     client._endpoints = ["http://runner-1:8000"]
+    # New: pipeline routing is delegated to ``select_pipeline_endpoint``.
+    # Tests mock it as an async returning the same endpoint the http
+    # mock will respond on, so the call-graph reaches the existing
+    # http_client.post mock unchanged.
+    client.select_pipeline_endpoint = AsyncMock(return_value="http://runner-1:8000")
     http_client = MagicMock()
     http_client.post = AsyncMock(return_value=_mock_response(status_code, body, text=text))
     client._get_client = MagicMock(return_value=http_client)
@@ -350,6 +355,7 @@ def _make_runner_client_for_stream(
 
     client = MagicMock()
     client._endpoints = ["http://runner-1:8000"]
+    client.select_pipeline_endpoint = AsyncMock(return_value="http://runner-1:8000")
     http = MagicMock()
 
     stream_resp = MagicMock()
@@ -441,6 +447,10 @@ def test_stream_3d_artifact_targets_pipeline_files_endpoint():
 def _make_runner_client_for_rembg(body):
     client = MagicMock()
     client._endpoints = ["http://runner-1:8000"]
+    # Pipeline routing now delegates to ``select_pipeline_endpoint`` —
+    # mock it as an async returning the same endpoint the http_client
+    # mock will respond on.
+    client.select_pipeline_endpoint = AsyncMock(return_value="http://runner-1:8000")
     http = MagicMock()
     http.post = AsyncMock(return_value=_mock_response(200, body))
     client._get_client = MagicMock(return_value=http)
@@ -509,6 +519,7 @@ def test_remove_bg_surfaces_runner_failure():
 
     client = MagicMock()
     client._endpoints = ["http://r1:8000"]
+    client.select_pipeline_endpoint = AsyncMock(return_value="http://r1:8000")
     http = MagicMock()
     http.post = AsyncMock(return_value=_mock_response(500, text="boom"))
     client._get_client = MagicMock(return_value=http)

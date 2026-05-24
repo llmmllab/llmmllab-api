@@ -627,6 +627,61 @@ class TestRunnerClientModelMap:
         assert client._model_map["model-c"] == ["http://r2:8001"]
 
     @pytest.mark.asyncio
+    async def test_refresh_builds_pipeline_map(self):
+        """In-process models populate _pipeline_map indexed by pipeline name."""
+        r1 = MagicMock()
+        r1.status_code = 200
+        r1.json.return_value = [
+            {"id": "hunyuan3d-2.1", "name": "Hy3D", "model": "h", "task": "ImageTo3D",
+             "modified_at": "2025-01-01", "digest": "h",
+             "provider": "in_process", "pipeline": "img23d",
+             "details": {"format": "safetensors", "family": "h", "families": ["h"],
+                         "parameter_size": "2.7B", "size": 15e9, "original_ctx": 0}},
+        ]
+        r2 = MagicMock()
+        r2.status_code = 200
+        r2.json.return_value = [
+            {"id": "rmbg-2.0", "name": "Rmbg", "model": "r", "task": "ImageToImage",
+             "modified_at": "2025-01-01", "digest": "r",
+             "provider": "in_process", "pipeline": "rembg",
+             "details": {"format": "safetensors", "family": "r", "families": ["r"],
+                         "parameter_size": "0.22B", "size": 885e6, "original_ctx": 0}},
+        ]
+        idx = [0]
+        async def mock_get(url, **kw):
+            r = [r1, r2][idx[0]]; idx[0] += 1; return r
+        mock = _mock_client(get=AsyncMock(side_effect=mock_get))
+        client = RunnerClient(endpoints=["http://r1:8000", "http://r2:8001"])
+        client._client = mock
+        await client.refresh_model_map()
+        assert client._pipeline_map["img23d"] == ["http://r1:8000"]
+        assert client._pipeline_map["rembg"] == ["http://r2:8001"]
+        # llama_cpp / sd models don't pollute the pipeline map
+        assert "llama" not in client._pipeline_map
+
+    @pytest.mark.asyncio
+    async def test_select_pipeline_endpoint_routes_by_pipeline_map(self):
+        """select_pipeline_endpoint returns the runner advertising the pipeline."""
+        client = RunnerClient(endpoints=["http://r1:8000", "http://r2:8001"])
+        client._pipeline_map = {"rembg": ["http://r2:8001"]}
+        # Stub _health so the ranked branch can pick a candidate.
+        async def fake_health(ep):
+            return {"gpu": {"available_vram_bytes": 12e9}}
+        client._health = fake_health  # type: ignore[assignment]
+        client._is_circuit_open = MagicMock(return_value=False)
+        ep = await client.select_pipeline_endpoint("rembg")
+        assert ep == "http://r2:8001"
+
+    @pytest.mark.asyncio
+    async def test_select_pipeline_endpoint_falls_back_when_unmapped(self):
+        """Unknown pipeline name -> falls back to endpoints[0] (caller hits 404)."""
+        client = RunnerClient(endpoints=["http://r1:8000", "http://r2:8001"])
+        # Skip the lazy refresh by pre-populating the map (empty for our key).
+        client._pipeline_map = {"img23d": ["http://r1:8000"]}
+        ep = await client.select_pipeline_endpoint("nonexistent")
+        assert ep == "http://r1:8000"
+
+    @pytest.mark.asyncio
     async def test_refresh_skips_unhealthy_runner(self):
         r1 = MagicMock()
         r1.status_code = 200

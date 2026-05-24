@@ -31,9 +31,11 @@ import re
 import time
 from typing import List, Optional, Tuple
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+
+from middleware.auth import get_user_id
 
 from models.openai.create_image_request import CreateImageRequest
 from models.openai.image import Image
@@ -114,7 +116,7 @@ class CreateImageEditRequest(BaseModel):
 
 
 @router.post("/edits")
-async def createImageEdit(body: CreateImageEditRequest) -> ImagesResponse:
+async def createImageEdit(body: CreateImageEditRequest, request: Request) -> ImagesResponse:
     """Edit an image with stable-diffusion.cpp's img2img endpoint.
 
     Backed by Qwen-Image-Edit-2511-GGUF when ``model=qwen-image-edit-2511``;
@@ -136,6 +138,7 @@ async def createImageEdit(body: CreateImageEditRequest) -> ImagesResponse:
             cfg_scale=body.cfg_scale,
             sampler_name=body.sampler_name,
             seed=body.seed if body.seed is not None else -1,
+            user_id=get_user_id(request),
         )
     except ImageServiceError as e:
         logger.error("Image edit failed: %s", e)
@@ -149,7 +152,7 @@ async def createImageEdit(body: CreateImageEditRequest) -> ImagesResponse:
 
 
 @router.post("/generations")
-async def createImage(body: CreateImageRequest) -> ImagesResponse:
+async def createImage(body: CreateImageRequest, request: Request) -> ImagesResponse:
     """Generate an image from a prompt using a runner-hosted SD model.
 
     Defaults are tuned for the Qwen-Image-2512-GGUF Q4_K_M tutorial:
@@ -170,6 +173,7 @@ async def createImage(body: CreateImageRequest) -> ImagesResponse:
             width=width,
             height=height,
             batch_size=body.n or 1,
+            user_id=get_user_id(request),
         )
     except ImageServiceError as e:
         logger.error("Image generation failed: %s", e)
@@ -218,7 +222,7 @@ class CreateImageTo3DResponse(BaseModel):
 
 
 @router.post("/3d", response_model=CreateImageTo3DResponse)
-async def createImageTo3D(body: CreateImageTo3DRequest) -> CreateImageTo3DResponse:
+async def createImageTo3D(body: CreateImageTo3DRequest, request: Request) -> CreateImageTo3DResponse:
     """Convert a 2D image to a 3D mesh + gaussian-splat representation.
 
     Backed by Hunyuan3D-2.1 (shape-only) running in-process on the
@@ -236,6 +240,7 @@ async def createImageTo3D(body: CreateImageTo3DRequest) -> CreateImageTo3DRespon
             ss_cfg_strength=body.ss_cfg_strength or 7.5,
             slat_cfg_strength=body.slat_cfg_strength or 3.0,
             formats=body.formats or ["mesh"],
+            user_id=get_user_id(request),
         )
     except ImageServiceError as e:
         logger.error("img23d failed: %s", e)
@@ -322,7 +327,9 @@ class RemoveBackgroundResponse(BaseModel):
 
 
 @router.post("/remove-bg", response_model=RemoveBackgroundResponse)
-async def createBackgroundRemoval(body: RemoveBackgroundRequest) -> RemoveBackgroundResponse:
+async def createBackgroundRemoval(
+    body: RemoveBackgroundRequest, request: Request
+) -> RemoveBackgroundResponse:
     """Remove the background of an image with briaai/RMBG-2.0.
 
     Purpose-built segmentation model — picks up where Qwen-Image-Edit's
@@ -335,6 +342,7 @@ async def createBackgroundRemoval(body: RemoveBackgroundRequest) -> RemoveBackgr
             image_b64=body.image,
             mask_only=bool(body.mask_only),
             size=body.size,
+            user_id=get_user_id(request),
         )
     except ImageServiceError as e:
         logger.error("rembg failed: %s", e)

@@ -87,6 +87,13 @@ class RunnerClient:
         self._healthy: list[str] = []
         self._client: Optional[httpx.AsyncClient] = None
         self._model_map: Dict[str, List[str]] = {}
+        # Pipeline-name → endpoints map, populated alongside the
+        # model_map from each runner's /v1/models response by filtering
+        # on ``provider == 'in_process'`` and indexing by ``pipeline``.
+        # Used by ``_select_pipeline_runner`` to route in-process
+        # pipeline calls (rembg, img23d, ...) to whichever runner's
+        # yaml declares the corresponding model.
+        self._pipeline_map: Dict[str, List[str]] = {}
         self._refresh_task: Optional[asyncio.Task] = None
         self._health_check_task: Optional[asyncio.Task] = None
         self._unhealthy_since: Dict[str, float] = {}
@@ -809,6 +816,74 @@ class RunnerClient:
                 best_url = endpoint
         return best_url
 
+    async def select_pipeline_endpoint(self, pipeline_name: str) -> str:
+        """Pick the best endpoint hosting *pipeline_name*.
+
+        Mirrors :meth:`_select_runner` but indexes through
+        ``_pipeline_map`` (populated by :meth:`refresh_model_map` from
+        models with ``provider == 'in_process'``).  No sticky pinning:
+        in-process pipelines are stateless across calls (the cached
+        instance lives in the runner's Python process; there's no KV
+        cache or slot to preserve like llama.cpp servers have), so
+        ranking purely by handle count + free VRAM gives the best
+        spread without locking traffic to a slow runner.
+
+        Falls back to the first configured endpoint if no runner has
+        refreshed its model map yet — this preserves boot behaviour
+        for the first request after startup, when ``refresh_model_map``
+        may not have completed.
+
+        Raises :class:`ImageServiceError`-shaped exception via the
+        caller if no endpoints are configured at all (caller handles).
+        """
+        if not self._endpoints:
+            raise RuntimeError("No runner endpoints configured")
+
+        # Lazily refresh the map if we have nothing for this pipeline.
+        # ``acquire_server`` does the same trick for ``_model_map``.
+        if not self._pipeline_map:
+            try:
+                await self.refresh_model_map()
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"refresh_model_map failed during pipeline select: {e}")
+
+        candidates = self._pipeline_map.get(pipeline_name, [])
+        if not candidates:
+            # No runner declared this pipeline.  Fall back to the first
+            # endpoint so we surface the real "pipeline not advertised"
+            # error from the runner (404), not a fuzzy api-side guess.
+            logger.warning(
+                f"Pipeline '{pipeline_name}' not in pipeline_map; "
+                f"falling back to first endpoint.  Configured pipelines: "
+                f"{sorted(self._pipeline_map.keys())}"
+            )
+            return self._endpoints[0]
+
+        # Ranked: (-handle_count, available_vram).  No sticky pin (see
+        # docstring above for rationale).
+        best_url: Optional[str] = None
+        best_key: Optional[tuple[int, int]] = None
+        for endpoint in candidates:
+            if self._is_circuit_open(endpoint):
+                continue
+            health = await self._health(endpoint)
+            if not health:
+                continue
+            vram = int(health.get("gpu", {}).get("available_vram_bytes", 0))
+            here_count = sum(
+                1 for h in self._active_handles if h.runner_host == endpoint
+            )
+            key = (-here_count, vram)
+            if best_key is None or key > best_key:
+                best_key = key
+                best_url = endpoint
+        if best_url is None:
+            # All candidate endpoints unhealthy or circuit-tripped.
+            # Pick the first candidate anyway — caller's HTTP error
+            # response is more informative than ours would be.
+            best_url = candidates[0]
+        return best_url
+
     # ------------------------------------------------------------------
     # Server lifecycle
     # ------------------------------------------------------------------
@@ -1016,8 +1091,27 @@ class RunnerClient:
     # ------------------------------------------------------------------
 
     async def refresh_model_map(self) -> None:
-        """Query all runners and build a model_id -> [endpoints] map."""
+        """Query all runners and build model_id + pipeline_name maps.
+
+        Two indexes are built in a single pass over each runner's
+        ``/v1/models`` response:
+
+        * ``_model_map``: ``{model_id -> [endpoints]}`` — used by
+          ``acquire_server`` for subprocess-backed models (llama_cpp,
+          stable_diffusion_cpp).
+        * ``_pipeline_map``: ``{pipeline_name -> [endpoints]}`` —
+          built from models with ``provider == 'in_process'`` and a
+          declared ``pipeline`` field.  Used by
+          ``_select_pipeline_runner`` to route POST /v1/pipelines/<name>/run
+          calls to whichever runner advertises a model for that pipeline.
+
+        Because each runner's ``/v1/models`` reflects its own
+        ``.models.yaml``, capability splits between runners
+        (``llmmllab-runner`` vs ``llmmllab-runner-small``) come from
+        yaml alone — no env vars or substring matches in the api.
+        """
         new_map: Dict[str, List[str]] = {}
+        new_pipeline_map: Dict[str, List[str]] = {}
         client = self._get_client()
         tasks = []
         for endpoint in self._endpoints:
@@ -1026,7 +1120,7 @@ class RunnerClient:
                 try:
                     resp = await client.get(f"{ep}/v1/models")
                     if resp.status_code == 200:
-                        return [(m["id"], ep) for m in resp.json() if "id" in m]
+                        return [(m, ep) for m in resp.json() if isinstance(m, dict) and "id" in m]
                 except Exception as e:
                     logger.warning(f"Failed to list models from {ep}: {e}")
                 return []
@@ -1035,13 +1129,22 @@ class RunnerClient:
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for result in results:
             if isinstance(result, list):
-                for model_id, endpoint in result:
-                    if model_id not in new_map:
-                        new_map[model_id] = []
-                    new_map[model_id].append(endpoint)
+                for model, endpoint in result:
+                    model_id = model["id"]
+                    new_map.setdefault(model_id, []).append(endpoint)
+                    if model.get("provider") == "in_process":
+                        pipeline_name = model.get("pipeline")
+                        if pipeline_name:
+                            eps = new_pipeline_map.setdefault(pipeline_name, [])
+                            if endpoint not in eps:
+                                eps.append(endpoint)
         self._model_map = new_map
+        self._pipeline_map = new_pipeline_map
         logger.info(
-            f"Model map refreshed: {len(new_map)} models across {len(self._endpoints)} endpoints"
+            f"Model map refreshed: {len(new_map)} models, "
+            f"{len(new_pipeline_map)} pipelines across "
+            f"{len(self._endpoints)} endpoints "
+            f"(pipelines: {sorted(new_pipeline_map.keys())})"
         )
 
     def _schedule_refresh(self) -> None:
