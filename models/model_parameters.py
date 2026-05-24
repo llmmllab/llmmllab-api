@@ -389,4 +389,77 @@ class ModelParameters(BaseModel):
     ] = None
     """Enable Qwen-Image zero_cond_t conditioning — required for Qwen-Image-Edit-2511."""
 
+    diffusion_fa: Annotated[
+        Optional[bool],
+        Field(
+            default=None,
+            description="Enable Flash Attention in the diffusion model only (sd-server `--diffusion-fa`). "
+            "Used in the official sd.cpp Qwen-Image-Edit-2511 example for speed + memory. "
+            "Distinct from --fa which enables FA everywhere (including text encoder).",
+        ),
+    ] = None
+    """Enable flash attention for the diffusion model only (sd-server)."""
+
+    diffusion_conv_direct: Annotated[
+        Optional[bool],
+        Field(
+            default=None,
+            description="Use ``ggml_conv2d_direct`` in the diffusion model (sd-server `--diffusion-conv-direct`). "
+            "Memory-efficient convolution variant; small speedup on most configurations.",
+        ),
+    ] = None
+    """Enable direct conv2d in the diffusion model."""
+
+    vae_conv_direct: Annotated[
+        Optional[bool],
+        Field(
+            default=None,
+            description="Use ``ggml_conv2d_direct`` in the VAE (sd-server `--vae-conv-direct`). "
+            "Pairs naturally with ``--vae-tiling`` for low-VRAM VAE decode.",
+        ),
+    ] = None
+    """Enable direct conv2d in the VAE."""
+
+    offload_to_cpu: Annotated[
+        Optional[bool],
+        Field(
+            default=None,
+            description="Keep SD weights in RAM and page to VRAM on demand (sd-server `--offload-to-cpu`). "
+            "Trades ~30% throughput for VRAM headroom; used in the official sd.cpp examples on "
+            "memory-constrained setups.",
+        ),
+    ] = None
+    """Offload SD weights to system RAM (sd-server --offload-to-cpu)."""
+
+    max_vram_gib: Annotated[
+        Optional[float],
+        Field(
+            default=None,
+            description="Maximum VRAM budget in GiB for sd-server's graph-cut segmented execution "
+            "(`--max-vram`).  0 disables.  Useful when the GPU is shared with other workloads.",
+            ge=0.0,
+        ),
+    ] = None
+    """sd-server --max-vram budget in GiB."""
+
+    vae_on_cpu: Annotated[
+        Optional[bool],
+        Field(
+            default=None,
+            description="Keep VAE on CPU (sd-server `--vae-on-cpu`).  Drops ~250 MiB of VRAM at the "
+            "cost of a slow VAE decode round-trip; rarely needed alongside --vae-tiling.",
+        ),
+    ] = None
+    """Keep VAE on CPU (sd-server)."""
+
+    clip_on_cpu: Annotated[
+        Optional[bool],
+        Field(
+            default=None,
+            description="Keep the text encoder / CLIP on CPU (sd-server `--clip-on-cpu`).  Drops the "
+            "text-encode weights out of VRAM; slow but useful when the VRAM budget is tight.",
+        ),
+    ] = None
+    """Keep text encoder on CPU (sd-server)."""
+
     model_config = ConfigDict(extra="ignore")
