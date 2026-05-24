@@ -367,4 +367,26 @@ class ModelParameters(BaseModel):
     ] = None
     """sd-server --params-backend (weight storage placement)."""
 
+    flow_shift: Annotated[
+        Optional[float],
+        Field(
+            default=None,
+            description="Flow shift for flow-matching models like Qwen-Image (sd-server `--flow-shift`). "
+            "Tutorial recommends 3 for Qwen-Image / Qwen-Image-Edit; default is auto if unset.",
+            ge=0.0,
+        ),
+    ] = None
+    """Flow shift for flow-matching schedulers (Qwen-Image / SD3.x / WAN)."""
+
+    qwen_image_zero_cond_t: Annotated[
+        Optional[bool],
+        Field(
+            default=None,
+            description="Enable Qwen-Image's zero_cond_t conditioning (sd-server `--qwen-image-zero-cond-t`). "
+            "REQUIRED for Qwen-Image-Edit-2511; the leejet/stable-diffusion.cpp docs note that "
+            "without it, image editing quality degrades significantly.",
+        ),
+    ] = None
+    """Enable Qwen-Image zero_cond_t conditioning — required for Qwen-Image-Edit-2511."""
+
     model_config = ConfigDict(extra="ignore")

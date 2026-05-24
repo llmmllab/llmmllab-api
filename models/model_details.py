@@ -75,4 +75,7 @@ class ModelDetails(BaseModel):
     clip_g_path: Annotated[Optional[str], Field(default=None, description="Secondary CLIP-G text encoder (for SDXL/SD3)")] = None
     """Secondary CLIP-G text encoder path"""
 
+    llm_vision_path: Annotated[Optional[str], Field(default=None, description="Qwen2.5-VL visual tower / vision encoder for Qwen-Image-Edit 2509+ (sd-server --llm_vision). Required for instruction-following edits; without it sd-server falls back to the plain Qwen-Image txt2img pipeline and ignores the prompt's editing intent.")] = None
+    """Qwen2.5-VL visual encoder (sd-server --llm_vision) — required for Qwen-Image-Edit 2509+."""
+
     model_config = ConfigDict(extra="ignore")
