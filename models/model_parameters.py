@@ -327,4 +327,44 @@ class ModelParameters(BaseModel):
     ] = None
     """Default denoising strength for img2img (sd-server)."""
 
+    # ------------------------------------------------------------------
+    # Multi-GPU layout for sd-server (per-component placement).
+    #
+    # stable-diffusion.cpp does NOT support llama.cpp-style tensor
+    # splitting (a single layer's weights sharded across devices), but
+    # it does let us place different sub-models onto different devices.
+    # Use ``sd_backend`` to set ``--backend`` (compute placement) and
+    # ``sd_params_backend`` to set ``--params-backend`` (weight
+    # storage placement).  Example values:
+    #
+    #     sd_backend: "clip=cuda0,diffusion=cuda1,vae=cuda1"
+    #     sd_params_backend: "diffusion=cpu"
+    #
+    # When ``sd_backend`` is set, the runner intentionally does NOT pin
+    # ``CUDA_VISIBLE_DEVICES`` (otherwise sd-server would only see the
+    # one GPU named by ``main_gpu`` and the multi-device names in the
+    # backend string would fail to resolve).
+    # ------------------------------------------------------------------
+    sd_backend: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="sd-server `--backend` value: per-component compute placement. "
+            'Example: ``"clip=cuda0,diffusion=cuda1,vae=cuda1"``. '
+            "Mutually exclusive with single-GPU ``main_gpu`` pinning.",
+        ),
+    ] = None
+    """sd-server --backend compute placement (multi-GPU layout)."""
+
+    sd_params_backend: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="sd-server `--params-backend` value: per-component weight storage. "
+            'Example: ``"diffusion=cpu"`` to keep diffusion weights in RAM and '
+            "compute on GPU.  Trades ~30% throughput for VRAM headroom.",
+        ),
+    ] = None
+    """sd-server --params-backend (weight storage placement)."""
+
     model_config = ConfigDict(extra="ignore")
