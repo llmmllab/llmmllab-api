@@ -431,35 +431,38 @@ async def stream_3d_artifact(
 
     http_client = cli._get_client()
 
-    # HEAD-check first so we can surface a clean 404 / 400 without holding
-    # an open stream on the runner side for failure cases.
-    head = await http_client.request("HEAD", url, timeout=10.0)
-    if head.status_code == 404:
-        raise ImageServiceError(
-            f"Artefact '{filename}' not found on runner",
-            status_code=404,
-        )
-    if head.status_code == 400:
-        raise ImageServiceError(
-            f"Runner rejected filename '{filename}'", status_code=400
-        )
-    if head.status_code >= 400:
-        raise ImageServiceError(
-            f"Runner returned {head.status_code} fetching '{filename}'",
-            status_code=502,
-        )
+    # Opening the streaming GET inside the context manager and reading the
+    # initial response headers before we hand the body iterator to the
+    # caller lets us surface 4xx/5xx as clean ``ImageServiceError`` values
+    # without partially-streamed output.  The runner doesn't register a
+    # HEAD route, so we skip the pre-check that would have made this
+    # simpler.
+    stream_ctx = http_client.stream("GET", url, timeout=120.0)
+    resp = await stream_ctx.__aenter__()
+    try:
+        if resp.status_code == 404:
+            raise ImageServiceError(
+                f"Artefact '{filename}' not found on runner",
+                status_code=404,
+            )
+        if resp.status_code == 400:
+            raise ImageServiceError(
+                f"Runner rejected filename '{filename}'", status_code=400
+            )
+        if resp.status_code >= 400:
+            raise ImageServiceError(
+                f"Runner returned {resp.status_code} fetching '{filename}'",
+                status_code=502,
+            )
+    except BaseException:
+        await stream_ctx.__aexit__(None, None, None)
+        raise
 
     async def _iter_bytes():
-        # New streaming GET — httpx requires this to be opened inside the
-        # generator so the request stays bound to the consumer's lifetime.
-        async with http_client.stream("GET", url, timeout=120.0) as resp:
-            if resp.status_code != 200:
-                # We already HEAD-checked, but be defensive against TOCTOU.
-                raise ImageServiceError(
-                    f"Runner returned {resp.status_code} mid-stream",
-                    status_code=502,
-                )
+        try:
             async for chunk in resp.aiter_bytes():
                 yield chunk
+        finally:
+            await stream_ctx.__aexit__(None, None, None)
 
     return media_type, _iter_bytes()

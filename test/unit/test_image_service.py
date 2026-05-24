@@ -331,18 +331,21 @@ class _AsyncCM:
 
 
 def _make_runner_client_for_stream(
-    head_status: int = 200,
     get_status: int = 200,
     chunks=(b"chunk-1", b"chunk-2"),
 ):
+    """Build a RunnerClient stub for ``stream_3d_artifact``.
+
+    The runner doesn't register a HEAD route on
+    ``/v1/pipelines/img23d/files/{filename}``, so the service makes
+    a streaming GET only.  ``get_status`` controls the response code
+    seen on that GET.
+    """
     from services.image_service import stream_3d_artifact  # noqa: F401
 
     client = MagicMock()
     client._endpoints = ["http://runner-1:8000"]
     http = MagicMock()
-    head_resp = MagicMock()
-    head_resp.status_code = head_status
-    http.request = AsyncMock(return_value=head_resp)
 
     stream_resp = MagicMock()
     stream_resp.status_code = get_status
@@ -388,7 +391,7 @@ def test_stream_3d_artifact_rejects_invalid_filename():
 def test_stream_3d_artifact_404_when_runner_says_not_found():
     from services.image_service import stream_3d_artifact
 
-    client = _make_runner_client_for_stream(head_status=404)
+    client = _make_runner_client_for_stream(get_status=404)
 
     with pytest.raises(ImageServiceError) as exc:
         _run(stream_3d_artifact("abc123.glb", client=client))
@@ -421,9 +424,5 @@ def test_stream_3d_artifact_targets_pipeline_files_endpoint():
     _run(_drain())
 
     http = client._get_client.return_value
-    # HEAD first
-    head_args, _ = http.request.call_args
-    assert head_args == ("HEAD", "http://runner-1:8000/v1/pipelines/img23d/files/abc.glb")
-    # Then streaming GET
     stream_args, _ = http.stream.call_args
     assert stream_args == ("GET", "http://runner-1:8000/v1/pipelines/img23d/files/abc.glb")
