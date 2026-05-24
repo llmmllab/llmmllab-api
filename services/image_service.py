@@ -406,6 +406,136 @@ async def generate_3d(
 
 
 # ---------------------------------------------------------------------------
+# Background removal — briaai/RMBG-2.0 via the runner's in-process
+# ``rembg`` pipeline.  Unlike SD txt2img / img2img we don't acquire a
+# server: the model is loaded inside the runner process and exposed at
+# ``/v1/pipelines/rembg/run``.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RembgResult:
+    id: str
+    mask_b64: str
+    transparent_b64: Optional[str]
+    cutout_url: Optional[str]
+    width: int
+    height: int
+    elapsed_sec: float
+    runner_endpoint: Optional[str] = None
+
+
+async def remove_image_background(
+    *,
+    image_b64: str,
+    mask_only: bool = False,
+    size: Optional[int] = None,
+    client: Optional[RunnerClient] = None,
+) -> RembgResult:
+    """Remove the background of an image via briaai/RMBG-2.0.
+
+    Always returns ``mask_b64`` (the grayscale alpha mask) and, unless
+    ``mask_only=True``, also returns ``transparent_b64`` (the source
+    image with the mask applied as alpha).  The cutout is also
+    persisted on the runner and accessible via the proxy GET endpoint
+    ``/v1/images/remove-bg/{id}.png``.
+    """
+    cli = client or _default_client
+    if not cli._endpoints:
+        raise ImageServiceError("No runner endpoints configured", status_code=503)
+
+    endpoint = cli._endpoints[0]
+    payload: Dict[str, Any] = {"image_b64": image_b64, "mask_only": bool(mask_only)}
+    if size is not None:
+        payload["size"] = int(size)
+
+    logger.info("Submitting rembg request", extra={"endpoint": endpoint})
+
+    http_client = cli._get_client()
+    response = await http_client.post(
+        f"{endpoint}/v1/pipelines/rembg/run",
+        json=payload,
+        timeout=120.0,  # RMBG-2.0 is a single forward pass; ~1-3 s on GPU
+    )
+    if response.status_code != 200:
+        raise ImageServiceError(
+            f"runner rembg returned {response.status_code}: {response.text[:512]}",
+            status_code=response.status_code,
+        )
+
+    body = response.json()
+    cutout_path = body.get("cutout_path")
+    cutout_url: Optional[str] = None
+    if cutout_path:
+        import os as _os
+        cutout_url = f"/v1/images/remove-bg/{_os.path.basename(cutout_path)}"
+
+    return RembgResult(
+        id=body.get("id", ""),
+        mask_b64=body.get("mask_b64") or "",
+        transparent_b64=body.get("transparent_b64"),
+        cutout_url=cutout_url,
+        width=int(body.get("width", 0) or 0),
+        height=int(body.get("height", 0) or 0),
+        elapsed_sec=float(body.get("elapsed_sec", 0.0)),
+        runner_endpoint=endpoint,
+    )
+
+
+async def stream_rembg_artifact(
+    filename: str,
+    *,
+    client: Optional[RunnerClient] = None,
+):
+    """Stream a rembg cutout PNG from the runner.
+
+    Mirrors :func:`stream_3d_artifact`.  Filename is validated by the
+    runner side (regex on basename), so we just forward the GET.
+    """
+    if not filename or "/" in filename or "\\" in filename:
+        raise ImageServiceError(
+            f"Invalid filename '{filename}'",
+            status_code=400,
+        )
+
+    cli = client or _default_client
+    if not cli._endpoints:
+        raise ImageServiceError("No runner endpoints configured", status_code=503)
+
+    endpoint = cli._endpoints[0]
+    url = f"{endpoint}/v1/pipelines/rembg/files/{filename}"
+    http_client = cli._get_client()
+
+    stream_ctx = http_client.stream("GET", url, timeout=30.0)
+    resp = await stream_ctx.__aenter__()
+    try:
+        if resp.status_code == 404:
+            raise ImageServiceError(
+                f"Artefact '{filename}' not found on runner", status_code=404,
+            )
+        if resp.status_code == 400:
+            raise ImageServiceError(
+                f"Runner rejected filename '{filename}'", status_code=400,
+            )
+        if resp.status_code >= 400:
+            raise ImageServiceError(
+                f"Runner returned {resp.status_code}", status_code=502,
+            )
+    except BaseException:
+        await stream_ctx.__aexit__(None, None, None)
+        raise
+
+    async def _iter_bytes():
+        try:
+            async for chunk in resp.aiter_bytes():
+                yield chunk
+        finally:
+            await stream_ctx.__aexit__(None, None, None)
+
+    return "image/png", _iter_bytes()
+
+
+# ---------------------------------------------------------------------------
 # Artefact download — proxies through to whichever runner holds the file.
 # ---------------------------------------------------------------------------
 

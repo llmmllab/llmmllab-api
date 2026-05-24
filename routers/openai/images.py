@@ -43,7 +43,9 @@ from services.image_service import (
     edit_image,
     generate_3d,
     generate_image,
+    remove_image_background,
     stream_3d_artifact,
+    stream_rembg_artifact,
 )
 
 logger = logging.getLogger(__name__)
@@ -264,6 +266,112 @@ async def createImageTo3D(body: CreateImageTo3DRequest) -> CreateImageTo3DRespon
         mesh_url=mesh_url,
         gaussian_url=gaussian_url,
         preview_b64=result.preview_b64,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Background removal — briaai/RMBG-2.0 (in-process pipeline on the runner)
+# ---------------------------------------------------------------------------
+
+
+class RemoveBackgroundRequest(BaseModel):
+    """Input for ``POST /v1/images/remove-bg`` — base64 image in, cutout out."""
+
+    image: str = Field(..., description="Base64-encoded source image (PNG or JPEG)")
+    mask_only: Optional[bool] = Field(
+        False,
+        description=(
+            "If true, the response only includes the alpha mask (grayscale "
+            "PNG) without the alpha-composited cutout.  Useful when the "
+            "caller wants to do their own compositing downstream."
+        ),
+    )
+    size: Optional[int] = Field(
+        None,
+        ge=64,
+        description=(
+            "Square edge in pixels for the model's internal resize.  "
+            "Defaults to 1024 (the RMBG-2.0 recipe).  The mask is "
+            "upsampled back to the source resolution regardless."
+        ),
+    )
+
+
+class RemoveBackgroundResponse(BaseModel):
+    id: str = Field(..., description="Generation ID — also the stem of the cutout file")
+    created: int = Field(..., description="Unix timestamp (seconds)")
+    elapsed_sec: float = Field(..., description="Server-reported wall-clock time")
+    width: int = Field(..., description="Output width (matches source)")
+    height: int = Field(..., description="Output height (matches source)")
+    mask_b64: str = Field(..., description="Base64 grayscale PNG of the alpha mask")
+    transparent_b64: Optional[str] = Field(
+        None,
+        description=(
+            "Base64 PNG of the source image with the mask applied as alpha "
+            "(transparent background).  ``null`` when ``mask_only=true``."
+        ),
+    )
+    cutout_url: Optional[str] = Field(
+        None,
+        description=(
+            "Relative URL to download the cutout PNG via "
+            "``GET /v1/images/remove-bg/{id}.png`` — avoids the b64 "
+            "round-trip for callers that just want the file."
+        ),
+    )
+
+
+@router.post("/remove-bg", response_model=RemoveBackgroundResponse)
+async def createBackgroundRemoval(body: RemoveBackgroundRequest) -> RemoveBackgroundResponse:
+    """Remove the background of an image with briaai/RMBG-2.0.
+
+    Purpose-built segmentation model — picks up where Qwen-Image-Edit's
+    instruction-following pipeline tops out.  Always returns the alpha
+    mask; also returns an alpha-composited transparent PNG unless
+    ``mask_only=true``.  Generation is fast (~1-3 s on GPU).
+    """
+    try:
+        result = await remove_image_background(
+            image_b64=body.image,
+            mask_only=bool(body.mask_only),
+            size=body.size,
+        )
+    except ImageServiceError as e:
+        logger.error("rembg failed: %s", e)
+        if e.status_code == 503:
+            raise HTTPException(status_code=503, detail=str(e)) from e
+        raise HTTPException(status_code=502, detail=str(e)) from e
+
+    return RemoveBackgroundResponse(
+        id=result.id,
+        created=int(time.time()),
+        elapsed_sec=result.elapsed_sec,
+        width=result.width,
+        height=result.height,
+        mask_b64=result.mask_b64,
+        transparent_b64=result.transparent_b64,
+        cutout_url=result.cutout_url,
+    )
+
+
+@router.get("/remove-bg/{filename}")
+async def downloadBackgroundRemoval(filename: str):
+    """Stream a rembg cutout PNG back through the api."""
+    try:
+        media_type, body = await stream_rembg_artifact(filename)
+    except ImageServiceError as e:
+        if e.status_code == 404:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+        if e.status_code == 400:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        if e.status_code == 503:
+            raise HTTPException(status_code=503, detail=str(e)) from e
+        raise HTTPException(status_code=502, detail=str(e)) from e
+
+    return StreamingResponse(
+        body,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

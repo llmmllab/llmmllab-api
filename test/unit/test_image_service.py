@@ -431,3 +431,115 @@ def test_stream_3d_artifact_targets_pipeline_files_endpoint():
     http = client._get_client.return_value
     stream_args, _ = http.stream.call_args
     assert stream_args == ("GET", "http://runner-1:8000/v1/pipelines/img23d/files/abc.glb")
+
+
+# ---------------------------------------------------------------------------
+# remove_image_background
+# ---------------------------------------------------------------------------
+
+
+def _make_runner_client_for_rembg(body):
+    client = MagicMock()
+    client._endpoints = ["http://runner-1:8000"]
+    http = MagicMock()
+    http.post = AsyncMock(return_value=_mock_response(200, body))
+    client._get_client = MagicMock(return_value=http)
+    return client
+
+
+def test_remove_bg_posts_to_pipeline_endpoint_and_unwraps_response():
+    from services.image_service import remove_image_background
+
+    fake_mask = "bWFzaw=="
+    fake_cutout = "Y3V0b3V0"
+    client = _make_runner_client_for_rembg({
+        "id": "abc123",
+        "mask_b64": fake_mask,
+        "transparent_b64": fake_cutout,
+        "cutout_path": "/data/sd-out/rembg/abc123.png",
+        "width": 1024,
+        "height": 1024,
+        "elapsed_sec": 1.7,
+    })
+
+    result = _run(remove_image_background(image_b64="aGVsbG8=", client=client))
+
+    assert result.id == "abc123"
+    assert result.mask_b64 == fake_mask
+    assert result.transparent_b64 == fake_cutout
+    assert result.cutout_url == "/v1/images/remove-bg/abc123.png"
+    assert result.width == 1024 and result.height == 1024
+
+    http = client._get_client.return_value
+    args, kwargs = http.post.call_args
+    assert args[0] == "http://runner-1:8000/v1/pipelines/rembg/run"
+    assert kwargs["json"]["image_b64"] == "aGVsbG8="
+    assert kwargs["json"]["mask_only"] is False
+
+
+def test_remove_bg_propagates_mask_only_and_size():
+    from services.image_service import remove_image_background
+
+    client = _make_runner_client_for_rembg({
+        "id": "x", "mask_b64": "m", "transparent_b64": None,
+        "width": 512, "height": 512, "elapsed_sec": 0.5,
+    })
+
+    _run(remove_image_background(
+        image_b64="aGVsbG8=", mask_only=True, size=768, client=client,
+    ))
+
+    _, kwargs = client._get_client.return_value.post.call_args
+    assert kwargs["json"]["mask_only"] is True
+    assert kwargs["json"]["size"] == 768
+
+
+def test_remove_bg_503_when_no_runner():
+    from services.image_service import remove_image_background
+
+    client = MagicMock()
+    client._endpoints = []
+    with pytest.raises(ImageServiceError) as exc:
+        _run(remove_image_background(image_b64="aGVsbG8=", client=client))
+    assert exc.value.status_code == 503
+
+
+def test_remove_bg_surfaces_runner_failure():
+    from services.image_service import remove_image_background
+
+    client = MagicMock()
+    client._endpoints = ["http://r1:8000"]
+    http = MagicMock()
+    http.post = AsyncMock(return_value=_mock_response(500, text="boom"))
+    client._get_client = MagicMock(return_value=http)
+
+    with pytest.raises(ImageServiceError) as exc:
+        _run(remove_image_background(image_b64="aGVsbG8=", client=client))
+    assert exc.value.status_code == 500
+
+
+def test_stream_rembg_artifact_streams_png():
+    from services.image_service import stream_rembg_artifact
+
+    client = _make_runner_client_for_stream(chunks=(b"png-bytes",))
+
+    async def _drain():
+        mt, body = await stream_rembg_artifact("abc123.png", client=client)
+        out = b""
+        async for chunk in body:
+            out += chunk
+        return mt, out
+
+    media_type, content = _run(_drain())
+    assert media_type == "image/png"
+    assert content == b"png-bytes"
+
+
+def test_stream_rembg_artifact_rejects_path_separators():
+    from services.image_service import stream_rembg_artifact
+
+    client = _make_runner_client_for_stream()
+    for bad in ["../etc/passwd", "abc/def.png", "abc\\def.png", ""]:
+        with pytest.raises(ImageServiceError) as exc:
+            _run(stream_rembg_artifact(bad, client=client))
+        assert exc.value.status_code == 400, f"expected 400 for {bad!r}"

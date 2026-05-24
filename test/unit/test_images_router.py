@@ -18,6 +18,7 @@ from services.image_service import (
     ImageServiceError,
     ImageTo3DResult,
     ImageToImageResult,
+    RembgResult,
     TxtToImageResult,
 )
 
@@ -318,3 +319,91 @@ def test_download_3d_503_when_no_runner(client: TestClient):
     ):
         response = client.get("/images/3d/abc.glb")
     assert response.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# /images/remove-bg (briaai/RMBG-2.0)
+# ---------------------------------------------------------------------------
+
+
+def test_remove_bg_returns_mask_and_cutout(client: TestClient):
+    fake = RembgResult(
+        id="abc123",
+        mask_b64="bWFzaw==",
+        transparent_b64="Y3V0b3V0",
+        cutout_url="/v1/images/remove-bg/abc123.png",
+        width=1024,
+        height=1024,
+        elapsed_sec=1.7,
+    )
+    with patch(
+        "routers.openai.images.remove_image_background",
+        new=AsyncMock(return_value=fake),
+    ):
+        response = client.post(
+            "/images/remove-bg",
+            json={"image": "aGVsbG8="},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == "abc123"
+    assert body["mask_b64"] == "bWFzaw=="
+    assert body["transparent_b64"] == "Y3V0b3V0"
+    assert body["cutout_url"] == "/v1/images/remove-bg/abc123.png"
+    assert body["width"] == 1024 and body["height"] == 1024
+
+
+def test_remove_bg_passes_mask_only_flag(client: TestClient):
+    fake = RembgResult(
+        id="x", mask_b64="m", transparent_b64=None, cutout_url=None,
+        width=512, height=512, elapsed_sec=0.5,
+    )
+    mock = AsyncMock(return_value=fake)
+    with patch("routers.openai.images.remove_image_background", new=mock):
+        client.post("/images/remove-bg", json={"image": "aGVsbG8=", "mask_only": True})
+
+    _, kwargs = mock.call_args
+    assert kwargs["mask_only"] is True
+
+
+def test_remove_bg_upstream_failure_returns_502(client: TestClient):
+    with patch(
+        "routers.openai.images.remove_image_background",
+        new=AsyncMock(side_effect=ImageServiceError("boom", status_code=500)),
+    ):
+        response = client.post("/images/remove-bg", json={"image": "aGVsbG8="})
+    assert response.status_code == 502
+
+
+def test_remove_bg_503_when_no_runner(client: TestClient):
+    with patch(
+        "routers.openai.images.remove_image_background",
+        new=AsyncMock(side_effect=ImageServiceError("no runner", status_code=503)),
+    ):
+        response = client.post("/images/remove-bg", json={"image": "aGVsbG8="})
+    assert response.status_code == 503
+
+
+def test_download_rembg_streams_png(client: TestClient):
+    async def _iter():
+        yield b"png-bytes"
+
+    async def _stream(filename, **_kwargs):
+        return "image/png", _iter()
+
+    with patch("routers.openai.images.stream_rembg_artifact", new=AsyncMock(side_effect=_stream)):
+        response = client.get("/images/remove-bg/abc123.png")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("image/png")
+    assert response.content == b"png-bytes"
+
+
+def test_download_rembg_404_when_missing(client: TestClient):
+    with patch(
+        "routers.openai.images.stream_rembg_artifact",
+        new=AsyncMock(side_effect=ImageServiceError("not here", status_code=404)),
+    ):
+        response = client.get("/images/remove-bg/missing.png")
+    assert response.status_code == 404

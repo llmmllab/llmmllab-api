@@ -1,13 +1,13 @@
 # Image API test scripts
 
-Three curl-based shell scripts for exercising the image generation
-endpoints from the command line. No Python deps — just `bash`, `curl`,
-and `jq`.
+Four curl-based shell scripts for exercising the image endpoints from
+the command line. No Python deps — just `bash`, `curl`, and `jq`.
 
 | Script | Endpoint | Backend | Output |
 |--------|----------|---------|--------|
 | [`test_txt2img.sh`](#test_txt2imgsh) | `POST /v1/images/generations` | stable-diffusion.cpp `sd-server` | base64 PNG inline in response |
 | [`test_img2img.sh`](#test_img2imgsh) | `POST /v1/images/edits` | stable-diffusion.cpp `sd-server` (img2img) | base64 PNG inline in response |
+| [`test_rembg.sh`](#test_rembgsh) | `POST /v1/images/remove-bg` + `GET /v1/images/remove-bg/{file}` | briaai/RMBG-2.0 in-process pipeline | alpha mask PNG + transparent cutout PNG |
 | [`test_img2-3d.sh`](#test_img2-3dsh) | `POST /v1/images/3d` + `GET /v1/images/3d/{file}` | Hunyuan3D-2.1 in-process pipeline | `.glb` mesh + `.ply` gaussian, streamed back through api |
 
 > `runner_shutdown.sh` (ops tool to free VRAM by force-evicting runner
@@ -95,6 +95,59 @@ or more `b64_json` PNGs in `data[]`.
 we use JSON with `image` carrying base64 because every other endpoint
 in this api is JSON-with-base64. Keeps the wire surface uniform.
 
+## `test_rembg.sh`
+
+Background removal via briaai/RMBG-2.0 (BiRefNet) — purpose-built
+segmentation that picks up where Qwen-Image-Edit's instruction-following
+pipeline tops out. No prompt required.
+
+```bash
+./scripts/test_rembg.sh path/to/photo.png
+./scripts/test_rembg.sh path/to/photo.png 1            # mask-only
+SIZE=2048 ./scripts/test_rembg.sh path/to/photo.png    # higher-res internal resize
+```
+
+**Positional args:**
+
+1. input image path (required — base64-encoded inline; PNG or JPEG)
+2. `mask_only` (default `0`; pass `1` to skip the cutout composite and
+   return only the grayscale alpha mask)
+
+**Env overrides:**
+
+- `SIZE` — square edge for the model's internal resize (default `1024`,
+  the RMBG-2.0 recipe). The returned mask is always upsampled back to
+  the source resolution, so this only affects model fidelity, not
+  output shape.
+
+**Response shape:**
+
+```json
+{
+  "id": "8d4e2c1f9ab3",
+  "created": 1700000000,
+  "elapsed_sec": 1.4,
+  "width": 1024,
+  "height": 1024,
+  "mask_b64": "iVBORw0K...",
+  "transparent_b64": "iVBORw0K...",
+  "cutout_url": "/v1/images/remove-bg/8d4e2c1f9ab3.png"
+}
+```
+
+- `mask_b64` — single-channel PNG of the alpha mask (white = subject,
+  black = background)
+- `transparent_b64` — the source image with the mask applied as alpha;
+  `null` when `mask_only=true`
+- `cutout_url` — the same transparent PNG served as a hosted file via
+  `GET /v1/images/remove-bg/{id}.png`; skips the base64 round-trip
+  when you just want the file (also `null` when `mask_only=true`)
+
+The script decodes `mask_b64` to `rembg_<ts>_mask.png` and
+`transparent_b64` to `rembg_<ts>_cutout.png` next to the JSON
+response. Generation is fast (~1-3 s on GPU); the heavy cost is the
+first-request weight load (~5 s).
+
 ## `test_img2-3d.sh`
 
 Image-to-3D via Hunyuan3D-2.1 (shape-only path). Two-step interaction:
@@ -149,12 +202,13 @@ artefact. That refactor lives in
 
 ## Implementation notes
 
-- `test_img2img.sh` and `test_img2-3d.sh` write the base64-encoded
-  image to a temp file and feed it to `jq` via `--rawfile`, then post
-  the resulting JSON via `curl --data-binary @<file>`. Passing a
-  multi-MB base64 blob as a `jq --arg` (or `curl -d`) overruns the OS
-  argv limit at ~128 KB and fails with `Argument list too long`.
-- All three scripts honour the same `${AUTH_HEADER[@]+...}` safe
+- `test_img2img.sh`, `test_rembg.sh`, and `test_img2-3d.sh` write the
+  base64-encoded image to a temp file and feed it to `jq` via
+  `--rawfile`, then post the resulting JSON via
+  `curl --data-binary @<file>`. Passing a multi-MB base64 blob as a
+  `jq --arg` (or `curl -d`) overruns the OS argv limit at ~128 KB and
+  fails with `Argument list too long`.
+- All four scripts honour the same `${AUTH_HEADER[@]+...}` safe
   expansion so an empty array doesn't trip `set -u`.
 
 ## Troubleshooting
@@ -171,6 +225,11 @@ artefact. That refactor lives in
 - **`404` from `/v1/images/3d/{file}`** — the runner the api targeted
   doesn't have that artefact. If you have multiple Hunyuan3D-equipped
   runners, check whether the file ended up on a different pod.
+- **`502` from `/remove-bg`** with `"trust_remote_code"` in the body —
+  the runtime image's transformers version isn't picking up RMBG-2.0's
+  custom BiRefNet code. Verify `transformers>=4.40` is present and the
+  weights downloaded with `huggingface-cli download briaai/RMBG-2.0`
+  (not a shallow clone) so the custom code files are co-located.
 - **`Argument list too long`** during script run — you're on an older
   copy that hadn't migrated to `jq --rawfile`. Pull main.
 
