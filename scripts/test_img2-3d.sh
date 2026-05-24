@@ -34,19 +34,29 @@ if [[ -n "${API_KEY:-}" ]]; then
     AUTH_HEADER=(-H "Authorization: Bearer $API_KEY")
 fi
 
-# base64 -w0 on linux, base64 with no wrapping on mac
+TS=$(date +%s)
+RESP_FILE="$OUT_DIR/img23d_${TS}.json"
+PREVIEW_FILE="$OUT_DIR/img23d_${TS}_preview.png"
+
+# Encode image to base64 directly to a temp file and feed via
+# ``jq --rawfile`` — argv can't hold a ~2 MB base64 blob.
+B64_FILE=$(mktemp -t img23d_b64.XXXXXX)
+BODY_FILE=$(mktemp -t img23d_body.XXXXXX)
+trap 'rm -f "$B64_FILE" "$BODY_FILE"' EXIT
 if base64 --help 2>&1 | grep -q -- '-w'; then
-    B64_IN=$(base64 -w0 "$INPUT")
+    base64 -w0 "$INPUT" > "$B64_FILE"
 else
-    B64_IN=$(base64 < "$INPUT" | tr -d '\n')
+    base64 < "$INPUT" | tr -d '\n' > "$B64_FILE"
 fi
 
 # Convert "mesh,gaussian" → ["mesh","gaussian"]
 FORMATS_JSON=$(echo "$FORMATS" | jq -R 'split(",")')
 
-TS=$(date +%s)
-RESP_FILE="$OUT_DIR/img23d_${TS}.json"
-PREVIEW_FILE="$OUT_DIR/img23d_${TS}_preview.png"
+jq -n \
+    --rawfile img "$B64_FILE" \
+    --argjson formats "$FORMATS_JSON" \
+    '{image_b64: $img, formats: $formats}' \
+    > "$BODY_FILE"
 
 echo "→ POST $API_BASE/v1/images/3d"
 echo "  input   = $INPUT ($(wc -c < "$INPUT") bytes)"
@@ -57,10 +67,7 @@ curl -sS -X POST "$API_BASE/v1/images/3d" \
     -H "Content-Type: application/json" \
     "${AUTH_HEADER[@]+"${AUTH_HEADER[@]}"}" \
     --max-time 1200 \
-    -d "$(jq -n \
-        --arg img "$B64_IN" \
-        --argjson formats "$FORMATS_JSON" \
-        '{image_b64: $img, formats: $formats}')" \
+    --data-binary "@$BODY_FILE" \
     -o "$RESP_FILE"
 
 ID=$(jq -r '.id // empty' "$RESP_FILE")

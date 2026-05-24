@@ -32,16 +32,33 @@ if [[ -n "${API_KEY:-}" ]]; then
     AUTH_HEADER=(-H "Authorization: Bearer $API_KEY")
 fi
 
-# base64 -w0 on linux, base64 with no wrapping on mac
-if base64 --help 2>&1 | grep -q -- '-w'; then
-    B64_IN=$(base64 -w0 "$INPUT")
-else
-    B64_IN=$(base64 < "$INPUT" | tr -d '\n')
-fi
-
 TS=$(date +%s)
 RESP_FILE="$OUT_DIR/img2img_${TS}.json"
 PNG_FILE="$OUT_DIR/img2img_${TS}.png"
+
+# Encode image to base64 directly to a temp file.  Passing the base64
+# blob as a ``jq --arg`` argument blows past the OS argv limit at
+# ~128 KB; ``--rawfile`` reads the bytes from disk and avoids argv
+# pressure entirely.
+B64_FILE=$(mktemp -t img2img_b64.XXXXXX)
+trap 'rm -f "$B64_FILE"' EXIT
+if base64 --help 2>&1 | grep -q -- '-w'; then
+    base64 -w0 "$INPUT" > "$B64_FILE"
+else
+    base64 < "$INPUT" | tr -d '\n' > "$B64_FILE"
+fi
+
+# Build the JSON body the same way — but feed the image bytes from
+# ``--rawfile`` and stream curl's body from a file too.
+BODY_FILE=$(mktemp -t img2img_body.XXXXXX)
+trap 'rm -f "$B64_FILE" "$BODY_FILE"' EXIT
+jq -n \
+    --arg prompt "$PROMPT" \
+    --rawfile image "$B64_FILE" \
+    --arg model "$MODEL" \
+    --argjson denoise "$DENOISE" \
+    '{prompt: $prompt, image: $image, model: $model, denoising_strength: $denoise}' \
+    > "$BODY_FILE"
 
 echo "→ POST $API_BASE/v1/images/edits"
 echo "  input              = $INPUT ($(wc -c < "$INPUT") bytes)"
@@ -53,12 +70,7 @@ curl -sS -X POST "$API_BASE/v1/images/edits" \
     -H "Content-Type: application/json" \
     "${AUTH_HEADER[@]+"${AUTH_HEADER[@]}"}" \
     --max-time 900 \
-    -d "$(jq -n \
-        --arg prompt "$PROMPT" \
-        --arg image "$B64_IN" \
-        --arg model "$MODEL" \
-        --argjson denoise "$DENOISE" \
-        '{prompt: $prompt, image: $image, model: $model, denoising_strength: $denoise}')" \
+    --data-binary "@$BODY_FILE" \
     -o "$RESP_FILE"
 
 B64=$(jq -r '.data[0].b64_json // empty' "$RESP_FILE")

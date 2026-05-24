@@ -140,6 +140,16 @@ When TRELLIS gets deployed across multiple runners, the download proxy
 will need to fan a HEAD out to each endpoint to locate the artefact.
 That refactor lives in `services/image_service.py::stream_3d_artifact`.
 
+## Implementation notes
+
+- `test_img2img.sh` and `test_img2-3d.sh` write the base64-encoded
+  image to a temp file and feed it to `jq` via `--rawfile`, then post
+  the resulting JSON via `curl --data-binary @<file>`. Passing a
+  multi-MB base64 blob as a `jq --arg` (or `curl -d`) overruns the OS
+  argv limit at ~128 KB and fails with `Argument list too long`.
+- All three scripts honour the same `${AUTH_HEADER[@]+...}` safe
+  expansion so an empty array doesn't trip `set -u`.
+
 ## Troubleshooting
 
 - **`✘ no b64_json in response`** — the runner failed mid-generation.
@@ -154,3 +164,13 @@ That refactor lives in `services/image_service.py::stream_3d_artifact`.
 - **`404` from `/v1/images/3d/{file}`** — the runner the api targeted
   doesn't have that artefact. If you have multiple TRELLIS runners,
   check whether file ended up on a different pod.
+- **`Argument list too long`** during script run — you're on an older
+  copy that hadn't migrated to `jq --rawfile`. Pull main.
+
+## Verified end-to-end (2026-05-24)
+
+| Script | Model | Resolution | Output size | Notes |
+|--------|-------|------------|-------------|-------|
+| `test_txt2img.sh` | `qwen-image-2512` | 1024×1024 | 1.89 MB PNG | clean run, ~40s |
+| `test_img2img.sh` | `qwen-image-edit-2511` | 1024×1024 | 1.80 MB PNG | edited a prior txt2img output with `denoising_strength=0.75` |
+| `test_img2-3d.sh` | TRELLIS | n/a | not yet validated | weights / CUDA extensions still need installation on the runner |
