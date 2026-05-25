@@ -23,15 +23,55 @@ in a stubbed client without monkey-patching the global singleton.
 
 from __future__ import annotations
 
+import os
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, List, Optional
 
-from services.runner_client import RunnerClient, runner_client as _default_client
+from services.runner_client import RunnerClient, ServerHandle, runner_client as _default_client
 from utils.logging import llmmllogger
 
 logger = llmmllogger.bind(component="image_service")
+
+
+def _img_auto_shutdown() -> bool:
+    """Whether to force-shutdown the sd-server / llama-server after
+    every image request.  Controlled by ``IMG_SERVER_AUTO_SHUTDOWN``
+    env var (default ``true`` — image servers are 4-12 GB resident
+    and rarely benefit from staying warm between back-to-back calls
+    in a normal interactive workflow).  Set to ``false`` for
+    benchmarking or batched generation.
+    """
+    return os.environ.get("IMG_SERVER_AUTO_SHUTDOWN", "true").lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+async def _release_or_shutdown(cli: RunnerClient, handle: ServerHandle) -> None:
+    """Release a handle, then optionally tear the server down entirely.
+
+    The standard ``release_server`` marks the handle as no-longer-busy
+    but leaves the underlying process resident — the runner evicts
+    it later based on ``EVICTION_TIMEOUT_MIN``.  When auto-shutdown
+    is on (the default for image pipelines), follow up with an
+    explicit ``shutdown_server`` so the VRAM is reclaimed
+    immediately for the next caller (typically the user's
+    interactive LLM session).
+    """
+    try:
+        await cli.release_server(handle)
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"release_server failed: {e}")
+    if _img_auto_shutdown():
+        try:
+            await cli.shutdown_server(handle)
+            logger.info(
+                f"Auto-shutdown image server {handle.server_id} "
+                f"after request (IMG_SERVER_AUTO_SHUTDOWN=1)"
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"shutdown_server failed: {e}")
 
 
 @asynccontextmanager
@@ -260,11 +300,11 @@ async def generate_image(
                 parameters=body.get("parameters") or {},
             )
         finally:
-            # Best-effort release — ``release_server`` swallows its own errors.
-            try:
-                await cli.release_server(handle)
-            except Exception as e:  # noqa: BLE001
-                logger.debug(f"release_server failed: {e}")
+            # Release the handle and, when IMG_SERVER_AUTO_SHUTDOWN
+            # is on (default), force-tear-down the sd-server so its
+            # 4-12 GB of VRAM is reclaimed immediately for the next
+            # caller (typically the user's interactive LLM session).
+            await _release_or_shutdown(cli, handle)
 
 
 @dataclass(frozen=True)
@@ -390,10 +430,7 @@ async def edit_image(
                 parameters=body.get("parameters") or {},
             )
         finally:
-            try:
-                await cli.release_server(handle)
-            except Exception as e:  # noqa: BLE001
-                logger.debug(f"release_server failed: {e}")
+            await _release_or_shutdown(cli, handle)
 
 
 @dataclass(frozen=True)
