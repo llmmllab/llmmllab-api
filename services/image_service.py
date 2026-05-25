@@ -470,6 +470,155 @@ async def generate_3d(
 
 
 # ---------------------------------------------------------------------------
+# Mesh-to-parts — tencent/Hunyuan3D-Part via the runner's in-process
+# ``img23d_part`` pipeline.  Decomposes a whole mesh into semantically
+# meaningful parts via P3-SAM + XPart and emits four .glb outputs
+# (decomposed, exploded, bbox, gt_bbox).  Unlike generate_3d, the
+# *input* is a mesh — typically the output of a prior generate_3d
+# call.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ImageTo3DPartsResult:
+    """One Hunyuan3D-Part response.
+
+    Four meshes per request — the api wraps each absolute runner-side
+    path with a ``GET /v1/3d/parts/{filename}`` URL so clients can
+    download without runner pod access.  ``runner_endpoint`` is the
+    endpoint the file lives on (always the same one for all four
+    outputs since they come from the same run).
+    """
+
+    id: str
+    elapsed_sec: float
+    mesh_path: Optional[str]
+    exploded_path: Optional[str]
+    bbox_path: Optional[str]
+    gt_bbox_path: Optional[str]
+    runner_endpoint: Optional[str] = None
+
+
+async def generate_3d_parts(
+    *,
+    mesh_b64: str,
+    octree_resolution: Optional[int] = None,
+    seed: Optional[int] = None,
+    client: Optional[RunnerClient] = None,
+    user_id: Optional[str] = None,
+) -> ImageTo3DPartsResult:
+    """Submit a mesh to the runner's Hunyuan3D-Part pipeline.
+
+    The pipeline is in-process on whichever runner advertises
+    ``img23d_part`` in its yaml; we don't acquire a server.  Input is
+    a base64-encoded ``.glb`` (typically the output of a prior
+    ``generate_3d`` call); output is a four-mesh decomposition.
+
+    Wall-clock is on the order of minutes per request (similar to the
+    base Hunyuan3D-2.1 pipeline) so the queue lifecycle wraps the
+    whole runner call.
+    """
+    cli = client or _default_client
+    endpoint = await _pick_pipeline_endpoint(cli, "img23d_part")
+    payload: Dict[str, Any] = {"mesh_b64": mesh_b64}
+    if octree_resolution is not None:
+        payload["octree_resolution"] = int(octree_resolution)
+    if seed is not None:
+        payload["seed"] = int(seed)
+
+    logger.info(
+        "Submitting img23d_part request",
+        extra={"endpoint": endpoint, "octree_resolution": octree_resolution},
+    )
+
+    http_client = cli._get_client()
+    async with _queued(user_id, "hunyuan3d-part"):
+        response = await http_client.post(
+            f"{endpoint}/v1/pipelines/img23d_part/run",
+            json=payload,
+            timeout=1800.0,  # XPart can run several minutes for complex meshes
+        )
+    if response.status_code != 200:
+        raise ImageServiceError(
+            f"runner img23d_part returned {response.status_code}: "
+            f"{response.text[:512]}",
+            status_code=response.status_code,
+        )
+
+    body = response.json()
+    return ImageTo3DPartsResult(
+        id=body.get("id", ""),
+        elapsed_sec=float(body.get("elapsed_sec", 0.0)),
+        mesh_path=body.get("mesh_path"),
+        exploded_path=body.get("exploded_path"),
+        bbox_path=body.get("bbox_path"),
+        gt_bbox_path=body.get("gt_bbox_path"),
+        runner_endpoint=endpoint,
+    )
+
+
+# Filename for a 3d-parts artefact is ``<id>_<role>.glb`` where role
+# ∈ {decomposed, exploded, bbox, gt_bbox, input}.  We validate the
+# basename + role suffix shape here so a malformed filename never
+# even reaches the runner.
+_IMG23D_PART_FILENAME_RE = __import__("re").compile(
+    r"^[A-Za-z0-9_-]{1,64}_(decomposed|exploded|bbox|gt_bbox|input)\.glb$"
+)
+
+
+async def stream_3d_parts_artifact(
+    filename: str,
+    *,
+    client: Optional[RunnerClient] = None,
+):
+    """Stream a Hunyuan3D-Part output .glb from the runner.
+
+    Mirrors :func:`stream_3d_artifact`.  Routes through the
+    ``img23d_part`` pipeline_map so the file is fetched from whichever
+    runner ran the generation.
+    """
+    if not _IMG23D_PART_FILENAME_RE.match(filename):
+        raise ImageServiceError(
+            f"Invalid filename '{filename}'. Expected "
+            f"<id>_<decomposed|exploded|bbox|gt_bbox|input>.glb",
+            status_code=400,
+        )
+
+    cli = client or _default_client
+    endpoint = await _pick_pipeline_endpoint(cli, "img23d_part")
+    url = f"{endpoint}/v1/pipelines/img23d_part/files/{filename}"
+    http_client = cli._get_client()
+
+    stream_ctx = http_client.stream("GET", url, timeout=60.0)
+    resp = await stream_ctx.__aenter__()
+    try:
+        if resp.status_code == 404:
+            raise ImageServiceError(
+                f"Artefact '{filename}' not found on runner", status_code=404,
+            )
+        if resp.status_code == 400:
+            raise ImageServiceError(
+                f"Runner rejected filename '{filename}'", status_code=400,
+            )
+        if resp.status_code >= 400:
+            raise ImageServiceError(
+                f"Runner returned {resp.status_code}", status_code=502,
+            )
+    except BaseException:
+        await stream_ctx.__aexit__(None, None, None)
+        raise
+
+    async def _iter_bytes():
+        try:
+            async for chunk in resp.aiter_bytes():
+                yield chunk
+        finally:
+            await stream_ctx.__aexit__(None, None, None)
+
+    return "model/gltf-binary", _iter_bytes()
+
+
+# ---------------------------------------------------------------------------
 # Background removal — briaai/RMBG-2.0 via the runner's in-process
 # ``rembg`` pipeline.  Unlike SD txt2img / img2img we don't acquire a
 # server: the model is loaded inside the runner process and exposed at

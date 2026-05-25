@@ -295,6 +295,102 @@ steps server-side and streams progress events to the client would
 remove four round-trips of base64 over HTTP. Not currently implemented
 — file an issue if you want it.
 
+## Optional 5th step: part decomposition (Hunyuan3D-Part)
+
+After step 4 produces a holistic `.glb`, an optional 5th step takes
+that mesh and decomposes it into semantically meaningful parts using
+**Tencent's Hunyuan3D-Part** (P3-SAM + XPart):
+
+```
+.glb (holistic)
+   │
+   ▼  Step 5 — mesh-to-parts (hunyuan3d-part)
+        runner: llmmllab-runner (lsnode-3, big GPUs)
+        ~2-5 min, returns 4 .glb files
+   │
+   ▼
+{decomposed, exploded, bbox, gt_bbox}.glb
+```
+
+Two stages inside one pipeline call:
+1. **P3-SAM** predicts part bounding boxes from the input mesh.
+2. **XPart** regenerates each detected part as standalone high-fidelity
+   geometry and emits both an assembled view (parts joined) and an
+   exploded view (parts spatially separated).
+
+### CLI
+
+```bash
+./scripts/test_img2-3d-parts.sh /tmp/pipeline_demo/step4_mesh.glb
+ln -sf $OUT_DIR/*_decomposed.glb $OUT_DIR/step5_decomposed.glb
+ln -sf $OUT_DIR/*_exploded.glb   $OUT_DIR/step5_exploded.glb
+open $OUT_DIR/step5_exploded.glb   # the exploded view is the headline output
+```
+
+### Endpoint shape
+
+`POST /v1/images/3d/parts` accepts base64-encoded mesh bytes:
+
+```json
+{
+  "mesh_b64": "<base64 .glb>",
+  "octree_resolution": 512,
+  "seed": 42
+}
+```
+
+Returns four download URLs (`mesh_url` / `exploded_url` / `bbox_url` /
+`gt_bbox_url`), each pointing at `GET /v1/images/3d/parts/{filename}`.
+
+### What input meshes work
+
+XPart was trained on AI-generated and scanned meshes. The upstream
+README is explicit: **"For X-Part, we recommend using scanned or
+AI-generated meshes (e.g., from Hunyuan3D V2.5 or V3.0) as input."**
+Our V2.1 outputs work but aren't the sweet spot.
+
+| Input source | Reliability |
+|--------------|-------------|
+| `test_img2-3d.sh` output (Hunyuan3D-2.1) | Good — the chained workflow |
+| Scanned meshes (photogrammetry, lidar) | Good |
+| Hand-modeled CAD geometry | Mixed — P3-SAM's part priors may produce odd segmentations on overly clean procedural geometry |
+| Heavily edited / Blender-built meshes | Mixed — same reason |
+
+### Why it's not a step in the default pipeline
+
+- **Cost**: adds 2-5 minutes on top of the existing ~4 min pipeline.
+- **Opt-in by nature**: many use cases want one mesh, not a part-decomposed
+  scene graph. Rigging, retopo, and texture authoring per part want it;
+  rendering and quick previews don't.
+- **Output shape**: four files instead of one. Clients have to decide
+  which they want.
+
+### Parameter tuning
+
+- `octree_resolution` — marching-cubes resolution for each regenerated
+  part. Default 512 (upstream demo value). 256 is faster (~1.5× speedup)
+  but parts look blockier. Above 512 produces minimal quality gain and
+  large file sizes.
+- `seed` — RNG seed. XPart is mildly nondeterministic; fix the seed
+  for reproducible output.
+- No `cfg_scale` / `num_inference_steps` knobs exposed — XPart's
+  defaults (50 inference steps, cfg_scale -1.0 / unconditional) are
+  baked into the upstream pipeline and work well across the input
+  distribution.
+
+### Notes on the four outputs
+
+- **`decomposed.glb`** — usually the one you actually want. Parts are
+  joined back together but each is a separate primitive, so glTF
+  viewers and downstream tools (Blender, Three.js, Unity glTF
+  importer) can address them individually.
+- **`exploded.glb`** — best demo output. Parts spatially separated
+  for visualisation; not useful as final geometry but excellent for
+  validating the segmentation.
+- **`bbox.glb`** — just the P3-SAM bbox wireframes. Debug-only.
+- **`gt_bbox.glb`** — input mesh with bboxes overlaid. Debug-only;
+  shows what P3-SAM saw before XPart regenerated.
+
 ## Operational notes
 
 - **Routing is yaml-driven.** Each runner reads its own
@@ -338,6 +434,24 @@ remove four round-trips of base64 over HTTP. Not currently implemented
 - **End-to-end too slow.** Step 4 dominates (~3 min). Step 1 takes
   ~40 s. If iterating on prompts, skip step 4 until you're happy with
   the cutout from step 3.
+- **Step 5: 503 with "Hunyuan3D-Part dependencies are missing".**
+  XPart's `spconv-cu124` + `torch_cluster` / `torch_scatter` wheels
+  failed to install in the runtime image, or the `chamfer3D` CUDA
+  extension didn't build. Rebuild — the Dockerfile pulls them into
+  the `hunyuan-builder` stage. If `chamfer3D` fails on a specific
+  CUDA arch, set `TORCH_CUDA_ARCH_LIST` to include your GPU's compute
+  capability.
+- **Step 5: parts segmentation looks wrong.** P3-SAM was trained on
+  AI-generated and scanned meshes. Hand-modeled CAD geometry (or
+  meshes with degenerate triangles / non-manifold edges) confuses
+  it. Either pre-clean the mesh (`trimesh.repair`, MeshLab) or
+  regenerate via `test_img2-3d.sh` first.
+- **Step 5: only one or two parts detected.** P3-SAM's confidence
+  threshold is baked in. If your subject is geometrically uniform
+  (e.g., a smooth sphere), there genuinely aren't part-like features
+  to detect — XPart will return one large part. Pick subjects with
+  obvious structural divisions (chair: seat + legs + back; teapot:
+  body + handle + spout + lid).
 
 ## See also
 

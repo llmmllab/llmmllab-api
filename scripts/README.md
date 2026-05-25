@@ -1,7 +1,7 @@
 # Image API test scripts
 
-Four curl-based shell scripts for exercising the image endpoints from
-the command line. No Python deps — just `bash`, `curl`, and `jq`.
+Five curl-based shell scripts for exercising the image + 3D endpoints
+from the command line. No Python deps — just `bash`, `curl`, and `jq`.
 
 | Script | Endpoint | Backend | Output |
 |--------|----------|---------|--------|
@@ -9,6 +9,7 @@ the command line. No Python deps — just `bash`, `curl`, and `jq`.
 | [`test_img2img.sh`](#test_img2imgsh) | `POST /v1/images/edits` | stable-diffusion.cpp `sd-server` (img2img) | base64 PNG inline in response |
 | [`test_rembg.sh`](#test_rembgsh) | `POST /v1/images/remove-bg` + `GET /v1/images/remove-bg/{file}` | briaai/RMBG-2.0 in-process pipeline | alpha mask PNG + transparent cutout PNG |
 | [`test_img2-3d.sh`](#test_img2-3dsh) | `POST /v1/images/3d` + `GET /v1/images/3d/{file}` | Hunyuan3D-2.1 in-process pipeline | `.glb` mesh + `.ply` gaussian, streamed back through api |
+| [`test_img2-3d-parts.sh`](#test_img2-3d-partssh) | `POST /v1/images/3d/parts` + `GET /v1/images/3d/parts/{file}` | Hunyuan3D-Part (P3-SAM + XPart) in-process pipeline | 4 `.glb` files: decomposed, exploded, bbox, gt_bbox |
 
 > `runner_shutdown.sh` (ops tool to free VRAM by force-evicting runner
 > servers) lives in the **llmmllab-runner** repo's `scripts/` directory.
@@ -199,6 +200,69 @@ When Hunyuan3D gets deployed across multiple runners, the download
 proxy will need to fan a HEAD out to each endpoint to locate the
 artefact. That refactor lives in
 `services/image_service.py::stream_3d_artifact`.
+
+## `test_img2-3d-parts.sh`
+
+Mesh-to-parts decomposition via Hunyuan3D-Part (P3-SAM + XPart).
+**Input is a mesh, not an image** — typically the `.glb` from a prior
+`test_img2-3d.sh` run.
+
+```bash
+./scripts/test_img2-3d-parts.sh path/to/mesh.glb
+./scripts/test_img2-3d-parts.sh path/to/mesh.glb 256      # lower octree res, faster
+./scripts/test_img2-3d-parts.sh path/to/mesh.glb 512 42   # with seed
+```
+
+**Positional args:**
+
+1. input `.glb` mesh (required — base64-encoded inline)
+2. `octree_resolution` (default `512`, allowed `128`+; lower = faster, blockier output)
+3. `seed` (optional)
+
+**Response shape:**
+
+```json
+{
+  "id": "abc123def456",
+  "created": 1700000000,
+  "elapsed_sec": 92.4,
+  "mesh_path":     "/data/sd-out/3d_parts/abc123def456_decomposed.glb",
+  "exploded_path": "/data/sd-out/3d_parts/abc123def456_exploded.glb",
+  "bbox_path":     "/data/sd-out/3d_parts/abc123def456_bbox.glb",
+  "gt_bbox_path":  "/data/sd-out/3d_parts/abc123def456_gt_bbox.glb",
+  "mesh_url":      "/v1/images/3d/parts/abc123def456_decomposed.glb",
+  "exploded_url":  "/v1/images/3d/parts/abc123def456_exploded.glb",
+  "bbox_url":      "/v1/images/3d/parts/abc123def456_bbox.glb",
+  "gt_bbox_url":   "/v1/images/3d/parts/abc123def456_gt_bbox.glb"
+}
+```
+
+**The four outputs:**
+
+| Suffix | What it is |
+|--------|------------|
+| `_decomposed.glb` | Assembled mesh with parts re-joined as one (each part is a separate primitive — viewable in glTF viewers as named groups) |
+| `_exploded.glb` | Parts spatially separated — useful for visualisation, presentation, or debugging segmentation |
+| `_bbox.glb` | Bounding-box wireframe only — shows what P3-SAM detected before X-Part regenerated the geometry |
+| `_gt_bbox.glb` | Input mesh + bbox overlay — debug view to compare predicted boxes against the input |
+
+The script downloads all four to `$OUT_DIR/<id>_<role>.glb` and prints
+the wall-clock. XPart is **fp32 only** (spconv kernels lack lower-precision
+paths), so each request takes a few minutes — the script bumps
+`--max-time 1800` (30 min) accordingly.
+
+**Best input meshes**: outputs of `test_img2-3d.sh` (i.e.
+Hunyuan3D-2.1 results) or scanned meshes. Hand-modeled CAD geometry
+can confuse P3-SAM's part priors — the upstream README explicitly
+recommends AI-generated or scanned input.
+
+**Chaining the full text-to-parts pipeline:**
+
+```bash
+./scripts/test_txt2img.sh "a single porcelain teapot, white background"
+./scripts/test_img2-3d.sh $OUT_DIR/txt2img_*.png        # → <id>.glb
+./scripts/test_img2-3d-parts.sh $OUT_DIR/*.glb         # → 4 part .glb files
+```
 
 ## Implementation notes
 

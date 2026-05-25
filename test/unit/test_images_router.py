@@ -16,6 +16,7 @@ from routers.openai.images import router
 from services.image_service import (
     GeneratedImage,
     ImageServiceError,
+    ImageTo3DPartsResult,
     ImageTo3DResult,
     ImageToImageResult,
     RembgResult,
@@ -319,6 +320,114 @@ def test_download_3d_503_when_no_runner(client: TestClient):
     ):
         response = client.get("/images/3d/abc.glb")
     assert response.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# /images/3d/parts (Hunyuan3D-Part / XPart)
+# ---------------------------------------------------------------------------
+
+
+def _fake_parts_result(gen_id: str = "abc123") -> ImageTo3DPartsResult:
+    return ImageTo3DPartsResult(
+        id=gen_id,
+        elapsed_sec=85.7,
+        mesh_path=f"/data/sd-out/3d_parts/{gen_id}_decomposed.glb",
+        exploded_path=f"/data/sd-out/3d_parts/{gen_id}_exploded.glb",
+        bbox_path=f"/data/sd-out/3d_parts/{gen_id}_bbox.glb",
+        gt_bbox_path=f"/data/sd-out/3d_parts/{gen_id}_gt_bbox.glb",
+    )
+
+
+def test_3d_parts_returns_all_four_urls(client: TestClient):
+    with patch(
+        "routers.openai.images.generate_3d_parts",
+        new=AsyncMock(return_value=_fake_parts_result()),
+    ):
+        response = client.post(
+            "/images/3d/parts",
+            json={"mesh_b64": "Z2xi", "octree_resolution": 512},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == "abc123"
+    # All four artefact URLs are derived from the runner-side paths so
+    # clients can fetch each via the /v1/images/3d/parts/{filename}
+    # proxy without runner pod access.
+    assert body["mesh_url"] == "/v1/images/3d/parts/abc123_decomposed.glb"
+    assert body["exploded_url"] == "/v1/images/3d/parts/abc123_exploded.glb"
+    assert body["bbox_url"] == "/v1/images/3d/parts/abc123_bbox.glb"
+    assert body["gt_bbox_url"] == "/v1/images/3d/parts/abc123_gt_bbox.glb"
+    assert body["elapsed_sec"] == 85.7
+
+
+def test_3d_parts_forwards_optional_params(client: TestClient):
+    captured = {}
+
+    async def _fake(**kwargs):
+        captured.update(kwargs)
+        return _fake_parts_result()
+
+    with patch("routers.openai.images.generate_3d_parts", new=AsyncMock(side_effect=_fake)):
+        response = client.post(
+            "/images/3d/parts",
+            json={"mesh_b64": "Z2xi", "octree_resolution": 256, "seed": 99},
+        )
+
+    assert response.status_code == 200
+    assert captured["mesh_b64"] == "Z2xi"
+    assert captured["octree_resolution"] == 256
+    assert captured["seed"] == 99
+
+
+def test_3d_parts_503_when_pipeline_missing(client: TestClient):
+    with patch(
+        "routers.openai.images.generate_3d_parts",
+        new=AsyncMock(side_effect=ImageServiceError("XPart missing", status_code=503)),
+    ):
+        response = client.post(
+            "/images/3d/parts", json={"mesh_b64": "Z2xi"}
+        )
+    assert response.status_code == 503
+    assert "XPart" in response.json()["detail"]
+
+
+def test_3d_parts_other_failures_are_502(client: TestClient):
+    with patch(
+        "routers.openai.images.generate_3d_parts",
+        new=AsyncMock(side_effect=ImageServiceError("upstream", status_code=500)),
+    ):
+        response = client.post(
+            "/images/3d/parts", json={"mesh_b64": "Z2xi"}
+        )
+    assert response.status_code == 502
+
+
+def test_download_3d_parts_streams_glb_through(client: TestClient):
+    async def _iter():
+        yield b"decomposed-bytes"
+
+    async def _fake(filename, **kwargs):
+        return "model/gltf-binary", _iter()
+
+    with patch(
+        "routers.openai.images.stream_3d_parts_artifact",
+        new=AsyncMock(side_effect=_fake),
+    ):
+        response = client.get("/images/3d/parts/abc123_decomposed.glb")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("model/gltf-binary")
+    assert response.content == b"decomposed-bytes"
+
+
+def test_download_3d_parts_404(client: TestClient):
+    with patch(
+        "routers.openai.images.stream_3d_parts_artifact",
+        new=AsyncMock(side_effect=ImageServiceError("nope", status_code=404)),
+    ):
+        response = client.get("/images/3d/parts/missing_decomposed.glb")
+    assert response.status_code == 404
 
 
 # ---------------------------------------------------------------------------

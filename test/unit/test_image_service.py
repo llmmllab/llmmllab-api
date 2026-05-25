@@ -440,6 +440,158 @@ def test_stream_3d_artifact_targets_pipeline_files_endpoint():
 
 
 # ---------------------------------------------------------------------------
+# generate_3d_parts (Hunyuan3D-Part / XPart)
+# ---------------------------------------------------------------------------
+
+
+def _make_runner_client_for_img23d_part(
+    body: Dict[str, Any], status_code: int = 200, text: str = ""
+) -> MagicMock:
+    client = MagicMock()
+    client._endpoints = ["http://runner-1:8000"]
+    client.select_pipeline_endpoint = AsyncMock(return_value="http://runner-1:8000")
+    http_client = MagicMock()
+    http_client.post = AsyncMock(
+        return_value=_mock_response(status_code, body, text=text)
+    )
+    client._get_client = MagicMock(return_value=http_client)
+    return client
+
+
+def test_generate_3d_parts_posts_to_pipeline_endpoint():
+    from services.image_service import generate_3d_parts
+
+    client = _make_runner_client_for_img23d_part({
+        "id": "abc123",
+        "elapsed_sec": 42.5,
+        "mesh_path": "/data/sd-out/3d_parts/abc123_decomposed.glb",
+        "exploded_path": "/data/sd-out/3d_parts/abc123_exploded.glb",
+        "bbox_path": "/data/sd-out/3d_parts/abc123_bbox.glb",
+        "gt_bbox_path": "/data/sd-out/3d_parts/abc123_gt_bbox.glb",
+    })
+
+    result = _run(generate_3d_parts(mesh_b64="Z2xi", client=client))
+
+    assert result.id == "abc123"
+    assert result.elapsed_sec == 42.5
+    assert result.mesh_path.endswith("_decomposed.glb")
+    assert result.exploded_path.endswith("_exploded.glb")
+    assert result.bbox_path.endswith("_bbox.glb")
+    assert result.gt_bbox_path.endswith("_gt_bbox.glb")
+    assert result.runner_endpoint == "http://runner-1:8000"
+
+    http = client._get_client.return_value
+    args, kwargs = http.post.call_args
+    assert args[0] == "http://runner-1:8000/v1/pipelines/img23d_part/run"
+    assert kwargs["json"]["mesh_b64"] == "Z2xi"
+    # Optional params not sent when not provided.
+    assert "octree_resolution" not in kwargs["json"]
+    assert "seed" not in kwargs["json"]
+
+
+def test_generate_3d_parts_forwards_optional_params():
+    from services.image_service import generate_3d_parts
+
+    client = _make_runner_client_for_img23d_part({"id": "x", "elapsed_sec": 0.1})
+    _run(generate_3d_parts(
+        mesh_b64="Z2xi", octree_resolution=256, seed=99, client=client,
+    ))
+
+    http = client._get_client.return_value
+    _, kwargs = http.post.call_args
+    assert kwargs["json"]["octree_resolution"] == 256
+    assert kwargs["json"]["seed"] == 99
+
+
+def test_generate_3d_parts_propagates_runner_failure():
+    from services.image_service import generate_3d_parts
+
+    client = _make_runner_client_for_img23d_part(
+        {}, status_code=503, text="XPart not installed"
+    )
+
+    with pytest.raises(ImageServiceError) as exc:
+        _run(generate_3d_parts(mesh_b64="Z2xi", client=client))
+
+    assert exc.value.status_code == 503
+    assert "XPart" in str(exc.value)
+
+
+def test_generate_3d_parts_raises_when_no_runner_configured():
+    from services.image_service import generate_3d_parts
+
+    client = MagicMock()
+    client._endpoints = []
+
+    with pytest.raises(ImageServiceError) as exc:
+        _run(generate_3d_parts(mesh_b64="Z2xi", client=client))
+
+    assert exc.value.status_code == 503
+
+
+def test_stream_3d_parts_artifact_streams_glb():
+    from services.image_service import stream_3d_parts_artifact
+
+    client = _make_runner_client_for_stream(chunks=(b"glb-bytes",))
+
+    async def _drain():
+        mt, body = await stream_3d_parts_artifact(
+            "abc123_decomposed.glb", client=client
+        )
+        out = b""
+        async for chunk in body:
+            out += chunk
+        return mt, out
+
+    media_type, body = _run(_drain())
+    assert media_type == "model/gltf-binary"
+    assert body == b"glb-bytes"
+
+
+def test_stream_3d_parts_artifact_rejects_invalid_filename():
+    from services.image_service import stream_3d_parts_artifact
+
+    client = _make_runner_client_for_stream()
+
+    for bad in [
+        "../etc/passwd",
+        # Missing role suffix
+        "abc123.glb",
+        # Unknown role
+        "abc123_other.glb",
+        # Wrong extension
+        "abc_decomposed.png",
+        # Path separator
+        "abc/def_decomposed.glb",
+    ]:
+        with pytest.raises(ImageServiceError) as exc:
+            _run(stream_3d_parts_artifact(bad, client=client))
+        assert exc.value.status_code == 400, f"expected 400 for {bad!r}"
+
+
+def test_stream_3d_parts_artifact_targets_pipeline_files_endpoint():
+    from services.image_service import stream_3d_parts_artifact
+
+    client = _make_runner_client_for_stream()
+
+    async def _drain():
+        _, body = await stream_3d_parts_artifact(
+            "abc_decomposed.glb", client=client
+        )
+        async for _ in body:
+            pass
+
+    _run(_drain())
+
+    http = client._get_client.return_value
+    stream_args, _ = http.stream.call_args
+    assert stream_args == (
+        "GET",
+        "http://runner-1:8000/v1/pipelines/img23d_part/files/abc_decomposed.glb",
+    )
+
+
+# ---------------------------------------------------------------------------
 # remove_image_background
 # ---------------------------------------------------------------------------
 

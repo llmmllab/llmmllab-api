@@ -44,9 +44,11 @@ from services.image_service import (
     ImageServiceError,
     edit_image,
     generate_3d,
+    generate_3d_parts,
     generate_image,
     remove_image_background,
     stream_3d_artifact,
+    stream_3d_parts_artifact,
     stream_rembg_artifact,
 )
 
@@ -272,6 +274,127 @@ async def createImageTo3D(body: CreateImageTo3DRequest, request: Request) -> Cre
         gaussian_url=gaussian_url,
         preview_b64=result.preview_b64,
     )
+
+
+# ---------------------------------------------------------------------------
+# 3D mesh-to-parts decomposition — tencent/Hunyuan3D-Part (P3-SAM + XPart)
+# ---------------------------------------------------------------------------
+
+
+class CreateImageTo3DPartsRequest(BaseModel):
+    """Input for ``POST /v1/3d/parts`` — decompose a whole mesh into parts.
+
+    The mesh comes in as base64-encoded ``.glb`` bytes.  Typical
+    workflow: run ``POST /v1/images/3d`` first to get a holistic
+    mesh, then feed its ``.glb`` here (e.g. download via ``mesh_url``,
+    re-encode to base64, post).  Scratch-built CAD meshes also work
+    but XPart was trained on AI-generated and scanned meshes — its
+    part priors may produce odd segmentations on overly clean
+    procedural geometry.
+    """
+
+    mesh_b64: str = Field(
+        ..., description="Base64-encoded input ``.glb`` mesh"
+    )
+    octree_resolution: Optional[int] = Field(
+        512,
+        ge=128,
+        description=(
+            "Marching-cubes octree resolution for each output part.  "
+            "Default 512 matches the upstream demo; 256 is faster "
+            "for iteration."
+        ),
+    )
+    seed: Optional[int] = Field(
+        None, description="RNG seed for reproducible runs (default 42 in pipeline)"
+    )
+
+
+class CreateImageTo3DPartsResponse(BaseModel):
+    id: str = Field(..., description="Generation ID — also the stem of the persisted files")
+    created: int = Field(..., description="Unix timestamp (seconds)")
+    elapsed_sec: float = Field(..., description="Server-reported wall-clock time")
+    # Filesystem paths on the runner — debug-only.  Use the ``_url``
+    # fields below to actually fetch artefacts.
+    mesh_path: Optional[str] = Field(None, description="Runner path to the decomposed mesh")
+    exploded_path: Optional[str] = Field(None, description="Runner path to the exploded-view mesh")
+    bbox_path: Optional[str] = Field(None, description="Runner path to the bounding-box wireframe")
+    gt_bbox_path: Optional[str] = Field(None, description="Runner path to the input + bbox overlay")
+    # Public download URLs.  Each routes through
+    # ``GET /v1/3d/parts/{filename}`` which streams the .glb back.
+    mesh_url: Optional[str] = Field(None, description="Download URL for the decomposed mesh")
+    exploded_url: Optional[str] = Field(None, description="Download URL for the exploded view")
+    bbox_url: Optional[str] = Field(None, description="Download URL for the bbox wireframe")
+    gt_bbox_url: Optional[str] = Field(None, description="Download URL for the input + bbox overlay")
+
+
+# Sibling endpoint to ``POST /v1/images/3d``.  Final URL is
+# ``/v1/images/3d/parts`` since the router prefix is ``/images`` and
+# the api mounts it at ``/v1``.  Conceptually it's mesh-in / mesh-out
+# rather than image-in / mesh-out, but lives in the same module so
+# all 3D-flavoured endpoints stay co-located.
+@router.post("/3d/parts", response_model=CreateImageTo3DPartsResponse)
+async def createImageTo3DParts(
+    body: CreateImageTo3DPartsRequest, request: Request
+) -> CreateImageTo3DPartsResponse:
+    """Decompose a holistic mesh into part-by-part geometry.
+
+    Backed by tencent/Hunyuan3D-Part (P3-SAM + XPart) running
+    in-process on the runner.  Returns four ``.glb`` files:
+
+    * ``mesh_url``       — the assembled decomposed mesh
+    * ``exploded_url``   — parts spatially separated for visualisation
+    * ``bbox_url``       — bounding-box wireframe only
+    * ``gt_bbox_url``    — input mesh + bbox overlay (debug)
+
+    The generation is synchronous and can take several minutes per
+    mesh — clients should set HTTP timeouts of at least 30 minutes.
+    """
+    try:
+        result = await generate_3d_parts(
+            mesh_b64=body.mesh_b64,
+            octree_resolution=body.octree_resolution,
+            seed=body.seed,
+            user_id=get_user_id(request),
+        )
+    except ImageServiceError as e:
+        logger.error("img23d_part failed: %s", e)
+        if e.status_code == 503:
+            raise HTTPException(status_code=503, detail=str(e)) from e
+        raise HTTPException(status_code=502, detail=str(e)) from e
+
+    import os as _os
+
+    def _url(path: Optional[str]) -> Optional[str]:
+        return f"/v1/images/3d/parts/{_os.path.basename(path)}" if path else None
+
+    return CreateImageTo3DPartsResponse(
+        id=result.id,
+        created=int(time.time()),
+        elapsed_sec=result.elapsed_sec,
+        mesh_path=result.mesh_path,
+        exploded_path=result.exploded_path,
+        bbox_path=result.bbox_path,
+        gt_bbox_path=result.gt_bbox_path,
+        mesh_url=_url(result.mesh_path),
+        exploded_url=_url(result.exploded_path),
+        bbox_url=_url(result.bbox_path),
+        gt_bbox_url=_url(result.gt_bbox_path),
+    )
+
+
+@router.get("/3d/parts/{filename}")
+async def downloadImageTo3DParts(filename: str):
+    """Stream a Hunyuan3D-Part output ``.glb`` from the runner."""
+    try:
+        media_type, body = await stream_3d_parts_artifact(filename)
+    except ImageServiceError as e:
+        if e.status_code == 404:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+        if e.status_code == 400:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        raise HTTPException(status_code=502, detail=str(e)) from e
+    return StreamingResponse(body, media_type=media_type)
 
 
 # ---------------------------------------------------------------------------
