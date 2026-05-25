@@ -97,15 +97,24 @@ echo "  octree_resolution = $OCTREE"
 echo "  split             = $SPLIT_JSON"
 echo "  (XPart can take several minutes; no streaming)"
 
-curl -sS -X POST "$API_BASE/v1/images/3d/parts" \
+HTTP_STATUS=$(curl -sS -X POST "$API_BASE/v1/images/3d/parts" \
     -H "Content-Type: application/json" \
     "${AUTH_HEADER[@]+"${AUTH_HEADER[@]}"}" \
     --max-time 1800 \
     --data-binary "@$BODY_FILE" \
-    -o "$RESP_FILE"
+    -o "$RESP_FILE" \
+    -w "%{http_code}")
+
+if [[ "$HTTP_STATUS" != "200" ]]; then
+    echo "✘ HTTP $HTTP_STATUS from $API_BASE/v1/images/3d/parts" >&2
+    echo "  response body:" >&2
+    cat "$RESP_FILE" >&2
+    echo >&2
+    exit 1
+fi
 
 if ! jq -e '.id' "$RESP_FILE" >/dev/null 2>&1; then
-    echo "✘ server returned an error:" >&2
+    echo "✘ server returned 200 but body is not valid JSON or has no id:" >&2
     cat "$RESP_FILE" >&2
     exit 1
 fi

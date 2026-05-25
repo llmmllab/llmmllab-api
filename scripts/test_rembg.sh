@@ -81,16 +81,25 @@ echo "  input      = $INPUT ($(wc -c < "$INPUT") bytes)"
 echo "  mask_only  = $MASK_ONLY_JSON"
 [[ -n "${SIZE:-}" ]] && echo "  size       = $SIZE"
 
-curl -sS -X POST "$API_BASE/v1/images/remove-bg" \
+HTTP_STATUS=$(curl -sS -X POST "$API_BASE/v1/images/remove-bg" \
     -H "Content-Type: application/json" \
     "${AUTH_HEADER[@]+"${AUTH_HEADER[@]}"}" \
     --max-time 300 \
     --data-binary "@$BODY_FILE" \
-    -o "$RESP_FILE"
+    -o "$RESP_FILE" \
+    -w "%{http_code}")
+
+if [[ "$HTTP_STATUS" != "200" ]]; then
+    echo "✘ HTTP $HTTP_STATUS from $API_BASE/v1/images/remove-bg" >&2
+    echo "  response body:" >&2
+    cat "$RESP_FILE" >&2
+    echo >&2
+    exit 1
+fi
 
 # Surface server errors before trying to decode the payload.
 if ! jq -e '.id' "$RESP_FILE" >/dev/null 2>&1; then
-    echo "✘ server returned an error:" >&2
+    echo "✘ server returned 200 but body is not valid JSON or has no id:" >&2
     cat "$RESP_FILE" >&2
     exit 1
 fi

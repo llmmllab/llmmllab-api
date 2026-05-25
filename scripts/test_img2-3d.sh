@@ -65,12 +65,34 @@ echo "  input   = $INPUT ($(wc -c < "$INPUT") bytes)"
 echo "  formats = $FORMATS"
 echo "  (this can take a few minutes; Hunyuan3D doesn't stream)"
 
-curl -sS -X POST "$API_BASE/v1/images/3d" \
+# Capture HTTP status separately so we can surface non-JSON bodies
+# (HTML error pages, plain-text upstream errors) before piping to jq.
+# Without this, jq fails with "Invalid numeric literal" or similar and
+# the real error from the api never surfaces.
+HTTP_STATUS=$(curl -sS -X POST "$API_BASE/v1/images/3d" \
     -H "Content-Type: application/json" \
     "${AUTH_HEADER[@]+"${AUTH_HEADER[@]}"}" \
     --max-time 1200 \
     --data-binary "@$BODY_FILE" \
-    -o "$RESP_FILE"
+    -o "$RESP_FILE" \
+    -w "%{http_code}")
+
+if [[ "$HTTP_STATUS" != "200" ]]; then
+    echo "✘ HTTP $HTTP_STATUS from $API_BASE/v1/images/3d" >&2
+    echo "  response body:" >&2
+    cat "$RESP_FILE" >&2
+    echo >&2
+    exit 1
+fi
+
+# Belt-and-braces: server returned 200 but body might still be
+# malformed.  Validate it parses as JSON before we run jq on it.
+if ! jq empty "$RESP_FILE" 2>/dev/null; then
+    echo "✘ server returned 200 but body is not valid JSON:" >&2
+    cat "$RESP_FILE" >&2
+    echo >&2
+    exit 1
+fi
 
 ID=$(jq -r '.id // empty' "$RESP_FILE")
 if [[ -z "$ID" ]]; then
