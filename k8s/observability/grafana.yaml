@@ -62,7 +62,7 @@ data:
       "editable": true,
       "fiscalYearStartMonth": 0,
       "graphTooltip": 0,
-      "id": 4,
+      "id": null,
       "links": [],
       "panels": [
         {
@@ -70,24 +70,38 @@ data:
             "type": "prometheus",
             "uid": "PBFA97CFB590B2093"
           },
+          "description": "Per-GPU memory utilization as a percentage of that card's total. Computed as 100 * DCGM_FI_DEV_FB_USED / (FB_USED + FB_FREE) so the bar fills correctly whether the card is 12 GiB or 24 GiB.",
           "fieldConfig": {
             "defaults": {
               "color": {
                 "mode": "thresholds"
               },
+              "decimals": 1,
               "mappings": [],
+              "max": 100,
+              "min": 0,
               "thresholds": {
                 "mode": "absolute",
                 "steps": [
                   {
-                    "color": "green"
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 70
+                  },
+                  {
+                    "color": "orange",
+                    "value": 85
                   },
                   {
                     "color": "red",
-                    "value": 80
+                    "value": 95
                   }
                 ]
-              }
+              },
+              "unit": "percent"
             },
             "overrides": []
           },
@@ -116,20 +130,16 @@ data:
           "pluginVersion": "12.0.0",
           "targets": [
             {
-              "disableTextWrap": false,
-              "editorMode": "code",
-              "exemplar": false,
-              "expr": "gpu_memory_used_bytes/(1024*1024*1024)",
-              "fullMetaSearch": false,
-              "includeNullMetadata": true,
-              "instant": false,
-              "legendFormat": "{{job}}-{{gpu_index}}",
-              "range": true,
-              "refId": "A",
-              "useBackend": false
+              "datasource": {
+                "type": "prometheus",
+                "uid": "PBFA97CFB590B2093"
+              },
+              "expr": "100 * DCGM_FI_DEV_FB_USED / (DCGM_FI_DEV_FB_USED + DCGM_FI_DEV_FB_FREE)",
+              "legendFormat": "{{node}} GPU{{gpu}} {{modelName}}",
+              "refId": "A"
             }
           ],
-          "title": "VRAM Usage GB",
+          "title": "VRAM Usage %",
           "type": "gauge"
         },
         {
@@ -160,7 +170,7 @@ data:
           },
           "gridPos": {
             "h": 2,
-            "w": 4,
+            "w": 3,
             "x": 9,
             "y": 0
           },
@@ -220,6 +230,81 @@ data:
                     "color": "green"
                   },
                   {
+                    "color": "yellow",
+                    "value": 5
+                  },
+                  {
+                    "color": "red",
+                    "value": 10
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 2,
+            "w": 2,
+            "x": 12,
+            "y": 0
+          },
+          "id": 13,
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "percentChangeColorMode": "standard",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "pluginVersion": "12.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "PBFA97CFB590B2093"
+              },
+              "disableTextWrap": false,
+              "editorMode": "code",
+              "expr": "sum(llmmllab_api_active_sessions)",
+              "fullMetaSearch": false,
+              "includeNullMetadata": true,
+              "legendFormat": "total",
+              "range": true,
+              "refId": "A",
+              "useBackend": false
+            }
+          ],
+          "title": "Active Sessions",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
                     "color": "red",
                     "value": 80
                   }
@@ -229,9 +314,9 @@ data:
             "overrides": []
           },
           "gridPos": {
-            "h": 2,
-            "w": 4,
-            "x": 13,
+            "h": 3,
+            "w": 6,
+            "x": 16,
             "y": 0
           },
           "id": 9,
@@ -274,6 +359,73 @@ data:
             }
           ],
           "title": "Queued Requests",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "description": "Count of llama.cpp subprocess crashes detected by the runner watchdog (GGML_ASSERT, SIGKILL, segfault, OOM). Should be 0.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "orange",
+                    "value": 1
+                  },
+                  {
+                    "color": "red",
+                    "value": 3
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 7,
+            "w": 2,
+            "x": 22,
+            "y": 0
+          },
+          "id": 28,
+          "options": {
+            "colorMode": "background",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "percentChangeColorMode": "standard",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "pluginVersion": "12.0.0",
+          "targets": [
+            {
+              "expr": "sum(increase(llama_server_evictions_total{reason=\"process_died\"}[1h]))",
+              "legendFormat": "deaths",
+              "refId": "A"
+            }
+          ],
+          "title": "Process Deaths (last 1h)",
           "type": "stat"
         },
         {
@@ -333,8 +485,8 @@ data:
             "overrides": []
           },
           "gridPos": {
-            "h": 10,
-            "w": 15,
+            "h": 5,
+            "w": 7,
             "x": 9,
             "y": 2
           },
@@ -368,24 +520,172 @@ data:
             "type": "prometheus",
             "uid": "PBFA97CFB590B2093"
           },
+          "description": "Did the prompt diverge early (cache lost) or late (still got large prefix reuse)?\n  cache_full: STABLE \u2014 prefix matched through 128 KB\n  cache_high: diverged at byte 32K+ \u2014 \u226532K of cache hit\n  cache_low : diverged before byte 32K \u2014 cache mostly lost\n  first: first turn for that session (no cache to begin with)",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "unit": "short"
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "cache_full (stable)"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "green",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "cache_high (div \u226532K)"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "super-light-green",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "cache_low (div <32K)"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "red",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "first"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "blue",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 6,
+            "x": 16,
+            "y": 3
+          },
+          "id": 26,
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "right",
+              "values": [
+                "value",
+                "percent"
+              ]
+            },
+            "pieType": "donut"
+          },
+          "pluginVersion": "12.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "PBFA97CFB590B2093"
+              },
+              "expr": "sum(increase(prompt_fingerprint_total{kind=\"stable\"}[1h]))",
+              "legendFormat": "cache_full (stable)",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "PBFA97CFB590B2093"
+              },
+              "expr": "sum(increase(prompt_first_divergence_byte_bucket{le=\"+Inf\"}[1h])) - sum(increase(prompt_first_divergence_byte_bucket{le=\"32768\"}[1h]))",
+              "legendFormat": "cache_high (div \u226532K)",
+              "refId": "B"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "PBFA97CFB590B2093"
+              },
+              "expr": "sum(increase(prompt_first_divergence_byte_bucket{le=\"32768\"}[1h]))",
+              "legendFormat": "cache_low (div <32K)",
+              "refId": "C"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "PBFA97CFB590B2093"
+              },
+              "expr": "sum(increase(prompt_fingerprint_total{kind=\"first\"}[1h]))",
+              "legendFormat": "first",
+              "refId": "D"
+            }
+          ],
+          "title": "Prompt Cache Health (1h)",
+          "type": "piechart"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
           "fieldConfig": {
             "defaults": {
               "color": {
                 "mode": "thresholds"
               },
+              "decimals": 1,
               "mappings": [],
+              "max": 350,
+              "min": 0,
               "thresholds": {
                 "mode": "absolute",
                 "steps": [
                   {
-                    "color": "green"
+                    "color": "blue"
+                  },
+                  {
+                    "color": "green",
+                    "value": 50
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 250
                   },
                   {
                     "color": "red",
-                    "value": 80
+                    "value": 320
                   }
                 ]
-              }
+              },
+              "unit": "watt"
             },
             "overrides": []
           },
@@ -414,15 +714,13 @@ data:
           "pluginVersion": "12.0.0",
           "targets": [
             {
-              "disableTextWrap": false,
-              "editorMode": "builder",
-              "expr": "gpu_power_watts",
-              "fullMetaSearch": false,
-              "includeNullMetadata": true,
-              "legendFormat": "{{job}}.{{gpu_index}}",
-              "range": true,
-              "refId": "A",
-              "useBackend": false
+              "datasource": {
+                "type": "prometheus",
+                "uid": "PBFA97CFB590B2093"
+              },
+              "expr": "DCGM_FI_DEV_POWER_USAGE",
+              "legendFormat": "{{node}} GPU{{gpu}} {{modelName}}",
+              "refId": "A"
             }
           ],
           "title": "GPU Watts",
@@ -433,10 +731,119 @@ data:
             "type": "prometheus",
             "uid": "PBFA97CFB590B2093"
           },
+          "description": "Where the prompt first differs from the previous turn for the same session. Low buckets = poor cache reuse; high buckets = healthy.",
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "scaleDistribution": {
+                  "type": "linear"
+                }
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 7,
+            "x": 9,
+            "y": 7
+          },
+          "id": 27,
+          "options": {
+            "calculate": false,
+            "cellGap": 2,
+            "color": {
+              "exponent": 0.5,
+              "fill": "dark-orange",
+              "mode": "scheme",
+              "reverse": false,
+              "scale": "exponential",
+              "scheme": "Spectral",
+              "steps": 64
+            },
+            "exemplars": {
+              "color": "rgba(255,0,255,0.7)"
+            },
+            "filterValues": {
+              "le": 1e-09
+            },
+            "legend": {
+              "show": true
+            },
+            "rowsFrame": {
+              "layout": "auto"
+            },
+            "tooltip": {
+              "mode": "single",
+              "showColorScale": false,
+              "yHistogram": false
+            },
+            "yAxis": {
+              "axisPlacement": "left",
+              "decimals": 0,
+              "reverse": false,
+              "unit": "bytes"
+            }
+          },
+          "pluginVersion": "12.0.0",
+          "targets": [
+            {
+              "expr": "sum by (le) (rate(prompt_first_divergence_byte_bucket[5m]))",
+              "format": "heatmap",
+              "legendFormat": "{{le}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Prompt First-Divergence Byte (heatmap)",
+          "type": "heatmap"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
           "fieldConfig": {
             "defaults": {
               "color": {
-                "mode": "thresholds"
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
               },
               "mappings": [],
               "thresholds": {
@@ -450,7 +857,106 @@ data:
                     "value": 80
                   }
                 ]
-              }
+              },
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 8,
+            "x": 16,
+            "y": 7
+          },
+          "id": 12,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "single",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "12.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "PBFA97CFB590B2093"
+              },
+              "disableTextWrap": false,
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.95, sum(rate(llmmllab_api_queue_wait_time_seconds_bucket[5m])) by (le, priority))",
+              "fullMetaSearch": false,
+              "includeNullMetadata": true,
+              "legendFormat": "{{priority}} p95",
+              "range": true,
+              "refId": "A",
+              "useBackend": false
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "PBFA97CFB590B2093"
+              },
+              "disableTextWrap": false,
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.50, sum(rate(llmmllab_api_queue_wait_time_seconds_bucket[5m])) by (le, priority))",
+              "fullMetaSearch": false,
+              "includeNullMetadata": true,
+              "legendFormat": "{{priority}} p50",
+              "range": true,
+              "refId": "B",
+              "useBackend": false
+            }
+          ],
+          "title": "Queue Wait Time",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "decimals": 0,
+              "mappings": [],
+              "max": 100,
+              "min": 0,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "blue"
+                  },
+                  {
+                    "color": "green",
+                    "value": 30
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 70
+                  },
+                  {
+                    "color": "orange",
+                    "value": 80
+                  },
+                  {
+                    "color": "red",
+                    "value": 88
+                  }
+                ]
+              },
+              "unit": "celsius"
             },
             "overrides": []
           },
@@ -479,15 +985,13 @@ data:
           "pluginVersion": "12.0.0",
           "targets": [
             {
-              "disableTextWrap": false,
-              "editorMode": "code",
-              "expr": "gpu_temperature_celsius",
-              "fullMetaSearch": false,
-              "includeNullMetadata": true,
-              "legendFormat": "{{job}}-{{gpu_index}}",
-              "range": true,
-              "refId": "A",
-              "useBackend": false
+              "datasource": {
+                "type": "prometheus",
+                "uid": "PBFA97CFB590B2093"
+              },
+              "expr": "DCGM_FI_DEV_GPU_TEMP",
+              "legendFormat": "{{node}} GPU{{gpu}} {{modelName}}",
+              "refId": "A"
             }
           ],
           "title": "GPU Temp C",
@@ -518,22 +1022,22 @@ data:
             ]
           },
           "gridPos": {
-            "h": 20,
+            "h": 10,
             "w": 24,
             "x": 0,
-            "y": 28
+            "y": 12
           },
-          "id": 3,
+          "id": 31,
           "options": {
             "dedupStrategy": "none",
             "enableInfiniteScrolling": false,
             "enableLogDetails": true,
             "prettifyLogMessage": false,
             "showCommonLabels": false,
-            "showLabels": true,
+            "showLabels": false,
             "showTime": false,
             "sortOrder": "Descending",
-            "wrapLogMessage": false
+            "wrapLogMessage": true
           },
           "pluginVersion": "12.0.0",
           "targets": [
@@ -542,15 +1046,166 @@ data:
                 "type": "loki",
                 "uid": "P8E80F9AEF21F6940"
               },
-              "direction": "backward",
-              "editorMode": "builder",
-              "expr": "{service_name=~\"llmmllab-api|llmmllab-runner|llmmllab-runner-small\"}",
-              "key": "Q-d19a69fb-2a3b-49b2-9a47-9a2f863b3603-0",
+              "expr": "{service_name=\"llmmllab-api\"} | json | line_format `{{ if .__error__ }}- |>> {{ __line__ }} | - | - | (llmmllab-api){{ else }}{{ .timestamp | default \"-\" }} |>> {{ .event | default \"-\" }} | {{ .model | default \"-\" }} | {{ .session_id | default \"-\" }} | (llmmllab-api){{ end }}` | drop __error__, __error_details__ | label_format stream=\"all\" | keep stream",
               "queryType": "range",
               "refId": "A"
             }
           ],
-          "title": "Logs",
+          "title": "Logs \u2014 llmmllab-api",
+          "transformations": [
+            {
+              "id": "filterByValue",
+              "options": {
+                "filters": [
+                  {
+                    "config": {
+                      "id": "regex",
+                      "options": {
+                        "value": "/metrics"
+                      }
+                    },
+                    "fieldName": "Line"
+                  }
+                ],
+                "match": "any",
+                "type": "exclude"
+              }
+            }
+          ],
+          "type": "logs"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "P8E80F9AEF21F6940"
+          },
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "service_name"
+                },
+                "properties": []
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Line"
+                },
+                "properties": []
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 10,
+            "w": 24,
+            "x": 0,
+            "y": 22
+          },
+          "id": 32,
+          "options": {
+            "dedupStrategy": "none",
+            "enableInfiniteScrolling": false,
+            "enableLogDetails": true,
+            "prettifyLogMessage": false,
+            "showCommonLabels": false,
+            "showLabels": false,
+            "showTime": false,
+            "sortOrder": "Descending",
+            "wrapLogMessage": true
+          },
+          "pluginVersion": "12.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "P8E80F9AEF21F6940"
+              },
+              "expr": "{service_name=\"llmmllab-runner\"} | json | line_format `{{ if .__error__ }}- |>> {{ __line__ }} | - | - | (llmmllab-runner){{ else }}{{ .timestamp | default \"-\" }} |>> {{ .event | default \"-\" }} | {{ .model | default \"-\" }} | {{ .session_id | default \"-\" }} | (llmmllab-runner){{ end }}` | drop __error__, __error_details__ | label_format stream=\"all\" | keep stream",
+              "queryType": "range",
+              "refId": "A"
+            }
+          ],
+          "title": "Logs \u2014 llmmllab-runner (main)",
+          "transformations": [
+            {
+              "id": "filterByValue",
+              "options": {
+                "filters": [
+                  {
+                    "config": {
+                      "id": "regex",
+                      "options": {
+                        "value": "/metrics"
+                      }
+                    },
+                    "fieldName": "Line"
+                  }
+                ],
+                "match": "any",
+                "type": "exclude"
+              }
+            }
+          ],
+          "type": "logs"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "P8E80F9AEF21F6940"
+          },
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "service_name"
+                },
+                "properties": []
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Line"
+                },
+                "properties": []
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 10,
+            "w": 24,
+            "x": 0,
+            "y": 32
+          },
+          "id": 33,
+          "options": {
+            "dedupStrategy": "none",
+            "enableInfiniteScrolling": false,
+            "enableLogDetails": true,
+            "prettifyLogMessage": false,
+            "showCommonLabels": false,
+            "showLabels": false,
+            "showTime": false,
+            "sortOrder": "Descending",
+            "wrapLogMessage": true
+          },
+          "pluginVersion": "12.0.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "P8E80F9AEF21F6940"
+              },
+              "expr": "{service_name=\"llmmllab-runner-small\"} | json | line_format `{{ if .__error__ }}- |>> {{ __line__ }} | - | - | (llmmllab-runner-small){{ else }}{{ .timestamp | default \"-\" }} |>> {{ .event | default \"-\" }} | {{ .model | default \"-\" }} | {{ .session_id | default \"-\" }} | (llmmllab-runner-small){{ end }}` | drop __error__, __error_details__ | label_format stream=\"all\" | keep stream",
+              "queryType": "range",
+              "refId": "A"
+            }
+          ],
+          "title": "Logs \u2014 llmmllab-runner (small)",
           "transformations": [
             {
               "id": "filterByValue",
@@ -636,7 +1291,7 @@ data:
             "h": 6,
             "w": 8,
             "x": 0,
-            "y": 8
+            "y": 42
           },
           "id": 10,
           "options": {
@@ -736,7 +1391,7 @@ data:
             "h": 6,
             "w": 8,
             "x": 8,
-            "y": 8
+            "y": 42
           },
           "id": 11,
           "options": {
@@ -810,197 +1465,6 @@ data:
                 "spanNulls": false,
                 "stacking": {
                   "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green"
-                  },
-                  {
-                    "color": "red",
-                    "value": 80
-                  }
-                ]
-              },
-              "unit": "s"
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 6,
-            "w": 8,
-            "x": 16,
-            "y": 8
-          },
-          "id": 12,
-          "options": {
-            "legend": {
-              "calcs": [],
-              "displayMode": "list",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "hideZeros": false,
-              "mode": "single",
-              "sort": "none"
-            }
-          },
-          "pluginVersion": "12.0.0",
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "PBFA97CFB590B2093"
-              },
-              "disableTextWrap": false,
-              "editorMode": "code",
-              "expr": "histogram_quantile(0.95, sum(rate(llmmllab_api_queue_wait_time_seconds_bucket[5m])) by (le, priority))",
-              "fullMetaSearch": false,
-              "includeNullMetadata": true,
-              "legendFormat": "{{priority}} p95",
-              "range": true,
-              "refId": "A",
-              "useBackend": false
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "PBFA97CFB590B2093"
-              },
-              "disableTextWrap": false,
-              "editorMode": "code",
-              "expr": "histogram_quantile(0.50, sum(rate(llmmllab_api_queue_wait_time_seconds_bucket[5m])) by (le, priority))",
-              "fullMetaSearch": false,
-              "includeNullMetadata": true,
-              "legendFormat": "{{priority}} p50",
-              "range": true,
-              "refId": "B",
-              "useBackend": false
-            }
-          ],
-          "title": "Queue Wait Time",
-          "type": "timeseries"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "thresholds"
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green"
-                  },
-                  {
-                    "color": "yellow",
-                    "value": 5
-                  },
-                  {
-                    "color": "red",
-                    "value": 10
-                  }
-                ]
-              }
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 4,
-            "w": 6,
-            "x": 0,
-            "y": 14
-          },
-          "id": 13,
-          "options": {
-            "colorMode": "value",
-            "graphMode": "area",
-            "justifyMode": "auto",
-            "orientation": "auto",
-            "percentChangeColorMode": "standard",
-            "reduceOptions": {
-              "calcs": [
-                "lastNotNull"
-              ],
-              "fields": "",
-              "values": false
-            },
-            "showPercentChange": false,
-            "textMode": "auto",
-            "wideLayout": true
-          },
-          "pluginVersion": "12.0.0",
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "PBFA97CFB590B2093"
-              },
-              "disableTextWrap": false,
-              "editorMode": "code",
-              "expr": "sum(llmmllab_api_active_sessions)",
-              "fullMetaSearch": false,
-              "includeNullMetadata": true,
-              "legendFormat": "total",
-              "range": true,
-              "refId": "A",
-              "useBackend": false
-            }
-          ],
-          "title": "Active Sessions",
-          "type": "stat"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "axisBorderShow": false,
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "barWidthFactor": 0.6,
-                "drawStyle": "line",
-                "fillOpacity": 10,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "legend": false,
-                  "tooltip": false,
-                  "viz": false
-                },
-                "insertNulls": false,
-                "lineInterpolation": "linear",
-                "lineWidth": 1,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "auto",
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
                   "mode": "normal"
                 },
                 "thresholdsStyle": {
@@ -1024,10 +1488,10 @@ data:
             "overrides": []
           },
           "gridPos": {
-            "h": 4,
-            "w": 18,
-            "x": 6,
-            "y": 14
+            "h": 5,
+            "w": 8,
+            "x": 16,
+            "y": 42
           },
           "id": 14,
           "options": {
@@ -1128,7 +1592,7 @@ data:
             "h": 6,
             "w": 12,
             "x": 0,
-            "y": 18
+            "y": 48
           },
           "id": 15,
           "options": {
@@ -1244,7 +1708,7 @@ data:
             "h": 6,
             "w": 12,
             "x": 12,
-            "y": 18
+            "y": 48
           },
           "id": 16,
           "options": {
@@ -1330,7 +1794,7 @@ data:
             "h": 4,
             "w": 8,
             "x": 0,
-            "y": 24
+            "y": 54
           },
           "id": 17,
           "options": {
@@ -1435,7 +1899,7 @@ data:
             "h": 4,
             "w": 8,
             "x": 8,
-            "y": 24
+            "y": 54
           },
           "id": 18,
           "options": {
@@ -1517,7 +1981,7 @@ data:
             "h": 4,
             "w": 8,
             "x": 16,
-            "y": 24
+            "y": 54
           },
           "id": 19,
           "options": {
@@ -1557,6 +2021,584 @@ data:
           ],
           "title": "Priority Promotions (1h)",
           "type": "stat"
+        },
+        {
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 58
+          },
+          "id": 20,
+          "panels": [],
+          "title": "Round 1 \u2014 Slot Pinning & KV Cache",
+          "type": "row"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "description": "Rate of session\u2192slot LRU touches in the runner proxy. evicted=true highlights when one session displaced another.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "red",
+                    "value": 80
+                  }
+                ]
+              },
+              "unit": "reqps"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 59
+          },
+          "id": 21,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "single",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "12.0.0",
+          "targets": [
+            {
+              "expr": "sum by (slot_id, evicted) (rate(slot_resolutions_total[5m]))",
+              "legendFormat": "slot {{slot_id}} (evicted={{evicted}})",
+              "refId": "A"
+            }
+          ],
+          "title": "Slot Resolutions / sec",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "description": "Distinct session_ids tracked per upstream llama.cpp server. Capped at --parallel.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "red",
+                    "value": 80
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 59
+          },
+          "id": 22,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "single",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "12.0.0",
+          "targets": [
+            {
+              "expr": "slot_lru_size",
+              "legendFormat": "{{server_id}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Slot LRU Size by Server",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "description": "Rate of llama.cpp /slots/{id}?action=save and ?action=restore calls. outcome=failure indicates persistence trouble.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "red",
+                    "value": 80
+                  }
+                ]
+              },
+              "unit": "ops"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 67
+          },
+          "id": 23,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "single",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "12.0.0",
+          "targets": [
+            {
+              "expr": "sum by (outcome) (rate(slot_save_total[5m]))",
+              "legendFormat": "save ({{outcome}})",
+              "refId": "A"
+            },
+            {
+              "expr": "sum by (outcome) (rate(slot_restore_total[5m]))",
+              "legendFormat": "restore ({{outcome}})",
+              "refId": "B"
+            }
+          ],
+          "title": "Slot KV Save / Restore Rate",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "description": "95th-percentile wall-clock for slot persistence operations.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 5,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "red",
+                    "value": 80
+                  }
+                ]
+              },
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 67
+          },
+          "id": 24,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "single",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "12.0.0",
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(slot_save_duration_seconds_bucket[5m])))",
+              "legendFormat": "save p95",
+              "refId": "A"
+            },
+            {
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(slot_restore_duration_seconds_bucket[5m])))",
+              "legendFormat": "restore p95",
+              "refId": "B"
+            }
+          ],
+          "title": "Slot Save/Restore Latency (p95)",
+          "type": "timeseries"
+        },
+        {
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 75
+          },
+          "id": 25,
+          "panels": [],
+          "title": "Round 1 \u2014 Prompt Stability & Reliability",
+          "type": "row"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "description": "Size of upstream chat-completion request bodies. Helps spot probes (tiny), normal turns, and unexpectedly huge prompts.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 5,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "red",
+                    "value": 80
+                  }
+                ]
+              },
+              "unit": "bytes"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 76
+          },
+          "id": 29,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "single",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "12.0.0",
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.50, sum by (le) (rate(prompt_body_bytes_bucket[5m])))",
+              "legendFormat": "p50",
+              "refId": "A"
+            },
+            {
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(prompt_body_bytes_bucket[5m])))",
+              "legendFormat": "p95",
+              "refId": "B"
+            }
+          ],
+          "title": "Prompt Body Size (p50 / p95)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "description": "How many bytes of prefix match the previous turn.  Higher = better cache reuse.",
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "lineWidth": 2
+              },
+              "decimals": 0,
+              "max": 131072,
+              "min": 0,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": null
+                  },
+                  {
+                    "color": "orange",
+                    "value": 16384
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 32768
+                  },
+                  {
+                    "color": "green",
+                    "value": 65536
+                  }
+                ]
+              },
+              "unit": "bytes"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 92
+          },
+          "id": 30,
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "PBFA97CFB590B2093"
+              },
+              "expr": "histogram_quantile(0.50, sum by (le) (rate(prompt_first_divergence_byte_bucket[5m])))",
+              "legendFormat": "p50 cache-hit depth",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "PBFA97CFB590B2093"
+              },
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(prompt_first_divergence_byte_bucket[5m])))",
+              "legendFormat": "p95 cache-hit depth",
+              "refId": "B"
+            }
+          ],
+          "title": "Prompt Cache Hit Depth (p50 / p95)",
+          "type": "timeseries"
         }
       ],
       "preload": false,
@@ -1573,152 +2615,7 @@ data:
       "timepicker": {},
       "timezone": "browser",
       "title": "llmmllab",
-      "uid": "2efc082c-4052-48a1-ae93-36133aa1b74b",
-      "version": 42
-    }
-  runner-dashboard.json: |
-    {
-      "id": null,
-      "uid": "llmmllab-runner",
-      "title": "llmmllab-runner Dashboard",
-      "tags": ["llmmllab", "runner"],
-      "timezone": "browser",
-      "schemaVersion": 39,
-      "version": 1,
-      "refresh": "30s",
-      "panels": [
-        {
-          "id": 1,
-          "title": "Active llama.cpp Servers",
-          "type": "timeseries",
-          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
-          "targets": [
-            {
-              "expr": "llama_servers_active",
-              "legendFormat": "{{runner_name}}"
-            }
-          ]
-        },
-        {
-          "id": 2,
-          "title": "Server Starts",
-          "type": "stat",
-          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
-          "targets": [
-            {
-              "expr": "sum(increase(llama_server_starts_total[1h])) by (model_id)",
-              "legendFormat": "{{model_id}}"
-            }
-          ]
-        },
-        {
-          "id": 3,
-          "title": "GPU Temperature",
-          "type": "timeseries",
-          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
-          "targets": [
-            {
-              "expr": "gpu_temperature_celsius",
-              "legendFormat": "GPU {{gpu_index}} ({{runner_name}})"
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "celsius",
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {"color": "green", "value": null},
-                  {"color": "yellow", "value": 70},
-                  {"color": "orange", "value": 78},
-                  {"color": "red", "value": 88}
-                ]
-              }
-            }
-          }
-        },
-        {
-          "id": 4,
-          "title": "GPU Memory Usage",
-          "type": "timeseries",
-          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
-          "targets": [
-            {
-              "expr": "gpu_memory_used_bytes",
-              "legendFormat": "GPU {{gpu_index}} ({{runner_name}})"
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "bytes"
-            }
-          }
-        },
-        {
-          "id": 5,
-          "title": "GPU Power",
-          "type": "timeseries",
-          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
-          "targets": [
-            {
-              "expr": "gpu_power_watts",
-              "legendFormat": "GPU {{gpu_index}} ({{runner_name}})"
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "watt"
-            }
-          }
-        },
-        {
-          "id": 6,
-          "title": "Server Evictions",
-          "type": "stat",
-          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
-          "targets": [
-            {
-              "expr": "sum(increase(llama_server_evictions_total[1h])) by (reason)",
-              "legendFormat": "{{reason}}"
-            }
-          ]
-        },
-        {
-          "id": 7,
-          "title": "Request Rate",
-          "type": "timeseries",
-          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
-          "targets": [
-            {
-              "expr": "sum(rate(http_requests_total[5m])) by (status, job)",
-              "legendFormat": "{{job}} {{status}}"
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "reqps"
-            }
-          }
-        },
-        {
-          "id": 8,
-          "title": "Error Logs",
-          "type": "logs",
-          "gridPos": {"h": 8, "w": 24, "x": 0, "y": 32},
-          "datasource": {"type": "loki", "uid": "loki"},
-          "targets": [
-            {
-              "refId": "A",
-              "expr": "{namespace=\"llmmllab\", app=~\"llmmllab-runner.*\", level=\"error\"} | json"
-            }
-          ],
-          "options": {
-            "showLabels": true,
-            "showCommonLabels": true,
-            "wrapLogMessage": true
-          }
-        }
-      ]
+      "uid": "2efc082c-4052-48a1-ae93-36133aa1b74b"
     }
 ---
 apiVersion: v1
@@ -1813,8 +2710,12 @@ spec:
             items:
               - key: api-dashboard.json
                 path: api-dashboard.json
-              - key: runner-dashboard.json
-                path: runner-dashboard.json
+              # ``runner-dashboard.json`` removed 2026-05-24 — the
+              # configmap above never carried the key, so this mount
+              # item was spamming the kubelet with FailedMount events
+              # (~700/day for 3 days).  Add a runner dashboard JSON to
+              # the configmap and re-add this item if you want it
+              # served by grafana.
         - name: data
           persistentVolumeClaim:
             claimName: grafana-data
