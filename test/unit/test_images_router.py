@@ -359,6 +359,50 @@ def test_3d_parts_returns_all_four_urls(client: TestClient):
     assert body["bbox_url"] == "/v1/images/3d/parts/abc123_bbox.glb"
     assert body["gt_bbox_url"] == "/v1/images/3d/parts/abc123_gt_bbox.glb"
     assert body["elapsed_sec"] == 85.7
+    # split=false (the default) → part_urls is an empty list.
+    assert body["part_urls"] == []
+
+
+def test_3d_parts_split_returns_per_part_urls(client: TestClient):
+    """When the request asks ``split=true``, the service is expected to
+    return ``part_paths`` and the router wraps each as a download URL
+    in ``part_urls``."""
+    fake = ImageTo3DPartsResult(
+        id="abc123",
+        elapsed_sec=90.1,
+        mesh_path="/data/sd-out/3d_parts/abc123_decomposed.glb",
+        exploded_path="/data/sd-out/3d_parts/abc123_exploded.glb",
+        bbox_path="/data/sd-out/3d_parts/abc123_bbox.glb",
+        gt_bbox_path="/data/sd-out/3d_parts/abc123_gt_bbox.glb",
+        part_paths=[
+            "/data/sd-out/3d_parts/abc123_part_00.glb",
+            "/data/sd-out/3d_parts/abc123_part_01.glb",
+            "/data/sd-out/3d_parts/abc123_part_02.glb",
+        ],
+    )
+    captured = {}
+
+    async def _fake(**kwargs):
+        captured.update(kwargs)
+        return fake
+
+    with patch("routers.openai.images.generate_3d_parts", new=AsyncMock(side_effect=_fake)):
+        response = client.post(
+            "/images/3d/parts",
+            json={"mesh_b64": "Z2xi", "split": True},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert captured["split"] is True
+    assert body["part_urls"] == [
+        "/v1/images/3d/parts/abc123_part_00.glb",
+        "/v1/images/3d/parts/abc123_part_01.glb",
+        "/v1/images/3d/parts/abc123_part_02.glb",
+    ]
+    # The combined decomposed.glb URL is still present for callers
+    # that want the assembled scene.
+    assert body["mesh_url"] == "/v1/images/3d/parts/abc123_decomposed.glb"
 
 
 def test_3d_parts_forwards_optional_params(client: TestClient):

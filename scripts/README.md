@@ -211,13 +211,16 @@ Mesh-to-parts decomposition via Hunyuan3D-Part (P3-SAM + XPart).
 ./scripts/test_img2-3d-parts.sh path/to/mesh.glb
 ./scripts/test_img2-3d-parts.sh path/to/mesh.glb 256      # lower octree res, faster
 ./scripts/test_img2-3d-parts.sh path/to/mesh.glb 512 42   # with seed
+./scripts/test_img2-3d-parts.sh path/to/mesh.glb 512 42 1 # split parts (4th positional)
+SPLIT=1 ./scripts/test_img2-3d-parts.sh path/to/mesh.glb  # same via env
 ```
 
 **Positional args:**
 
 1. input `.glb` mesh (required — base64-encoded inline)
 2. `octree_resolution` (default `512`, allowed `128`+; lower = faster, blockier output)
-3. `seed` (optional)
+3. `seed` (optional; empty string skips)
+4. `split` (optional; pass `1`/`true`/`yes` to also export each detected part as its own `<id>_part_NN.glb` for direct import into Blender / three.js / Unity. Default `false` returns only the combined `_decomposed.glb`.)
 
 **Response shape:**
 
@@ -237,7 +240,7 @@ Mesh-to-parts decomposition via Hunyuan3D-Part (P3-SAM + XPart).
 }
 ```
 
-**The four outputs:**
+**The four base outputs:**
 
 | Suffix | What it is |
 |--------|------------|
@@ -245,6 +248,14 @@ Mesh-to-parts decomposition via Hunyuan3D-Part (P3-SAM + XPart).
 | `_exploded.glb` | Parts spatially separated — useful for visualisation, presentation, or debugging segmentation |
 | `_bbox.glb` | Bounding-box wireframe only — shows what P3-SAM detected before X-Part regenerated the geometry |
 | `_gt_bbox.glb` | Input mesh + bbox overlay — debug view to compare predicted boxes against the input |
+
+**Plus, when `split=true`:**
+
+| Suffix | What it is |
+|--------|------------|
+| `_part_00.glb`, `_part_01.glb`, … | Each detected part as a standalone `.glb`. Drag-and-drop into Blender / three.js / Unity. Same geometry as the corresponding primitive inside `_decomposed.glb`, just packaged individually. |
+
+Ordering is whatever order XPart emitted the part latents — there's no semantic guarantee about which index is which body part. The script downloads them all and prints each path.
 
 The script downloads all four to `$OUT_DIR/<id>_<role>.glb` and prints
 the wall-clock. XPart is **fp32 only** (spconv kernels lack lower-precision

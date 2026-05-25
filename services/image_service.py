@@ -483,11 +483,13 @@ async def generate_3d(
 class ImageTo3DPartsResult:
     """One Hunyuan3D-Part response.
 
-    Four meshes per request — the api wraps each absolute runner-side
-    path with a ``GET /v1/3d/parts/{filename}`` URL so clients can
-    download without runner pod access.  ``runner_endpoint`` is the
-    endpoint the file lives on (always the same one for all four
-    outputs since they come from the same run).
+    Four meshes per request (decomposed, exploded, bbox, gt_bbox) plus
+    an optional ``part_paths`` list when the caller asked for the
+    per-part split (``split=true``).  The api wraps each absolute
+    runner-side path with a ``GET /v1/images/3d/parts/{filename}`` URL
+    so clients can download without runner pod access.
+    ``runner_endpoint`` is the endpoint the file lives on (always the
+    same one for all outputs since they come from the same run).
     """
 
     id: str
@@ -496,6 +498,7 @@ class ImageTo3DPartsResult:
     exploded_path: Optional[str]
     bbox_path: Optional[str]
     gt_bbox_path: Optional[str]
+    part_paths: List[str] = ()  # type: ignore[assignment]  # tuple default for frozen dataclass
     runner_endpoint: Optional[str] = None
 
 
@@ -504,6 +507,7 @@ async def generate_3d_parts(
     mesh_b64: str,
     octree_resolution: Optional[int] = None,
     seed: Optional[int] = None,
+    split: bool = False,
     client: Optional[RunnerClient] = None,
     user_id: Optional[str] = None,
 ) -> ImageTo3DPartsResult:
@@ -525,6 +529,8 @@ async def generate_3d_parts(
         payload["octree_resolution"] = int(octree_resolution)
     if seed is not None:
         payload["seed"] = int(seed)
+    if split:
+        payload["split"] = True
 
     logger.info(
         "Submitting img23d_part request",
@@ -553,6 +559,7 @@ async def generate_3d_parts(
         exploded_path=body.get("exploded_path"),
         bbox_path=body.get("bbox_path"),
         gt_bbox_path=body.get("gt_bbox_path"),
+        part_paths=list(body.get("part_paths") or []),
         runner_endpoint=endpoint,
     )
 
@@ -562,7 +569,7 @@ async def generate_3d_parts(
 # basename + role suffix shape here so a malformed filename never
 # even reaches the runner.
 _IMG23D_PART_FILENAME_RE = __import__("re").compile(
-    r"^[A-Za-z0-9_-]{1,64}_(decomposed|exploded|bbox|gt_bbox|input)\.glb$"
+    r"^[A-Za-z0-9_-]{1,64}_(decomposed|exploded|bbox|gt_bbox|input|part_\d{2})\.glb$"
 )
 
 

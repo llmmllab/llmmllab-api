@@ -308,6 +308,16 @@ class CreateImageTo3DPartsRequest(BaseModel):
     seed: Optional[int] = Field(
         None, description="RNG seed for reproducible runs (default 42 in pipeline)"
     )
+    split: Optional[bool] = Field(
+        False,
+        description=(
+            "If true, also export each detected part as its own "
+            "``.glb`` and return one download URL per part in "
+            "``part_urls``.  Useful for importing parts as separate "
+            "objects in Blender / three.js / Unity without manually "
+            "splitting the combined ``decomposed.glb`` scene."
+        ),
+    )
 
 
 class CreateImageTo3DPartsResponse(BaseModel):
@@ -320,12 +330,29 @@ class CreateImageTo3DPartsResponse(BaseModel):
     exploded_path: Optional[str] = Field(None, description="Runner path to the exploded-view mesh")
     bbox_path: Optional[str] = Field(None, description="Runner path to the bounding-box wireframe")
     gt_bbox_path: Optional[str] = Field(None, description="Runner path to the input + bbox overlay")
+    part_paths: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Runner paths to per-part ``.glb`` files when "
+            "``split=true``.  Empty list otherwise.  Debug-only; use "
+            "``part_urls`` to download."
+        ),
+    )
     # Public download URLs.  Each routes through
     # ``GET /v1/3d/parts/{filename}`` which streams the .glb back.
     mesh_url: Optional[str] = Field(None, description="Download URL for the decomposed mesh")
     exploded_url: Optional[str] = Field(None, description="Download URL for the exploded view")
     bbox_url: Optional[str] = Field(None, description="Download URL for the bbox wireframe")
     gt_bbox_url: Optional[str] = Field(None, description="Download URL for the input + bbox overlay")
+    part_urls: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Per-part download URLs when ``split=true`` was requested.  "
+            "One entry per detected part; ordering matches what XPart "
+            "emitted (no semantic guarantee about which index is which "
+            "part).  Empty list when ``split=false``."
+        ),
+    )
 
 
 # Sibling endpoint to ``POST /v1/images/3d``.  Final URL is
@@ -355,6 +382,7 @@ async def createImageTo3DParts(
             mesh_b64=body.mesh_b64,
             octree_resolution=body.octree_resolution,
             seed=body.seed,
+            split=bool(body.split),
             user_id=get_user_id(request),
         )
     except ImageServiceError as e:
@@ -368,6 +396,13 @@ async def createImageTo3DParts(
     def _url(path: Optional[str]) -> Optional[str]:
         return f"/v1/images/3d/parts/{_os.path.basename(path)}" if path else None
 
+    part_urls = [
+        u
+        for p in (result.part_paths or [])
+        for u in [_url(p)]
+        if u is not None
+    ]
+
     return CreateImageTo3DPartsResponse(
         id=result.id,
         created=int(time.time()),
@@ -376,10 +411,12 @@ async def createImageTo3DParts(
         exploded_path=result.exploded_path,
         bbox_path=result.bbox_path,
         gt_bbox_path=result.gt_bbox_path,
+        part_paths=list(result.part_paths or []),
         mesh_url=_url(result.mesh_path),
         exploded_url=_url(result.exploded_path),
         bbox_url=_url(result.bbox_path),
         gt_bbox_url=_url(result.gt_bbox_path),
+        part_urls=part_urls,
     )
 
 
