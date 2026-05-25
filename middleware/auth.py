@@ -273,12 +273,20 @@ class ApiKeyValidator:
             except Exception as e:
                 self.logger.debug(f"Failed to update last_used timestamp: {e}")
 
-            # Return TokenValidationResult with API key user_id
-            # API keys have limited access - set is_admin to False
+            # API keys carry their permissions in the ``scopes`` text
+            # array.  Mirror the JWT path's role-mapping: the presence
+            # of the ``"admin"`` scope confers admin status, matching
+            # the ``"admins"`` group on JWT side.  Both representations
+            # land on the same ``is_admin`` bool downstream so route
+            # guards (``Depends(require_admin)``,
+            # ``is_admin(request)``) work uniformly regardless of
+            # which auth path the caller used.
+            scopes = list(api_key_obj.scopes or [])
+            key_is_admin = "admin" in scopes
             return TokenValidationResult(
                 user_id=api_key_obj.user_id,
-                claims={"scopes": api_key_obj.scopes, "type": "api_key"},
-                is_admin=False,
+                claims={"scopes": scopes, "type": "api_key"},
+                is_admin=key_is_admin,
             )
 
         except Exception as e:
