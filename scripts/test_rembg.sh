@@ -25,7 +25,7 @@ set -euo pipefail
 INPUT="${1:?path to input image required}"
 MASK_ONLY="${2:-${MASK_ONLY:-0}}"
 
-API_BASE="${API_BASE:-http://localhost:8000}"
+API_BASE="${API_BASE:-http://192.168.0.71:9999}"
 OUT_DIR="${OUT_DIR:-./out}"
 mkdir -p "$OUT_DIR"
 
@@ -33,6 +33,8 @@ if [[ ! -f "$INPUT" ]]; then
     echo "✘ file not found: $INPUT" >&2
     exit 1
 fi
+
+API_KEY=$LLMMLL_AUTH_TOKEN
 
 AUTH_HEADER=()
 if [[ -n "${API_KEY:-}" ]]; then
