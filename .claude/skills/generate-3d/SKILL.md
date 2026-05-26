@@ -25,37 +25,6 @@ asset: interview them about the subject, write the prompt, run the
 four-step (or five-step, with parts) pipeline, and show them the
 result.
 
-## Resource model — read first
-
-The runner pod (`lsnode-3`) is capped at **26 GiB of system RAM**.
-That ceiling matters because:
-
-- **Hunyuan3D-2.1 (img23d)** uses ~8 GB transient during weight load.
-- **Hunyuan3D-Part / XPart (img23d_part)** uses ~17 GB transient
-  during weight load.
-- An **active Qwen-27B chat session** on the runner holds ~5–8 GB of
-  system RAM (KV-offload + context checkpoints).
-
-So a Qwen session + XPart load = ~25 GB peak, which is at the cap
-with no headroom.  In practice that combination OOMKills the pod
-(exit 137), losing every in-flight request.
-
-The cluster has two automatic cleanup hooks but neither is enough on
-its own:
-
-- `IN_PROCESS_AUTO_UNLOAD=1` (live on the cluster) — the runner
-  unloads in-process pipelines after each request.  Covers
-  back-to-back pipeline calls, **does not** cover a concurrent chat
-  session.
-- `IMG_SERVER_AUTO_SHUTDOWN` — referenced in the api code but **not
-  currently set** on the cluster deployment.  Treat as off.
-
-**Therefore: evict any resident LLM session BEFORE the heavy steps
-(img23d in Step 6, img23d_part in Step 7).**  This is the only thing
-that prevents a Qwen + XPart collision.  The skill defaults to
-evict-before-heavy-step.  The user can opt out only by passing
-`evict=false`, and only if they know no chat session is running.
-
 ## Arguments
 
 The user can pass arguments via skill invocation:
@@ -86,7 +55,7 @@ LLMMLL_AUTH_TOKEN # admin-capable bearer token
 
 If `API_BASE` isn't set, use `http://192.168.0.71:9999` (matches the
 scripts' built-in default).  All `curl` calls and all
-`./scripts/test_*.sh` invocations must see the same `API_BASE` — do
+`scripts/*.sh` invocations must see the same `API_BASE` — do
 not introduce a second variable name; the scripts ignore anything
 else.
 
@@ -137,27 +106,6 @@ Step 3.
 Save the brief, the inferred use case, and `OUT_DIR` for later
 steps.
 
-### Step 1.5 — Pre-flight evict (always runs unless `$4=false`)
-
-Before any pipeline work, clear any resident LLM session so the
-first heavy step starts on a clean pod.  This is the cheap insurance
-that prevents the Qwen + XPart collision described in the resource
-model above.
-
-```bash
-curl -sS -X POST "$API_BASE/v1/runner/servers/evict-all" \
-    -H "Authorization: Bearer $LLMMLL_AUTH_TOKEN"
-```
-
-Skip only if `$4=false` AND the user has explicitly said they want
-to preserve a chat session.  In interactive mode with `$4` unset,
-ask once:
-
-> "About to evict any running LLM/image servers on the runner so the
-> 3D pipeline has the full 26 GiB pod budget.  Skip eviction?"
-
-Default answer: "No, evict it" (recommended).
-
 ### Step 2 — Prompt formulation
 
 Read `./generate_3d_models.md` (sections "Step 1 — txt2img" and
@@ -180,12 +128,21 @@ confirmed.
 
 ### Step 3 — Run txt2img
 
-Eviction is **not** needed here — sd-server's footprint is small
-(~2 GB system RAM) and doesn't collide with anything.
+IF `$3`, RUN EXACTLY THIS:
+
+```bash
+curl -sS -X POST "$API_BASE/v1/runner/servers/evict-all" \
+    -H "Authorization: Bearer $LLMMLL_AUTH_TOKEN" && \
+    sleep 5 && \  # give the runner a moment to recover if eviction happened
+    API_BASE="$API_BASE" OUT_DIR="$OUT_DIR" \
+    .claude/skills/generate-3d/scripts/txt2img.sh "<prompt>"
+```
+
+ELSE:
 
 ```bash
 API_BASE="$API_BASE" OUT_DIR="$OUT_DIR" \
-  ./scripts/test_txt2img.sh "<prompt>"
+  .claude/skills/generate-3d/scripts/txt2img.sh "<prompt>"
 ```
 
 The script writes ``<OUT_DIR>/txt2img_<ts>.png`` and prints the path
@@ -211,12 +168,23 @@ prompt following `./generate_3d_models.md`'s rule: **additive edits
 are most reliable; full-surface material/colour changes are flaky.**
 Warn the user if their requested change is the latter.
 
-No eviction needed (still sd-server territory):
+IF `$3`, RUN EXACTLY THIS:
 
 ```bash
 API_BASE="$API_BASE" OUT_DIR="$OUT_DIR" \
-  ./scripts/test_img2img.sh <last_image.png> "<edit prompt>" \
+  .claude/skills/generate-3d/scripts/img2img.sh <last_image.png> "<edit prompt>" \
   qwen-image-edit-2511 0.75
+```
+
+ELSE:
+
+```bash
+curl -sS -X POST "$API_BASE/v1/runner/servers/evict-all" \
+    -H "Authorization: Bearer $LLMMLL_AUTH_TOKEN" && \
+    sleep 5 && \  # give the runner a moment to recover if eviction happened
+    API_BASE="$API_BASE" OUT_DIR="$OUT_DIR" \
+    .claude/skills/generate-3d/scripts/img2img.sh <last_image.png> "<edit prompt>" \
+    qwen-image-edit-2511 0.75
 ```
 
 Show the result, loop back to Step 4.
@@ -228,7 +196,7 @@ cleans it up after the request:
 
 ```bash
 API_BASE="$API_BASE" OUT_DIR="$OUT_DIR" \
-  ./scripts/test_rembg.sh <last_image.png>
+  .claude/skills/generate-3d/scripts/rembg.sh <last_image.png>
 ```
 
 The script writes ``<OUT_DIR>/rembg_<ts>_cutout.png``.  Read it to
@@ -238,25 +206,21 @@ if it's wrong, the right fix is usually to refine the input image
 
 ### Step 6 — 3D generation (heavy step)
 
-**Eviction matters here.**  Hunyuan3D-2.1 needs ~8 GB transient.
-If `$4` defaulted true (and Step 1.5 ran) the pod is already clear
-and you can skip a second evict.  If the user has had a long
-interactive session that could have re-spawned an LLM (e.g. they
-asked you questions in another window between Step 1 and now), evict
-again just before this step.
-
-When in doubt, evict.  It's cheap (~50 ms when nothing is loaded):
+IF `$3`, RUN EXACTLY THIS:
 
 ```bash
 curl -sS -X POST "$API_BASE/v1/runner/servers/evict-all" \
-    -H "Authorization: Bearer $LLMMLL_AUTH_TOKEN"
+    -H "Authorization: Bearer $LLMMLL_AUTH_TOKEN" && \
+    sleep 5 && \  # give the runner a moment to recover if eviction happened
+    API_BASE="$API_BASE" OUT_DIR="$OUT_DIR" \
+    .claude/skills/generate-3d/scripts/img2-3d.sh <cutout.png>
 ```
 
-Then run:
+ELSE:
 
 ```bash
 API_BASE="$API_BASE" OUT_DIR="$OUT_DIR" \
-  ./scripts/test_img2-3d.sh <cutout.png>
+    .claude/skills/generate-3d/scripts/img2-3d.sh <cutout.png>
 ```
 
 The script writes ``<OUT_DIR>/<id>.glb``.  **Tell the user this
@@ -283,24 +247,13 @@ Step 1:
 `$5` overrides the default explicitly.  In interactive mode, confirm
 via `AskUserQuestion`.
 
-**This is the highest-memory step in the pipeline (~17 GB transient
-during XPart load).  Evict unconditionally before it runs**, even if
-you evicted earlier — long-running interactive sessions are exactly
-when an LLM tends to come back:
 
 ```bash
 curl -sS -X POST "$API_BASE/v1/runner/servers/evict-all" \
-    -H "Authorization: Bearer $LLMMLL_AUTH_TOKEN"
-```
-
-Default `octree_resolution=256` on a 26 GiB pod.  Bump to 512 only
-if the user explicitly asks for higher-detail decomposition AND
-confirms no chat session is running.  The skill passes 256 + seed 42
-+ split=1 by default:
-
-```bash
-API_BASE="$API_BASE" OUT_DIR="$OUT_DIR" \
-  ./scripts/test_img2-3d-parts.sh <mesh.glb> 256 42 1
+    -H "Authorization: Bearer $LLMMLL_AUTH_TOKEN" && \
+    sleep 5 && \  # give the runner a moment to recover if eviction happened
+    API_BASE="$API_BASE" OUT_DIR="$OUT_DIR" \
+  .claude/skills/generate-3d/scripts/img2-3d-parts.sh <mesh.glb> 256 42 1
 ```
 
 `split=1` (4th positional) gives one `.glb` per detected part.
@@ -315,7 +268,7 @@ Outputs:
 Open the exploded view (most informative):
 
 ```bash
-open "$OUT_DIR/${ID}_exploded.glb"
+xdg-open "$OUT_DIR/${ID}_exploded.glb"
 ```
 
 ### Step 8 — Final eviction + summary
