@@ -23,7 +23,6 @@ in a stubbed client without monkey-patching the global singleton.
 
 from __future__ import annotations
 
-import os
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -43,9 +42,9 @@ def _img_auto_shutdown() -> bool:
     in a normal interactive workflow).  Set to ``false`` for
     benchmarking or batched generation.
     """
-    return os.environ.get("IMG_SERVER_AUTO_SHUTDOWN", "true").lower() in (
-        "1", "true", "yes", "on",
-    )
+    from config import IMG_SERVER_AUTO_SHUTDOWN
+
+    return IMG_SERVER_AUTO_SHUTDOWN
 
 
 async def _release_or_shutdown(cli: RunnerClient, handle: ServerHandle) -> None:

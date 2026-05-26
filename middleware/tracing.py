@@ -1,7 +1,5 @@
 """OpenTelemetry tracing setup for distributed trace collection."""
 
-import os
-
 from opentelemetry import trace
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter  # pylint: disable=import-no-side-effects,unused-import
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
@@ -10,9 +8,7 @@ from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
-TEMPO_ENDPOINT = os.environ.get(
-    "TEMPO_ENDPOINT", "http://tempo.llmmllab.svc.cluster.local:4317"
-)
+from config import TEMPO_ENDPOINT
 
 
 def setup_tracing(service_name: str, app) -> None:

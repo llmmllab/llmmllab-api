@@ -41,7 +41,10 @@ INPUT="${1:?path to input mesh .glb required}"
 OCTREE="${2:-512}"
 SEED="${3:-}"
 SPLIT_RAW="${4:-${SPLIT:-}}"
-case "${SPLIT_RAW,,}" in
+# ``${var,,}`` (bash 4+ lowercase modifier) breaks on macOS bash 3.2
+# with "bad substitution".  Use ``tr`` for portability.
+SPLIT_LOWER=$(printf '%s' "$SPLIT_RAW" | tr '[:upper:]' '[:lower:]')
+case "$SPLIT_LOWER" in
     1|true|yes|on|y) SPLIT_JSON=true ;;
     *)               SPLIT_JSON=false ;;
 esac

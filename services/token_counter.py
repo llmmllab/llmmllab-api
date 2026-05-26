@@ -20,31 +20,18 @@ from __future__ import annotations
 import base64
 import io
 import math
-import os
 from typing import Any, Iterable, Optional, Tuple
 
+from config import (
+    IMAGE_TOKENS_DEFAULT as _DEFAULT_IMAGE_TOKENS,
+    VISION_MAX_LONG_EDGE_PX as _VISION_MAX_LONG_EDGE_PX,
+    VISION_PATCH_PX as _VISION_PATCH_PX,
+)
 from services.runner_client import runner_client as _default_client
 from utils.logging import llmmllogger
 from utils.message_conversion import extract_text_from_message
 
 logger = llmmllogger.bind(component="token_counter")
-
-
-# Per-image vision-token cost when we can't determine dimensions cheaply.
-# Qwen2/3-VL family encodes images at ``(W // 28) * (H // 28)`` tokens after
-# resizing to ≤ 1280px on the long side; a 1024-px image lands around
-# ~1300-1500.  This default is intentionally on the conservative side
-# (over-count by ~30%) so the pre-trim has headroom for prompt template
-# overhead too.
-_DEFAULT_IMAGE_TOKENS = int(os.environ.get("IMAGE_TOKENS_DEFAULT", "1500"))
-
-# Qwen-VL patch size in pixels.  Override via env if you point at a model
-# with a different vision tower.
-_VISION_PATCH_PX = int(os.environ.get("VISION_PATCH_PX", "28"))
-
-# Max long-edge that the vision tower processes.  Larger images get
-# resized down before patchification.
-_VISION_MAX_LONG_EDGE_PX = int(os.environ.get("VISION_MAX_LONG_EDGE_PX", "1280"))
 
 
 def _estimate_image_tokens(width: int, height: int) -> int:

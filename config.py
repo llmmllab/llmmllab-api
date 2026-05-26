@@ -147,3 +147,81 @@ RUNNER_RETRY_BACKOFF_BASE = int(os.environ.get("RUNNER_RETRY_BACKOFF_BASE", "1")
 # releases the stale handle, refreshes the model map, and retries the
 # workflow with a fresh server. Set to 0 to disable retries entirely.
 STALE_SERVER_RETRIES = int(os.environ.get("STALE_SERVER_RETRIES", "1"))
+
+# Per-request-category HTTP timeouts for the runner client.  Health
+# checks are cheap and should fail fast; "fast" covers small-body
+# requests like list / status; acquire is the long-pole one because
+# llama-server cold-start can take 1-2 minutes for big quantised
+# models.
+RUNNER_HEALTH_TIMEOUT_SEC = float(
+    os.environ.get("RUNNER_HEALTH_TIMEOUT_SEC", "5.0")
+)
+RUNNER_FAST_TIMEOUT_SEC = float(
+    os.environ.get("RUNNER_FAST_TIMEOUT_SEC", "10.0")
+)
+RUNNER_ACQUIRE_TIMEOUT_SEC = float(
+    os.environ.get("RUNNER_ACQUIRE_TIMEOUT_SEC", "150.0")
+)
+
+# Circuit-breaker thresholds for the runner pool.  After
+# ``RUNNER_MAX_ACQUIRE_FAILURES`` consecutive failures the endpoint
+# is marked unhealthy for ``RUNNER_UNHEALTHY_WINDOW_SEC`` seconds.
+RUNNER_MAX_ACQUIRE_FAILURES = int(
+    os.environ.get("RUNNER_MAX_ACQUIRE_FAILURES", "3")
+)
+RUNNER_UNHEALTHY_WINDOW_SEC = float(
+    os.environ.get("RUNNER_UNHEALTHY_WINDOW_SEC", "60.0")
+)
+# Per-endpoint connection retries during a single acquire attempt
+# (transient network blips between the api and runner Service).
+RUNNER_ACQUIRE_RETRIES = int(os.environ.get("RUNNER_ACQUIRE_RETRIES", "2"))
+
+# ── Tracing (middleware/tracing.py) ────────────────────────────────────
+# OTLP gRPC endpoint for OpenTelemetry trace export.  Points at the
+# in-cluster Tempo service by default; override to "" to disable
+# tracing entirely (the setup helper no-ops on empty endpoint).
+TEMPO_ENDPOINT = os.environ.get(
+    "TEMPO_ENDPOINT", "http://tempo.llmmllab.svc.cluster.local:4317"
+)
+
+# ── Database maintenance (db/maintenance.py, db/__init__.py) ───────────
+# How often the maintenance loop runs (VACUUM ANALYZE + sequence align,
+# plus optional REINDEX).  Loop sleeps this many hours between runs.
+DB_MAINTENANCE_INTERVAL_HOURS = int(
+    os.environ.get("DB_MAINTENANCE_INTERVAL_HOURS", "24")
+)
+# Delay before the FIRST maintenance run after pod startup, so a new
+# pod doesn't compete with warm-up traffic.
+DB_MAINTENANCE_INITIAL_DELAY_SECONDS = int(
+    os.environ.get("DB_MAINTENANCE_INITIAL_DELAY_SECONDS", "300")
+)
+# Opt-in REINDEX during maintenance.  Off by default because REINDEX
+# CONCURRENTLY can still trigger stale-OID plan errors on live traffic
+# under TimescaleDB; enable in low-traffic environments.
+DB_REINDEX_ON_MAINTENANCE = os.environ.get(
+    "DB_REINDEX_ON_MAINTENANCE", "false"
+).lower() in ("1", "true", "yes", "on")
+
+# ── Image server lifecycle (services/image_service.py) ─────────────────
+# Tear down sd-server / image-server subprocesses after every image
+# request, instead of keeping them warm.  Image servers are 4-12 GB
+# resident; for interactive workflows the cold-start cost is worth
+# the freed VRAM.  Set to false for benchmarking or batched generation.
+IMG_SERVER_AUTO_SHUTDOWN = os.environ.get(
+    "IMG_SERVER_AUTO_SHUTDOWN", "true"
+).lower() in ("1", "true", "yes", "on")
+
+# ── Vision-token accounting (services/token_counter.py) ────────────────
+# Image blocks in multimodal messages cost real vision tokens at the
+# runner side (mmproj produces ~700-2500 tokens per image depending on
+# resolution), but llama.cpp's text ``/tokenize`` endpoint can't see
+# them.  These knobs control how the api estimates those tokens so the
+# pre-trim in ``agents/base.py::_ensure_context_fits`` matches what the
+# runner actually receives.
+#
+# Defaults are calibrated for Qwen2/3-VL family (used by Qwen3.6-27B
+# with ``clip_model_path: mmproj.gguf``).  Override for other vision
+# towers via env.
+IMAGE_TOKENS_DEFAULT = int(os.environ.get("IMAGE_TOKENS_DEFAULT", "1500"))
+VISION_PATCH_PX = int(os.environ.get("VISION_PATCH_PX", "28"))
+VISION_MAX_LONG_EDGE_PX = int(os.environ.get("VISION_MAX_LONG_EDGE_PX", "1280"))

@@ -99,12 +99,10 @@ class Storage:
             logger.info("Storage components initialized successfully")
 
             # Initialize and start the database maintenance service
-            maintenance_interval = int(
-                os.environ.get("DB_MAINTENANCE_INTERVAL_HOURS", "24")
-            )
+            from config import DB_MAINTENANCE_INTERVAL_HOURS
             assert self.engine is not None
             await maintenance_service.initialize(
-                self.engine, factory, maintenance_interval
+                self.engine, factory, DB_MAINTENANCE_INTERVAL_HOURS
             )
             await maintenance_service.start_maintenance_schedule()
             logger.info("Database maintenance service started")

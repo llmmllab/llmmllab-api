@@ -22,7 +22,6 @@ the model's configured context window (returns HTTP 507).
 
 import asyncio
 import logging
-import os
 import re
 import time
 from contextlib import asynccontextmanager
@@ -50,20 +49,21 @@ for _lib_name in (
 
 logger = llmmllogger.bind(component="runner_client")
 
-# Timeouts for different request categories (configurable via env)
-_HEALTH_TIMEOUT = httpx.Timeout(
-    float(os.environ.get("RUNNER_HEALTH_TIMEOUT_SEC", "5.0"))
-)
-_FAST_TIMEOUT = httpx.Timeout(float(os.environ.get("RUNNER_FAST_TIMEOUT_SEC", "10.0")))
-_ACQUIRE_TIMEOUT = httpx.Timeout(
-    float(os.environ.get("RUNNER_ACQUIRE_TIMEOUT_SEC", "150.0"))
+# Timeouts + circuit-breaker thresholds live in config.py so all env
+# knobs are documented and overridable from one place.  See README's
+# "Runner / Inference" section.
+from config import (
+    RUNNER_ACQUIRE_RETRIES as _ACQUIRE_RETRIES,
+    RUNNER_ACQUIRE_TIMEOUT_SEC,
+    RUNNER_FAST_TIMEOUT_SEC,
+    RUNNER_HEALTH_TIMEOUT_SEC,
+    RUNNER_MAX_ACQUIRE_FAILURES as _MAX_ACQUIRE_FAILURES,
+    RUNNER_UNHEALTHY_WINDOW_SEC as _UNHEALTHY_WINDOW,
 )
 
-# Circuit breaker thresholds (configurable via env)
-_MAX_ACQUIRE_FAILURES = int(os.environ.get("RUNNER_MAX_ACQUIRE_FAILURES", "3"))
-_UNHEALTHY_WINDOW = float(os.environ.get("RUNNER_UNHEALTHY_WINDOW_SEC", "60.0"))
-# Per-endpoint connection retries during acquire
-_ACQUIRE_RETRIES = int(os.environ.get("RUNNER_ACQUIRE_RETRIES", "2"))
+_HEALTH_TIMEOUT = httpx.Timeout(RUNNER_HEALTH_TIMEOUT_SEC)
+_FAST_TIMEOUT = httpx.Timeout(RUNNER_FAST_TIMEOUT_SEC)
+_ACQUIRE_TIMEOUT = httpx.Timeout(RUNNER_ACQUIRE_TIMEOUT_SEC)
 
 
 @dataclass(frozen=True)

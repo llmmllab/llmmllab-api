@@ -5,7 +5,6 @@ Database maintenance utilities for periodic optimization tasks.
 import asyncio
 import datetime
 import contextlib
-import os
 
 from typing import Optional
 from sqlalchemy import text
@@ -65,10 +64,8 @@ class DatabaseMaintenanceService:
             success = False
 
         # 2. Optional REINDEX (off by default to avoid stale OID plan errors during traffic)
-        reindex_enabled = os.environ.get(
-            "DB_REINDEX_ON_MAINTENANCE", "false"
-        ).lower() in ("1", "true", "yes")
-        if reindex_enabled:
+        from config import DB_REINDEX_ON_MAINTENANCE
+        if DB_REINDEX_ON_MAINTENANCE:
             if not await self._run_reindex():
                 success = False
         else:
@@ -234,12 +231,8 @@ class DatabaseMaintenanceService:
         try:
             while self._is_running:
                 # Optional initial delay to avoid racing with app traffic on startup
-                try:
-                    initial_delay = int(
-                        os.environ.get("DB_MAINTENANCE_INITIAL_DELAY_SECONDS", "300")
-                    )
-                except ValueError:
-                    initial_delay = 300
+                from config import DB_MAINTENANCE_INITIAL_DELAY_SECONDS
+                initial_delay = DB_MAINTENANCE_INITIAL_DELAY_SECONDS
                 if initial_delay > 0 and self._last_run is None:
                     await asyncio.sleep(initial_delay)
 

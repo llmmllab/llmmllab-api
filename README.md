@@ -154,14 +154,52 @@ Copy `.env.example` to `.env` and set the required values. See `config.py` for d
 | `MAX_IMAGE_SIZE` | Max image dimension (default: 2048) |
 | `IMAGE_RETENTION_HOURS` | Image cleanup retention (default: 24) |
 
+### Vision Token Accounting
+
+llama.cpp's text `/tokenize` endpoint can't see image blocks in multimodal
+messages, but the model side (via `clip_model_path` / mmproj) produces
+real vision tokens per image. Without accounting for those, the api's
+pre-trim guard (`agents/base.py::_ensure_context_fits`) under-counts and
+the runner refuses requests that have grown beyond `n_ctx`. The
+`services/token_counter.py` helpers estimate image tokens with the
+Qwen2/3-VL formula `⌈W / patch⌉ × ⌈H / patch⌉` after resizing the long
+edge down to a cap.
+
+| Variable | Description |
+|----------|-------------|
+| `IMAGE_TOKENS_DEFAULT` | Per-image fallback when dimensions can't be decoded (HTTP URLs, missing PIL, malformed base64). Default: `1500` |
+| `VISION_PATCH_PX` | Vision-tower patch size in pixels. Qwen-VL family is 28. Default: `28` |
+| `VISION_MAX_LONG_EDGE_PX` | Max long-edge the vision tower processes before patchification. Default: `1280` |
+
+### Image Server Lifecycle
+
+| Variable | Description |
+|----------|-------------|
+| `IMG_SERVER_AUTO_SHUTDOWN` | Tear down sd-server / qwen-image servers after each request rather than holding them warm. Default: `true` (image servers are 4-12 GB resident; for interactive workflows the cold-start cost is worth the freed VRAM). Set to `false` for benchmarking or batched generation. |
+
+### Tracing
+
+| Variable | Description |
+|----------|-------------|
+| `TEMPO_ENDPOINT` | OTLP gRPC endpoint for OpenTelemetry trace export. Default: `http://tempo.llmmllab.svc.cluster.local:4317`. Empty disables tracing. |
+
+### Database Maintenance
+
+| Variable | Description |
+|----------|-------------|
+| `DB_MAINTENANCE_INTERVAL_HOURS` | How often the maintenance loop runs (VACUUM ANALYZE + sequence align). Default: `24` |
+| `DB_MAINTENANCE_INITIAL_DELAY_SECONDS` | Delay before the first maintenance run after pod startup (avoid racing warm-up traffic). Default: `300` |
+| `DB_REINDEX_ON_MAINTENANCE` | Opt-in REINDEX during maintenance. Default: `false` — REINDEX CONCURRENTLY can still trip stale-OID plan errors under live TimescaleDB traffic; enable in low-traffic environments only. |
+
 ### General
 
 | Variable | Description |
 |----------|-------------|
 | `PORT` | Server port (default: 8000) |
 | `API_VERSION` | API version prefix (default: v1) |
-| `LOG_LEVEL` | Logging verbosity (debug, info, warning, error) |
-| `LOG_FORMAT` | Log format (console or json) |
+| `LOG_LEVEL` | Logging verbosity (debug, info, warning, error). Read directly by `utils/logging.py` because logging is bootstrapped before `config.py` loads. |
+| `LOG_FORMAT` | Log format (console or json). Same bootstrap-order constraint as `LOG_LEVEL`. |
+| `FORCE_COLOR` | Force ANSI colors in console log output (default: `0`). Useful when log output is piped through a logger that strips terminal detection. |
 | `HF_TOKEN` | HuggingFace token for model downloads |
 | `SEARX_HOST` | SearXNG instance URL for web search |
 | `CUDA_VISIBLE_DEVICES` | GPU devices for inference |
