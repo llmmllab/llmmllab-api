@@ -220,7 +220,7 @@ async def evict_all_runner_servers(
 
     Evicts both subprocess servers (llama-server, sd-server) and any
     currently-loaded in-process pipelines (rembg, img23d,
-    img23d_part).  The in-process unload is what frees VRAM
+    mesh2parts).  The in-process unload is what frees VRAM
     between heavy pipeline runs — without it, PyTorch's allocator
     cache holds GB of weights resident even after ``_loaded=False``,
     and the next pipeline OOMs trying to load on a card it thinks

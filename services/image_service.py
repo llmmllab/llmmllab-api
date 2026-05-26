@@ -507,7 +507,7 @@ async def generate_3d(
 
 # ---------------------------------------------------------------------------
 # Mesh-to-parts — tencent/Hunyuan3D-Part via the runner's in-process
-# ``img23d_part`` pipeline.  Decomposes a whole mesh into semantically
+# ``mesh2parts`` pipeline.  Decomposes a whole mesh into semantically
 # meaningful parts via P3-SAM + XPart and emits four .glb outputs
 # (decomposed, exploded, bbox, gt_bbox).  Unlike generate_3d, the
 # *input* is a mesh — typically the output of a prior generate_3d
@@ -550,7 +550,7 @@ async def generate_3d_parts(
     """Submit a mesh to the runner's Hunyuan3D-Part pipeline.
 
     The pipeline is in-process on whichever runner advertises
-    ``img23d_part`` in its yaml; we don't acquire a server.  Input is
+    ``mesh2parts`` in its yaml; we don't acquire a server.  Input is
     a base64-encoded ``.glb`` (typically the output of a prior
     ``generate_3d`` call); output is a four-mesh decomposition.
 
@@ -559,7 +559,7 @@ async def generate_3d_parts(
     whole runner call.
     """
     cli = client or _default_client
-    endpoint = await _pick_pipeline_endpoint(cli, "img23d_part")
+    endpoint = await _pick_pipeline_endpoint(cli, "mesh2parts")
     payload: Dict[str, Any] = {"mesh_b64": mesh_b64}
     if octree_resolution is not None:
         payload["octree_resolution"] = int(octree_resolution)
@@ -569,20 +569,20 @@ async def generate_3d_parts(
         payload["split"] = True
 
     logger.info(
-        "Submitting img23d_part request",
+        "Submitting mesh2parts request",
         extra={"endpoint": endpoint, "octree_resolution": octree_resolution},
     )
 
     http_client = cli._get_client()
     async with _queued(user_id, "hunyuan3d-part"):
         response = await http_client.post(
-            f"{endpoint}/v1/pipelines/img23d_part/run",
+            f"{endpoint}/v1/pipelines/mesh2parts/run",
             json=payload,
             timeout=1800.0,  # XPart can run several minutes for complex meshes
         )
     if response.status_code != 200:
         raise ImageServiceError(
-            f"runner img23d_part returned {response.status_code}: "
+            f"runner mesh2parts returned {response.status_code}: "
             f"{response.text[:512]}",
             status_code=response.status_code,
         )
@@ -617,7 +617,7 @@ async def stream_3d_parts_artifact(
     """Stream a Hunyuan3D-Part output .glb from the runner.
 
     Mirrors :func:`stream_3d_artifact`.  Routes through the
-    ``img23d_part`` pipeline_map so the file is fetched from whichever
+    ``mesh2parts`` pipeline_map so the file is fetched from whichever
     runner ran the generation.
     """
     if not _IMG23D_PART_FILENAME_RE.match(filename):
@@ -628,8 +628,8 @@ async def stream_3d_parts_artifact(
         )
 
     cli = client or _default_client
-    endpoint = await _pick_pipeline_endpoint(cli, "img23d_part")
-    url = f"{endpoint}/v1/pipelines/img23d_part/files/{filename}"
+    endpoint = await _pick_pipeline_endpoint(cli, "mesh2parts")
+    url = f"{endpoint}/v1/pipelines/mesh2parts/files/{filename}"
     http_client = cli._get_client()
 
     stream_ctx = http_client.stream("GET", url, timeout=60.0)

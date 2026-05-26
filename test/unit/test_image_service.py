@@ -444,7 +444,7 @@ def test_stream_3d_artifact_targets_pipeline_files_endpoint():
 # ---------------------------------------------------------------------------
 
 
-def _make_runner_client_for_img23d_part(
+def _make_runner_client_for_mesh2parts(
     body: Dict[str, Any], status_code: int = 200, text: str = ""
 ) -> MagicMock:
     client = MagicMock()
@@ -461,7 +461,7 @@ def _make_runner_client_for_img23d_part(
 def test_generate_3d_parts_posts_to_pipeline_endpoint():
     from services.image_service import generate_3d_parts
 
-    client = _make_runner_client_for_img23d_part({
+    client = _make_runner_client_for_mesh2parts({
         "id": "abc123",
         "elapsed_sec": 42.5,
         "mesh_path": "/data/sd-out/3d_parts/abc123_decomposed.glb",
@@ -482,7 +482,7 @@ def test_generate_3d_parts_posts_to_pipeline_endpoint():
 
     http = client._get_client.return_value
     args, kwargs = http.post.call_args
-    assert args[0] == "http://runner-1:8000/v1/pipelines/img23d_part/run"
+    assert args[0] == "http://runner-1:8000/v1/pipelines/mesh2parts/run"
     assert kwargs["json"]["mesh_b64"] == "Z2xi"
     # Optional params not sent when not provided.
     assert "octree_resolution" not in kwargs["json"]
@@ -492,7 +492,7 @@ def test_generate_3d_parts_posts_to_pipeline_endpoint():
 def test_generate_3d_parts_forwards_optional_params():
     from services.image_service import generate_3d_parts
 
-    client = _make_runner_client_for_img23d_part({"id": "x", "elapsed_sec": 0.1})
+    client = _make_runner_client_for_mesh2parts({"id": "x", "elapsed_sec": 0.1})
     _run(generate_3d_parts(
         mesh_b64="Z2xi", octree_resolution=256, seed=99, client=client,
     ))
@@ -506,7 +506,7 @@ def test_generate_3d_parts_forwards_optional_params():
 def test_generate_3d_parts_propagates_runner_failure():
     from services.image_service import generate_3d_parts
 
-    client = _make_runner_client_for_img23d_part(
+    client = _make_runner_client_for_mesh2parts(
         {}, status_code=503, text="XPart not installed"
     )
 
@@ -587,7 +587,7 @@ def test_stream_3d_parts_artifact_targets_pipeline_files_endpoint():
     stream_args, _ = http.stream.call_args
     assert stream_args == (
         "GET",
-        "http://runner-1:8000/v1/pipelines/img23d_part/files/abc_decomposed.glb",
+        "http://runner-1:8000/v1/pipelines/mesh2parts/files/abc_decomposed.glb",
     )
 
 

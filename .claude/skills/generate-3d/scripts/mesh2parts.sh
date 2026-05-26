@@ -1,53 +1,44 @@
 #!/usr/bin/env bash
 #
-# test_img2-3d-parts.sh — exercise POST /v1/images/3d/parts (Hunyuan3D-Part).
+# mesh2parts.sh — exercise POST /v1/images/3d/parts (Hunyuan3D-Part).
 #
-# Two-step interaction, mirroring test_img2-3d.sh:
+# Two-step interaction, mirroring img2-3d.sh:
 #
 #   1. POST /v1/images/3d/parts        — submit the input mesh (base64-encoded
-#                                        .glb), get back four download URLs
-#   2. GET  /v1/images/3d/parts/{file}  — stream each .glb output (decomposed,
-#                                        exploded, bbox, gt_bbox) back through
-#                                        the api so clients don't need pod
-#                                        access
+#                                        .glb), get back per-part download URLs
+#   2. GET  /v1/images/3d/parts/{file}  — stream each .glb output (per-part files
+#                                        plus exploded / bbox / gt_bbox views)
+#                                        back through the api so clients don't
+#                                        need pod access
+#
+# Each detected part is exported as its own ``<id>_part_NN.glb`` so you can
+# drop them straight into Blender / three.js / Unity as separate objects
+# without post-processing the combined decomposed.glb.  This script no
+# longer takes a ``split`` toggle — split mode is always on; the assembled
+# ``<id>_decomposed.glb`` is still produced alongside the per-part files
+# so callers who want the joined mesh still have it.
 #
 # Usage:
-#   ./scripts/test_img2-3d-parts.sh path/to/mesh.glb
-#   ./scripts/test_img2-3d-parts.sh path/to/mesh.glb 256              # lower-res
-#   ./scripts/test_img2-3d-parts.sh path/to/mesh.glb 512 42           # seed
-#   ./scripts/test_img2-3d-parts.sh path/to/mesh.glb 512 42 1         # split
-#   SPLIT=1 ./scripts/test_img2-3d-parts.sh path/to/mesh.glb          # split via env
+#   ./mesh2parts.sh path/to/mesh.glb
+#   ./mesh2parts.sh path/to/mesh.glb 256              # lower-res
+#   ./mesh2parts.sh path/to/mesh.glb 512 42           # seed
 #
 # Positional args:
-#   1. input mesh .glb (required) — typically the output of test_img2-3d.sh
+#   1. input mesh .glb (required) — typically the output of img2-3d.sh
 #   2. octree_resolution (default 512; valid 128 or higher)
 #   3. seed (optional; empty string skips)
-#   4. split (optional; pass 1/true to also export per-part .glb files
-#      — each detected part becomes ``<id>_part_NN.glb`` so you can
-#      import them as separate objects in Blender / three.js / Unity
-#      without splitting the combined decomposed.glb manually)
 #
 # Env overrides:
 #   API_BASE   default http://localhost:8000
 #   API_KEY    bearer token; omit for unauth dev endpoints
 #   OUT_DIR    where to drop the decoded .glb files + JSON response
 #              (default ./out)
-#   SPLIT      alternative to the 4th positional arg (any non-empty,
-#              non-zero, non-"false" value enables split)
 
 set -euo pipefail
 
 INPUT="${1:?path to input mesh .glb required}"
 OCTREE="${2:-512}"
 SEED="${3:-}"
-SPLIT_RAW="${4:-${SPLIT:-}}"
-# ``${var,,}`` (bash 4+ lowercase modifier) breaks on macOS bash 3.2
-# with "bad substitution".  Use ``tr`` for portability.
-SPLIT_LOWER=$(printf '%s' "$SPLIT_RAW" | tr '[:upper:]' '[:lower:]')
-case "$SPLIT_LOWER" in
-    1|true|yes|on|y) SPLIT_JSON=true ;;
-    *)               SPLIT_JSON=false ;;
-esac
 
 API_BASE="${API_BASE:-http://192.168.0.71:9999}"
 OUT_DIR="${OUT_DIR:-./out}"
@@ -66,12 +57,12 @@ if [[ -n "${API_KEY:-}" ]]; then
 fi
 
 TS=$(date +%s)
-RESP_FILE="$OUT_DIR/img23d_parts_${TS}.json"
+RESP_FILE="$OUT_DIR/mesh2parts_${TS}.json"
 
 # Base64-encode the input mesh.  Pass via --rawfile to dodge the
-# OS argv length cap on multi-MB blobs (same trick as test_img2img.sh).
-B64_FILE=$(mktemp -t img23d_parts_b64.XXXXXX)
-BODY_FILE=$(mktemp -t img23d_parts_body.XXXXXX)
+# OS argv length cap on multi-MB blobs (same trick as img2img.sh).
+B64_FILE=$(mktemp -t mesh2parts_b64.XXXXXX)
+BODY_FILE=$(mktemp -t mesh2parts_body.XXXXXX)
 trap 'rm -f "$B64_FILE" "$BODY_FILE"' EXIT
 
 if base64 --help 2>&1 | grep -q -- '-w'; then
@@ -80,15 +71,16 @@ else
     base64 < "$INPUT" | tr -d '\n' > "$B64_FILE"
 fi
 
+# ``split: true`` always — callers want per-part files.  The runner
+# also returns the assembled decomposed/exploded/bbox views regardless.
 JQ_ARGS=(
     --rawfile mesh "$B64_FILE"
     --argjson octree "$OCTREE"
-    --argjson split "$SPLIT_JSON"
 )
-JQ_EXPR='{mesh_b64: $mesh, octree_resolution: $octree, split: $split}'
+JQ_EXPR='{mesh_b64: $mesh, octree_resolution: $octree, split: true}'
 if [[ -n "$SEED" ]]; then
     JQ_ARGS+=(--argjson seed "$SEED")
-    JQ_EXPR='{mesh_b64: $mesh, octree_resolution: $octree, split: $split, seed: $seed}'
+    JQ_EXPR='{mesh_b64: $mesh, octree_resolution: $octree, split: true, seed: $seed}'
 fi
 
 jq -n "${JQ_ARGS[@]}" "$JQ_EXPR" > "$BODY_FILE"
@@ -97,7 +89,6 @@ echo "→ POST $API_BASE/v1/images/3d/parts"
 echo "  input             = $INPUT ($(wc -c < "$INPUT") bytes)"
 echo "  octree_resolution = $OCTREE"
 [[ -n "$SEED" ]] && echo "  seed              = $SEED"
-echo "  split             = $SPLIT_JSON"
 echo "  (XPart can take several minutes; no streaming)"
 
 HTTP_STATUS=$(curl -sS -X POST "$API_BASE/v1/images/3d/parts" \
@@ -154,18 +145,16 @@ download exploded   "$EXPLODED_URL"
 download bbox       "$BBOX_URL"
 download gt_bbox    "$GT_BBOX_URL"
 
-# When split=true, also fetch each per-part .glb so the caller has
-# them as separate files ready to drop into Blender etc.  Names are
-# ``<id>_part_NN.glb`` to match what the runner writes.
-if [[ "$SPLIT_JSON" == "true" ]]; then
-    N=$(jq -r '.part_urls | length' "$RESP_FILE")
-    echo "  parts        = $N"
-    for i in $(seq 0 $((N-1))); do
-        PART_URL=$(jq -r ".part_urls[$i]" "$RESP_FILE")
-        # Mirror the runner's two-digit-pad to match the original filename.
-        PART_LABEL=$(printf "part_%02d" "$i")
-        download "$PART_LABEL" "$PART_URL"
-    done
-fi
+# Per-part .glb files.  Names are ``<id>_part_NN.glb`` to match what
+# the runner writes, so re-running the script idempotently overwrites
+# in place.
+N=$(jq -r '.part_urls | length' "$RESP_FILE")
+echo "  parts        = $N"
+for i in $(seq 0 $((N-1))); do
+    PART_URL=$(jq -r ".part_urls[$i]" "$RESP_FILE")
+    # Mirror the runner's two-digit-pad to match the original filename.
+    PART_LABEL=$(printf "part_%02d" "$i")
+    download "$PART_LABEL" "$PART_URL"
+done
 
 echo "  raw response: $RESP_FILE"

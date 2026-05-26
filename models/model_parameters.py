@@ -479,7 +479,7 @@ class ModelParameters(BaseModel):
     """sd-server --img-cfg-scale (image-preservation pressure for Qwen-Image-Edit etc.)."""
 
     # ------------------------------------------------------------------
-    # Hunyuan3D-2.1 / img23d + img23d_part inference knobs.
+    # Hunyuan3D-2.1 / img23d + mesh2parts inference knobs.
     #
     # These travel in the runner's pipeline payload (``POST
     # /v1/pipelines/img23d/run``) — they are NOT CLI flags.  Defined

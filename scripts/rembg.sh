@@ -1,0 +1,1 @@
+../.claude/skills/generate-3d/scripts/rembg.sh

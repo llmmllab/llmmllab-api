@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 #
-# test_img2img.sh — exercise POST /v1/images/edits (Qwen-Image-Edit-2511).
+# img2img.sh — exercise POST /v1/images/edits (Qwen-Image-Edit-2511).
 #
 # Usage:
-#   ./scripts/test_img2img.sh path/to/photo.png "make it autumn"
-#   ./scripts/test_img2img.sh path/to/photo.png "make it autumn" qwen-image-edit-2511 0.75
+#   ./scripts/img2img.sh path/to/photo.png "make it autumn"
+#   ./scripts/img2img.sh path/to/photo.png "make it autumn" qwen-image-edit-2511 0.75
 #
 # Env overrides:
 #   API_BASE   default http://localhost:8000

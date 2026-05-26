@@ -42,22 +42,22 @@ export OUT_DIR=/tmp/pipeline_demo
 mkdir -p $OUT_DIR
 
 # 1. Generate the base image
-./scripts/test_txt2img.sh \
+./scripts/txt2img.sh \
   "a single glossy red ceramic mug, centered, soft studio lighting, light gray seamless background, photorealistic product photography"
 ln -sf $OUT_DIR/txt2img_*.png $OUT_DIR/step1_base.png
 
 # 2. Edit it — add steam (additive edits are reliable)
-./scripts/test_img2img.sh $OUT_DIR/step1_base.png \
+./scripts/img2img.sh $OUT_DIR/step1_base.png \
   "add visible steam rising from the top of the mug. Wispy white steam curls drifting upward. Keep the mug, handle, lighting, and background exactly the same." \
   qwen-image-edit-2511 0.75
 ln -sf $OUT_DIR/img2img_*.png $OUT_DIR/step2_edited.png
 
 # 3. Remove the background
-./scripts/test_rembg.sh $OUT_DIR/step2_edited.png
+./scripts/rembg.sh $OUT_DIR/step2_edited.png
 ln -sf $OUT_DIR/rembg_*_cutout.png $OUT_DIR/step3_cutout.png
 
 # 4. Generate the 3D mesh from the cutout
-./scripts/test_img2-3d.sh $OUT_DIR/step3_cutout.png
+./scripts/img2-3d.sh $OUT_DIR/step3_cutout.png
 ln -sf $OUT_DIR/*.glb $OUT_DIR/step4_mesh.glb
 
 open $OUT_DIR/step4_mesh.glb   # macOS Quick Look renders .glb natively
@@ -213,23 +213,23 @@ export OUT_DIR="${OUT_DIR:-/tmp/pipeline_$$}"
 mkdir -p "$OUT_DIR"
 
 echo "=== 1/4 txt2img ==="
-./scripts/test_txt2img.sh "$PROMPT"
+./scripts/txt2img.sh "$PROMPT"
 ln -sf "$(ls -1t "$OUT_DIR"/txt2img_*.png | head -1)" "$OUT_DIR/step1.png"
 
 if [[ -n "$EDIT_PROMPT" ]]; then
     echo "=== 2/4 img2img ==="
-    ./scripts/test_img2img.sh "$OUT_DIR/step1.png" "$EDIT_PROMPT"
+    ./scripts/img2img.sh "$OUT_DIR/step1.png" "$EDIT_PROMPT"
     ln -sf "$(ls -1t "$OUT_DIR"/img2img_*.png | head -1)" "$OUT_DIR/step2.png"
 else
     ln -sf "$OUT_DIR/step1.png" "$OUT_DIR/step2.png"
 fi
 
 echo "=== 3/4 rembg ==="
-./scripts/test_rembg.sh "$OUT_DIR/step2.png"
+./scripts/rembg.sh "$OUT_DIR/step2.png"
 ln -sf "$(ls -1t "$OUT_DIR"/rembg_*_cutout.png | head -1)" "$OUT_DIR/step3.png"
 
 echo "=== 4/4 img23d (this takes ~3 min) ==="
-./scripts/test_img2-3d.sh "$OUT_DIR/step3.png"
+./scripts/img2-3d.sh "$OUT_DIR/step3.png"
 ln -sf "$(ls -1t "$OUT_DIR"/*.glb | head -1)" "$OUT_DIR/step4.glb"
 
 echo
@@ -321,7 +321,7 @@ Two stages inside one pipeline call:
 ### CLI
 
 ```bash
-./scripts/test_img2-3d-parts.sh /tmp/pipeline_demo/step4_mesh.glb
+./scripts/mesh2parts.sh /tmp/pipeline_demo/step4_mesh.glb
 ln -sf $OUT_DIR/*_decomposed.glb $OUT_DIR/step5_decomposed.glb
 ln -sf $OUT_DIR/*_exploded.glb   $OUT_DIR/step5_exploded.glb
 open $OUT_DIR/step5_exploded.glb   # the exploded view is the headline output
@@ -351,7 +351,7 @@ Our V2.1 outputs work but aren't the sweet spot.
 
 | Input source | Reliability |
 |--------------|-------------|
-| `test_img2-3d.sh` output (Hunyuan3D-2.1) | Good — the chained workflow |
+| `img2-3d.sh` output (Hunyuan3D-2.1) | Good — the chained workflow |
 | Scanned meshes (photogrammetry, lidar) | Good |
 | Hand-modeled CAD geometry | Mixed — P3-SAM's part priors may produce odd segmentations on overly clean procedural geometry |
 | Heavily edited / Blender-built meshes | Mixed — same reason |
@@ -445,7 +445,7 @@ Our V2.1 outputs work but aren't the sweet spot.
   AI-generated and scanned meshes. Hand-modeled CAD geometry (or
   meshes with degenerate triangles / non-manifold edges) confuses
   it. Either pre-clean the mesh (`trimesh.repair`, MeshLab) or
-  regenerate via `test_img2-3d.sh` first.
+  regenerate via `img2-3d.sh` first.
 - **Step 5: only one or two parts detected.** P3-SAM's confidence
   threshold is baked in. If your subject is geometrically uniform
   (e.g., a smooth sphere), there genuinely aren't part-like features

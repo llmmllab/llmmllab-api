@@ -32,7 +32,7 @@ Backed by Tencent Hunyuan3D-2.1 (shape-only path, ~6 GB VRAM) running in-process
 
 ### Test scripts
 
-See [`scripts/README.md`](scripts/README.md) for ready-made curl + jq harnesses (`test_txt2img.sh`, `test_img2img.sh`, `test_img2-3d.sh`) that exercise each endpoint and decode the responses.
+See [`scripts/README.md`](scripts/README.md) for ready-made curl + jq harnesses (`txt2img.sh`, `img2img.sh`, `img2-3d.sh`) that exercise each endpoint and decode the responses.
 
 ## Quick Start
 

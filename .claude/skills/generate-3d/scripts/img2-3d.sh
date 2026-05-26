@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 #
-# test_img2-3d.sh — exercise POST /v1/images/3d (TRELLIS pipeline).
+# img2-3d.sh — exercise POST /v1/images/3d (TRELLIS pipeline).
 #
 # Submits a conditioning image, waits for the synchronous TRELLIS run,
 # then downloads the resulting .glb (and .ply if requested) via the
 # api's /v1/images/3d/{filename} proxy endpoint.
 #
 # Usage:
-#   ./scripts/test_img2-3d.sh path/to/photo.png
-#   ./scripts/test_img2-3d.sh path/to/photo.png "mesh,gaussian"
+#   ./scripts/img2-3d.sh path/to/photo.png
+#   ./scripts/img2-3d.sh path/to/photo.png "mesh,gaussian"
 #
 # Env overrides:
 #   API_BASE   default http://localhost:8000

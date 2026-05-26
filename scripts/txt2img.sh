@@ -1,0 +1,1 @@
+../.claude/skills/generate-3d/scripts/txt2img.sh

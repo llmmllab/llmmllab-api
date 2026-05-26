@@ -1,0 +1,1 @@
+../.claude/skills/generate-3d/scripts/img2-3d.sh

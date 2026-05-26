@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# test_rembg.sh — exercise POST /v1/images/remove-bg (briaai/RMBG-2.0).
+# rembg.sh — exercise POST /v1/images/remove-bg (briaai/RMBG-2.0).
 #
 # Sends a base64-encoded image to the api, receives the alpha mask and
 # (by default) an alpha-composited transparent PNG, decodes both to
@@ -8,9 +8,9 @@
 # the cached cutout.
 #
 # Usage:
-#   ./scripts/test_rembg.sh path/to/photo.png
-#   ./scripts/test_rembg.sh path/to/photo.png 1                 # mask-only
-#   MASK_ONLY=1 ./scripts/test_rembg.sh path/to/photo.png
+#   ./scripts/rembg.sh path/to/photo.png
+#   ./scripts/rembg.sh path/to/photo.png 1                 # mask-only
+#   MASK_ONLY=1 ./scripts/rembg.sh path/to/photo.png
 #
 # Env overrides:
 #   API_BASE   default http://localhost:8000
@@ -47,7 +47,7 @@ MASK_FILE="$OUT_DIR/rembg_${TS}_mask.png"
 CUTOUT_FILE="$OUT_DIR/rembg_${TS}_cutout.png"
 
 # Stream the base64 blob and the JSON body via temp files to avoid
-# the argv length limit (see test_img2img.sh for the same pattern).
+# the argv length limit (see img2img.sh for the same pattern).
 B64_FILE=$(mktemp -t rembg_b64.XXXXXX)
 BODY_FILE=$(mktemp -t rembg_body.XXXXXX)
 trap 'rm -f "$B64_FILE" "$BODY_FILE"' EXIT

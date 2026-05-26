@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 #
-# test_txt2img.sh — exercise POST /v1/images/generations.
+# txt2img.sh — exercise POST /v1/images/generations.
 #
 # Usage:
-#   ./scripts/test_txt2img.sh "a teacup with steam"
-#   ./scripts/test_txt2img.sh "a teacup with steam" qwen-image-2512 1024x1024
+#   ./scripts/txt2img.sh "a teacup with steam"
+#   ./scripts/txt2img.sh "a teacup with steam" qwen-image-2512 1024x1024
 #
 # Env overrides:
 #   API_BASE   default http://localhost:8000

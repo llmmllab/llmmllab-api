@@ -386,7 +386,7 @@ async def createImageTo3DParts(
             user_id=get_user_id(request),
         )
     except ImageServiceError as e:
-        logger.error("img23d_part failed: %s", e)
+        logger.error("mesh2parts failed: %s", e)
         if e.status_code == 503:
             raise HTTPException(status_code=503, detail=str(e)) from e
         raise HTTPException(status_code=502, detail=str(e)) from e

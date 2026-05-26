@@ -40,7 +40,7 @@ Arguments are positional:
 | `$1` | Short text description of the 3D object.  Skips the Step 1 interview. | (ask user) |
 | `$2` | Output directory for all generated files.  Skips the output-dir question. | `/tmp/generate-3d-<descriptor>` |
 | `$3` | `auto` — auto-accept all recommendations.  If `$1` is empty, still asks for the subject brief once, then auto-accepts everything else. | false |
-| `$4` | `evict` — controls eviction before the heavy steps (img23d, img23d_part).  Pass `false` only if you know no LLM session is running. | true |
+| `$4` | `evict` — controls eviction before the heavy steps (img23d, mesh2parts).  Pass `false` only if you know no LLM session is running. | true |
 | `$5` | `parts` — run parts decomposition (Step 7) automatically after 3D generation. | false (overridden by interview signal — see Step 7) |
 
 Boolean args accept `true`/`false`/`1`/`0`/`yes`/`no`.  An empty
@@ -253,10 +253,10 @@ curl -sS -X POST "$API_BASE/v1/runner/servers/evict-all" \
     -H "Authorization: Bearer $LLMMLL_AUTH_TOKEN" && \
     sleep 5 && \  # give the runner a moment to recover if eviction happened
     API_BASE="$API_BASE" OUT_DIR="$OUT_DIR" \
-  .claude/skills/generate-3d/scripts/img2-3d-parts.sh <mesh.glb> 256 42 1
+  .claude/skills/generate-3d/scripts/mesh2parts.sh <mesh.glb> 256 42
 ```
 
-`split=1` (4th positional) gives one `.glb` per detected part.
+The script always emits per-part files; no separate ``split`` toggle.
 Outputs:
 
 - `${ID}_decomposed.glb` — assembled mesh, each part as a named
@@ -305,10 +305,10 @@ Total wall-clock: <N> seconds
 - **`503 Service Unavailable` on /v1/images/3d/parts** — usually a
   missing XPart dep in the runner image.  Check `kubectl logs` for
   the runner pod.
-- **Empty `.glb` outputs from img23d_part** — XPart's diffusion
+- **Empty `.glb` outputs from mesh2parts** — XPart's diffusion
   produced no valid SDF surfaces.  Rare with Hunyuan3D-2.1 inputs;
-  re-run with a different seed (5th positional to
-  `test_img2-3d-parts.sh`) or refine the input image first.
+  re-run with a different seed (3rd positional to
+  `mesh2parts.sh`) or refine the input image first.
 - **Ctrl-C mid-pipeline** — the script returns and the api will
   surface a 499.  Run `evict-all` afterwards to free VRAM/RAM in
   case the runner is still holding the model.
