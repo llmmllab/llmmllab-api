@@ -187,9 +187,9 @@ curl -sS -X POST "$ANTHROPIC_BASE_URL/v1/runner/servers/evict-all" \
 else:
 
 ```bash
-cd ~/workspace/llmmllab-api
 OUT_DIR="$OUT_DIR" \
-  ./scripts/test_txt2img.sh "<prompt>"
+  ./scripts/test_txt2img.sh "<OUT_DIR="$OUT_DIR" \
+prompt>"
 ```
 
 The script writes ``<OUT_DIR>/txt2img_<ts>.png`` and prints the
@@ -214,7 +214,7 @@ Otherwise ask whether to:
 
 Only if the user picks "Refine via img2img" (not available when
 `$2` is true).  Ask them what to change.  Construct an edit prompt
-following the ``docs/generate_3d_models.md`` rule "additive edits
+following the ``./generate_3d_models.md`` rule "additive edits
 are most reliable; full-surface changes are flaky".
 
 Evict if `$3` is true or user confirms (see step 3 eviction
@@ -230,8 +230,7 @@ Show the result and loop back to step 4's choice menu.
 
 ### Step 5 — Background removal
 
-Evict if `$3` is true or user confirms (see step 3 eviction
-check).  Run rembg:
+Run rembg:
 
 ```bash
 OUT_DIR="$OUT_DIR" \
