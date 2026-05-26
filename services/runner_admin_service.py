@@ -218,9 +218,21 @@ async def evict_all_runner_servers(
 ) -> List[EvictResult]:
     """Fan out evict across every runner.
 
-    If ``model_id`` is provided, only evict servers whose ``model_id``
-    matches — useful for "kill all qwen-image-2512 instances" without
-    touching the LLM serving the same chat session.
+    Evicts both subprocess servers (llama-server, sd-server) and any
+    currently-loaded in-process pipelines (rembg, img23d,
+    img23d_part).  The in-process unload is what frees VRAM
+    between heavy pipeline runs — without it, PyTorch's allocator
+    cache holds GB of weights resident even after ``_loaded=False``,
+    and the next pipeline OOMs trying to load on a card it thinks
+    has free VRAM but actually doesn't.
+
+    If ``model_id`` is provided, only evict subprocess servers
+    whose ``model_id`` matches — useful for "kill all
+    qwen-image-2512 instances" without touching the LLM serving the
+    same chat session.  In-process pipelines are NOT filtered by
+    ``model_id`` (the runner reports them as opaque pipeline names,
+    not by underlying model id, and there's only one of each per
+    runner).
     """
     cli = client or _default_client
     inventories = await list_all_runner_servers(cli)
@@ -246,6 +258,32 @@ async def evict_all_runner_servers(
                         str(body.get("status") or "evicted")
                         if body
                         else "evict POST failed"
+                    ),
+                )
+            )
+
+    # Also unload any loaded in-process pipelines.  Only when no
+    # ``model_id`` filter is set (the filter is server-scoped; an
+    # in-process pipeline doesn't have a single ``model_id`` field
+    # to match against).
+    if model_id is None:
+        for entry in await list_runner_pipelines(cli):
+            if not entry.loaded:
+                continue
+            body = await _http_json(
+                cli,
+                "POST",
+                f"{entry.endpoint}/v1/pipelines/{entry.name}/unload",
+            )
+            results.append(
+                EvictResult(
+                    endpoint=entry.endpoint,
+                    server_id=f"pipeline:{entry.name}",
+                    succeeded=body is not None,
+                    detail=(
+                        f"unloaded (loaded={body.get('loaded')})"
+                        if body
+                        else "unload POST failed"
                     ),
                 )
             )
