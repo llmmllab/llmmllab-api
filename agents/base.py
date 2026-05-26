@@ -7,6 +7,7 @@ import datetime
 import logging
 import re
 from typing import (
+    Any,
     Optional,
     Self,
     List,
@@ -298,6 +299,79 @@ The current date is {current_date}."""
 
         return system_prompt, convo
 
+    @staticmethod
+    def _serialize_tools_for_tokenization(tools: List[Any]) -> str:
+        """Render a tool list to the text shape llama-server tokenizes.
+
+        llama.cpp's Jinja chat template embeds tools roughly as JSON
+        objects with ``{name, description, parameters}`` — the OpenAI
+        function-call shape.  Mirror that as closely as a JSON dump
+        can; the exact whitespace doesn't matter for the token count
+        (within a few %), only the content does.  Imperfect on the
+        margin, but closes 60-90k tokens of gap for MCP-heavy sessions
+        (e.g. a 212-tool server pulls the prompt past 100k tokens of
+        tool defs alone).
+
+        Tolerates per-tool serialise failures so one malformed tool
+        doesn't break the whole trim — best-effort accumulation.
+        """
+        import json as _json
+
+        rendered: List[str] = []
+        for t in tools:
+            try:
+                # LangChain BaseTool / StructuredTool path.
+                if hasattr(t, "args_schema") and getattr(t, "args_schema", None):
+                    schema = t.args_schema
+                    # Pydantic v2 model_json_schema, fall back to v1
+                    if hasattr(schema, "model_json_schema"):
+                        params = schema.model_json_schema()
+                    elif hasattr(schema, "schema"):
+                        params = schema.schema()
+                    else:
+                        params = {}
+                    obj = {
+                        "type": "function",
+                        "function": {
+                            "name": getattr(t, "name", "") or "",
+                            "description": getattr(t, "description", "") or "",
+                            "parameters": params,
+                        },
+                    }
+                # Already-serialised OpenAI tool dict.
+                elif isinstance(t, dict) and t.get("type") == "function":
+                    obj = t
+                # Fallback: just stringify it.
+                else:
+                    obj = {
+                        "type": "function",
+                        "function": {
+                            "name": getattr(t, "name", "") or str(t)[:50],
+                            "description": getattr(t, "description", "") or "",
+                            "parameters": {},
+                        },
+                    }
+                rendered.append(_json.dumps(obj, ensure_ascii=False))
+            except Exception:  # noqa: BLE001
+                # Best-effort: skip tools that don't serialise, but
+                # still account for ~something so the total doesn't
+                # silently undercount.  Use the name + description if
+                # we can, else a placeholder.
+                rendered.append(
+                    _json.dumps(
+                        {
+                            "name": getattr(t, "name", "<tool>") or "<tool>",
+                            "description": (
+                                getattr(t, "description", "") or ""
+                            )[:200],
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+        # Join with a separator that's representative of what the chat
+        # template will emit between tool entries.
+        return "\n".join(rendered)
+
     def _resolve_runner_base_url(self) -> Optional[str]:
         """Pull the runner base URL off the LangChain ChatOpenAI we wrap.
 
@@ -317,14 +391,17 @@ The current date is {current_date}."""
         return None
 
     async def _trim_messages_to_context(
-        self, messages: List[Message], system_prompt: str
+        self,
+        messages: List[Message],
+        system_prompt: str,
+        tools: Optional[List[Any]] = None,
     ) -> List[Message]:
         """
         Trim conversation messages so total tokens fit within the model context window.
 
         Keeps the most recent messages and drops the oldest ones first, ensuring
-        the combined system prompt + conversation stays under the context limit.
-        Leaves a 10% headroom for the model's response tokens.
+        the combined system prompt + tool defs + conversation stays under the
+        context limit.  Leaves a 10% headroom for the model's response tokens.
 
         Counts use llama.cpp's ``/tokenize`` endpoint via the runner proxy —
         the previous ``len // 3`` heuristic over-counted dense JSON / tool
@@ -333,6 +410,14 @@ The current date is {current_date}."""
         runner unreachable) we skip the trim and let llama-server itself
         decide whether the prompt fits — its own context guard will refuse
         a request that genuinely doesn't fit.
+
+        ``tools`` (LangChain ``StructuredTool`` / OpenAI function-call dicts)
+        are tokenized as their OpenAI-format JSON serialization, since
+        llama-server embeds them into the chat template before tokenizing
+        — they show up at the runner side as real prompt tokens but the
+        api's message-only count misses them.  Without this, Claude Code
+        sessions (12-20 tools with multi-line schemas) under-count by
+        60-90k tokens and the pre-trim never fires before overflow.
         """
         if not self.num_ctx or self.num_ctx <= 0:
             return messages
@@ -364,8 +449,28 @@ The current date is {current_date}."""
             )
             return messages
 
+        # Tool-definition tokens.  These are the JSON schemas of every
+        # callable tool, which llama-server's chat-template renderer
+        # embeds before the conversation.  Serialise each tool to its
+        # OpenAI function-call shape (name + description + args schema)
+        # and tokenize via /tokenize.  We tolerate per-tool serialise
+        # failures so a single broken tool doesn't break the whole trim.
+        tool_tokens = 0
+        if tools:
+            tool_text = self._serialize_tools_for_tokenization(tools)
+            if tool_text:
+                tt = await count_tokens(tool_text, base_url=base_url)
+                if tt is None:
+                    self.logger.warning(
+                        "Tokenizer unavailable for tool defs; skipping pre-trim",
+                        num_ctx=self.num_ctx,
+                        tool_count=len(tools),
+                    )
+                    return messages
+                tool_tokens = tt
+
         per_message_tokens: List[int] = []
-        total_tokens = system_tokens
+        total_tokens = system_tokens + tool_tokens
         for msg in messages:
             msg_tokens = await count_message_tokens(msg, base_url=base_url)
             if msg_tokens is None:
@@ -480,7 +585,9 @@ The current date is {current_date}."""
             # Uses llama.cpp's /tokenize endpoint for exact counts; skips the
             # trim entirely if the tokenizer call fails (llama-server's own
             # guard catches genuine overflows).
-            convo = await self._trim_messages_to_context(convo, system_prompt)
+            convo = await self._trim_messages_to_context(
+                convo, system_prompt, tools=unique_tools
+            )
 
             # Convert messages to LangChain format
             normalized_messages = messages_to_lc_messages(convo)
@@ -636,9 +743,10 @@ The current date is {current_date}."""
             system_prompt, convo = self._separate_system_prompt(message_input)
 
             # Use persistent agent - creates once and reuses for state continuity
+            combined_tools = list((self.tools or []) + (tools or []))
             agent = await self._get_or_create_agent(
                 system_prompt,
-                list((self.tools or []) + (tools or [])),
+                combined_tools,
                 grammar,
                 list((self.middleware or []) + (middleware or [])),
                 metadata,
@@ -652,7 +760,9 @@ The current date is {current_date}."""
             # Uses llama.cpp's /tokenize endpoint for exact counts; skips the
             # trim entirely if the tokenizer call fails (llama-server's own
             # guard catches genuine overflows).
-            convo = await self._trim_messages_to_context(convo, system_prompt)
+            convo = await self._trim_messages_to_context(
+                convo, system_prompt, tools=combined_tools
+            )
 
             # Convert messages to LangChain format
             normalized_messages = messages_to_lc_messages(convo)
