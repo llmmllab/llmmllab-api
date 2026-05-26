@@ -264,6 +264,21 @@ def lc_message_to_message(
     return msg
 
 
+_CLIENT_INTERRUPT_MARKERS = re.compile(
+    r"\[(?:Tool use|Request)\s+(?:was\s+)?interrupted(?:\s+by\s+user)?\]",
+    re.IGNORECASE,
+)
+"""Markers that some clients (Claude Code in particular) inject into
+assistant turns when the user interrupts a streaming tool call.  We
+strip these before sending history to the model so it doesn't learn
+to emit them verbatim.  Without this scrub, after a session with
+several interruptions the model starts producing
+``[Tool use interrupted]`` as its own ~22-char response — its EOS
+output rather than actual content.  The cancellation is already
+represented in history by the absence of a tool-result message;
+the marker text adds noise the model can pattern-match against."""
+
+
 def messages_to_lc_messages(
     messages: List[Message], use_llama_format: bool = False
 ) -> List[AnyMessage]:
@@ -273,6 +288,10 @@ def messages_to_lc_messages(
     teach the model to produce empty responses, and merges any consecutive
     same-role messages that result from the removal.
 
+    Client-injected interrupt markers (``[Tool use interrupted]``,
+    ``[Request interrupted by user]``) are scrubbed from assistant
+    content before conversion — see ``_CLIENT_INTERRUPT_MARKERS``.
+
     Args:
         messages: List of Message objects to convert
         use_llama_format: If True, use llama.cpp compatible format
@@ -280,6 +299,26 @@ def messages_to_lc_messages(
     converted: List[AnyMessage] = []
     for msg in messages:
         lc_msg = message_to_lc_message(msg, use_llama_format)
+
+        # Scrub client-side interrupt markers from assistant content.
+        # These are Claude-Code-isms, not model output — leaving them in
+        # history teaches the model to mimic them.
+        if isinstance(lc_msg, AIMessage) and isinstance(lc_msg.content, str):
+            cleaned = _CLIENT_INTERRUPT_MARKERS.sub("", lc_msg.content).strip()
+            if cleaned != lc_msg.content:
+                lc_msg.content = cleaned
+        elif isinstance(lc_msg, AIMessage) and isinstance(lc_msg.content, list):
+            new_parts: List[Any] = []
+            for part in lc_msg.content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    cleaned = _CLIENT_INTERRUPT_MARKERS.sub(
+                        "", part.get("text", "")
+                    ).strip()
+                    if cleaned:
+                        new_parts.append({**part, "text": cleaned})
+                else:
+                    new_parts.append(part)
+            lc_msg.content = new_parts
 
         # Drop empty AI messages (no content, no tool_calls) — these poison
         # the model into producing EOS immediately.
