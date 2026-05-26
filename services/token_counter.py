@@ -17,13 +17,164 @@ to call ``estimate_tokens`` / ``estimate_message_tokens``.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+import base64
+import io
+import math
+import os
+from typing import Any, Iterable, Optional, Tuple
 
 from services.runner_client import runner_client as _default_client
 from utils.logging import llmmllogger
 from utils.message_conversion import extract_text_from_message
 
 logger = llmmllogger.bind(component="token_counter")
+
+
+# Per-image vision-token cost when we can't determine dimensions cheaply.
+# Qwen2/3-VL family encodes images at ``(W // 28) * (H // 28)`` tokens after
+# resizing to ≤ 1280px on the long side; a 1024-px image lands around
+# ~1300-1500.  This default is intentionally on the conservative side
+# (over-count by ~30%) so the pre-trim has headroom for prompt template
+# overhead too.
+_DEFAULT_IMAGE_TOKENS = int(os.environ.get("IMAGE_TOKENS_DEFAULT", "1500"))
+
+# Qwen-VL patch size in pixels.  Override via env if you point at a model
+# with a different vision tower.
+_VISION_PATCH_PX = int(os.environ.get("VISION_PATCH_PX", "28"))
+
+# Max long-edge that the vision tower processes.  Larger images get
+# resized down before patchification.
+_VISION_MAX_LONG_EDGE_PX = int(os.environ.get("VISION_MAX_LONG_EDGE_PX", "1280"))
+
+
+def _estimate_image_tokens(width: int, height: int) -> int:
+    """Qwen-VL-style patch count given image dimensions.
+
+    Resizes the long edge down to ``_VISION_MAX_LONG_EDGE_PX`` if needed,
+    then returns ``ceil(W / patch) * ceil(H / patch)``.  Same formula
+    Qwen2/3-VL applies on the model side.
+    """
+    if width <= 0 or height <= 0:
+        return _DEFAULT_IMAGE_TOKENS
+    long_edge = max(width, height)
+    if long_edge > _VISION_MAX_LONG_EDGE_PX:
+        scale = _VISION_MAX_LONG_EDGE_PX / long_edge
+        width = int(width * scale)
+        height = int(height * scale)
+    return max(
+        1,
+        math.ceil(width / _VISION_PATCH_PX) * math.ceil(height / _VISION_PATCH_PX),
+    )
+
+
+def _image_dims_from_b64(data: str) -> Optional[Tuple[int, int]]:
+    """Decode just enough of a base64 image to get (width, height).
+
+    Uses PIL if available; otherwise falls back to None and the caller
+    uses the default per-image token cost.
+    """
+    if not data:
+        return None
+    try:
+        from PIL import Image  # type: ignore[import-not-found]
+    except Exception:  # noqa: BLE001
+        return None
+
+    # Strip ``data:image/...;base64,`` prefix if present.
+    if data.startswith("data:") and "," in data:
+        data = data.split(",", 1)[1]
+    try:
+        raw = base64.b64decode(data, validate=False)
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        with Image.open(io.BytesIO(raw)) as img:
+            return img.size  # (width, height)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _iter_content_blocks(content: Any) -> Iterable[Any]:
+    """Yield content blocks from any of the message shapes we accept.
+
+    Anthropic, OpenAI, LangChain, and our own Message format all wrap
+    content as either a string, a list of dicts/objects, or a single
+    block.  Normalising here so the caller can just type-switch.
+    """
+    if content is None:
+        return
+    if isinstance(content, str):
+        return
+    if isinstance(content, list):
+        for item in content:
+            yield item
+        return
+    # Single block (dict or MessageContent object).
+    yield content
+
+
+def _looks_like_image_block(block: Any) -> bool:
+    """True if *block* is one of the multimodal image shapes we count."""
+    if isinstance(block, dict):
+        t = block.get("type")
+        return t in ("image", "image_url", "input_image")
+    btype = getattr(block, "type", None)
+    if btype is None:
+        return False
+    if hasattr(btype, "value"):  # enum
+        btype = btype.value
+    return str(btype).lower() in ("image", "image_url", "input_image")
+
+
+def _block_image_tokens(block: Any) -> int:
+    """Estimate vision tokens for one image-bearing content block.
+
+    Tries to decode dimensions from common payload shapes:
+      * Anthropic: ``{"type": "image", "source": {"type": "base64",
+        "media_type": ..., "data": "<b64>"}}``
+      * OpenAI:    ``{"type": "image_url", "image_url": {"url":
+        "data:...;base64,..." | "https://..."}}``
+      * Our own MessageContent object: ``.source.data`` / ``.image_url``
+
+    Returns ``_DEFAULT_IMAGE_TOKENS`` when dimensions can't be cheaply
+    extracted (HTTP URLs, or PIL unavailable).
+    """
+    # Pull base64 data out of the various shapes.
+    b64: Optional[str] = None
+
+    if isinstance(block, dict):
+        # Anthropic shape: block.source.data
+        src = block.get("source")
+        if isinstance(src, dict) and src.get("type") == "base64":
+            b64 = src.get("data")
+        # OpenAI shape: block.image_url.url == "data:...;base64,..."
+        if b64 is None:
+            url_obj = block.get("image_url")
+            url = (
+                url_obj.get("url")
+                if isinstance(url_obj, dict)
+                else (url_obj if isinstance(url_obj, str) else None)
+            )
+            if isinstance(url, str) and url.startswith("data:"):
+                b64 = url
+    else:
+        # Object-shaped MessageContent.
+        src = getattr(block, "source", None)
+        if src is not None:
+            data = getattr(src, "data", None)
+            if isinstance(data, str):
+                b64 = data
+        if b64 is None:
+            url_obj = getattr(block, "image_url", None)
+            url = url_obj if isinstance(url_obj, str) else getattr(url_obj, "url", None)
+            if isinstance(url, str) and url.startswith("data:"):
+                b64 = url
+
+    if b64:
+        dims = _image_dims_from_b64(b64)
+        if dims is not None:
+            return _estimate_image_tokens(*dims)
+    return _DEFAULT_IMAGE_TOKENS
 
 
 def _coerce_to_text(content: Any) -> str:
@@ -122,13 +273,42 @@ async def count_message_tokens(
 ) -> Optional[int]:
     """Tokenize a :class:`Message` object via llama.cpp.
 
-    Flattens the message's content with ``extract_text_from_message`` so
-    tool-call blocks, structured payloads, and plain strings are all
-    counted on the same footing.  Returns ``None`` on tokenizer failure
-    (caller decides the fallback policy).
+    Counts both:
+      * Text content via llama.cpp's ``/tokenize`` endpoint (real
+        per-token count using the model's own tokenizer).
+      * Image content via Qwen-VL's patch-count formula (see
+        :func:`_estimate_image_tokens`), since llama.cpp's text
+        tokenizer can't see vision tokens — they're produced by
+        the mmproj projector at inference time.  Without this,
+        a session full of screenshots looks "small" to the api's
+        pre-trim while llama-server actually receives 1500+
+        tokens per image, blowing past ``n_ctx`` mid-stream.
+
+    Returns ``None`` only if the *text* tokenize call itself fails
+    (network error, non-200) — that mirrors the original contract
+    so callers can choose their fallback.  Image-token estimation
+    is best-effort; on missing dimensions / PIL we substitute a
+    conservative per-image default.
     """
+    # 1. Image-block tokens — walked directly off the message's
+    # content so the multimodal blocks aren't lost when we flatten
+    # to text below.
+    image_tokens = 0
+    content = getattr(message, "content", message)
+    try:
+        for block in _iter_content_blocks(content):
+            if _looks_like_image_block(block):
+                image_tokens += _block_image_tokens(block)
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"image token walk failed: {e}")
+
+    # 2. Text-block tokens via the real tokenizer.
     try:
         text = extract_text_from_message(message)
     except Exception:
-        text = _coerce_to_text(getattr(message, "content", message))
-    return await count_tokens(text, base_url=base_url, client=client)
+        text = _coerce_to_text(content)
+    text_tokens = await count_tokens(text, base_url=base_url, client=client)
+    if text_tokens is None:
+        return None
+
+    return text_tokens + image_tokens
