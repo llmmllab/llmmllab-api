@@ -3,12 +3,11 @@ name: generate-3d
 description: |
   Walk a user from a text description to a final 3D mesh (and optional
   per-part decomposition).  Conducts a short interview to clarify
-  intent, formulates a prompt per docs/generate_3d_models.md, generates
+  intent, formulates a prompt per ./generate_3d_models.md, generates
   an image, removes its background, lifts it to 3D, and (optionally)
-  decomposes into parts.  Force-evicts each pipeline's runner-side
-  server between steps so no image / 3D model stays resident in VRAM
-  longer than the request that needed it — leaves the cluster's GPU
-  free for whatever the user does next.
+  decomposes into parts.  Force-evicts any resident LLM session before
+  the heavy 3D steps so XPart's ~17 GB transient load doesn't OOM the
+  pod (the live runner is capped at 26 GiB of system RAM).
 argument-hint: [description] [out-dir] [auto] [evict] [parts]
 allowed-tools:
   - Bash
@@ -20,21 +19,42 @@ allowed-tools:
 # Skill: `/generate-3d`
 
 Drive the full text-to-3D workflow described in
-`./generate_3d_models.md` end-to-end from a single conversation
-turn.  When the user invokes this skill, you become a co-author of
-their 3D asset: interview them about the subject, write the prompt,
-run the four-step (or five-step, with parts) pipeline, and show them
-the result.
+`./generate_3d_models.md` end-to-end from a single conversation turn.
+When the user invokes this skill, you become a co-author of their 3D
+asset: interview them about the subject, write the prompt, run the
+four-step (or five-step, with parts) pipeline, and show them the
+result.
 
-Before each pipeline step, the runner may have other models
-resident (LLM sessions, previous pipeline models).  The api
-auto-shuts the image / 3D server after each request via
-``IMG_SERVER_AUTO_SHUTDOWN`` and ``IN_PROCESS_AUTO_UNLOAD``
-(default ``true`` on the cluster), so eviction is often
-unnecessary.  **Ask the user whether to evict** — they may have a
-running LLM session they want to keep.  Only evict if they
-confirm it's needed or if the pipeline returns an OOM / resource
-error.
+## Resource model — read first
+
+The runner pod (`lsnode-3`) is capped at **26 GiB of system RAM**.
+That ceiling matters because:
+
+- **Hunyuan3D-2.1 (img23d)** uses ~8 GB transient during weight load.
+- **Hunyuan3D-Part / XPart (img23d_part)** uses ~17 GB transient
+  during weight load.
+- An **active Qwen-27B chat session** on the runner holds ~5–8 GB of
+  system RAM (KV-offload + context checkpoints).
+
+So a Qwen session + XPart load = ~25 GB peak, which is at the cap
+with no headroom.  In practice that combination OOMKills the pod
+(exit 137), losing every in-flight request.
+
+The cluster has two automatic cleanup hooks but neither is enough on
+its own:
+
+- `IN_PROCESS_AUTO_UNLOAD=1` (live on the cluster) — the runner
+  unloads in-process pipelines after each request.  Covers
+  back-to-back pipeline calls, **does not** cover a concurrent chat
+  session.
+- `IMG_SERVER_AUTO_SHUTDOWN` — referenced in the api code but **not
+  currently set** on the cluster deployment.  Treat as off.
+
+**Therefore: evict any resident LLM session BEFORE the heavy steps
+(img23d in Step 6, img23d_part in Step 7).**  This is the only thing
+that prevents a Qwen + XPart collision.  The skill defaults to
+evict-before-heavy-step.  The user can opt out only by passing
+`evict=false`, and only if they know no chat session is running.
 
 ## Arguments
 
@@ -44,279 +64,270 @@ The user can pass arguments via skill invocation:
 /generate-3d "ceramic mug" /tmp/model true false true
 ```
 
-Arguments are injected through positional string substitutions:
+Arguments are positional:
 
 | Position | Description | Default |
 |----------|-------------|---------|
-| `$0` | Short text description of the 3D object. Skips the Step 1 interview; use this description to formulate the prompt directly. | (ask user) |
-| `$1` | Output directory for all generated files. Skips the output dir question in Step 1. | `/tmp/generate-3d-<descriptor>` |
-| `$2` | `auto` — auto-accept all recommendations. Skips confirmation prompts. If `$0` is empty, still asks for the subject brief once, then auto-accepts everything else. | false |
-| `$3` | `evict` — force-evict runner servers before each pipeline step. Implied by `auto` unless set to false. | false |
-| `$4` | `parts` — run parts decomposition (Step 7) automatically after 3D generation. | false |
+| `$1` | Short text description of the 3D object.  Skips the Step 1 interview. | (ask user) |
+| `$2` | Output directory for all generated files.  Skips the output-dir question. | `/tmp/generate-3d-<descriptor>` |
+| `$3` | `auto` — auto-accept all recommendations.  If `$1` is empty, still asks for the subject brief once, then auto-accepts everything else. | false |
+| `$4` | `evict` — controls eviction before the heavy steps (img23d, img23d_part).  Pass `false` only if you know no LLM session is running. | true |
+| `$5` | `parts` — run parts decomposition (Step 7) automatically after 3D generation. | false (overridden by interview signal — see Step 7) |
 
-### Argument resolution
-
-1. If all positions are empty, run the full interactive flow.
-2. Provided arguments override the corresponding questions.
-3. Boolean args (`$2`, `$3`, `$4`) accept `true`/`false`/`1`/`0`/`yes`/`no`. Empty means use interactive default.
-4. If `auto` is true, `evict` is implied true unless `$3` is explicitly false.
+Boolean args accept `true`/`false`/`1`/`0`/`yes`/`no`.  An empty
+string means "use the default", not "false".
 
 ## Required environment
 
-Read these from the shell at the start of the skill.  If any are
-missing, ask the user before continuing (unless `$2` is true, then
-use defaults):
-
 ```bash
-ANTHROPIC_BASE_URL  # e.g. http://192.168.0.122:9999
-LLMMLL_AUTH_TOKEN   # admin-capable bearer token
+API_BASE          # e.g. http://192.168.0.71:9999  (the test scripts default to this)
+LLMMLL_AUTH_TOKEN # admin-capable bearer token
 ```
 
-If `ANTHROPIC_BASE_URL` isn't set, default to `http://192.168.0.122:9999` (the
-on-cluster gateway).
+If `API_BASE` isn't set, use `http://192.168.0.71:9999` (matches the
+scripts' built-in default).  All `curl` calls and all
+`./scripts/test_*.sh` invocations must see the same `API_BASE` — do
+not introduce a second variable name; the scripts ignore anything
+else.
 
-`OUT_DIR` can come from `$1`, the Step 1 interview,
-or a sensible default based on the subject description.
+`OUT_DIR` comes from `$2`, the Step 1 interview, or a sensible
+default derived from the subject description.
 
 ## Workflow
 
 ### Step 1 — Interview
 
 Ask the user what they want to create AND where to output files.
-You can ask both in a single `AskUserQuestion` call with two
-questions, or sequentially if you prefer.
+Use a single `AskUserQuestion` with both questions where possible.
 
 **Argument overrides:**
-- If `$0` is set, skip the subject brief question and use it
-  directly as the description.
-- If `$1` is set, skip the output dir question and use it. Create
-  the directory with `mkdir -p`.
-- If `$2` is true and `$0` is set, skip all questions in this
-  step. Derive `OUT_DIR` from `$1` or default to
+
+- If `$1` is set, skip the subject brief and use it directly.
+- If `$2` is set, skip the output-dir question; create it with
+  `mkdir -p`.
+- If `$3` (auto) is true and `$1` is set, skip all questions in this
+  step.  Derive `OUT_DIR` from `$2` or default to
   `/tmp/generate-3d-<short-descriptor>`.
 
 **What to create** (interactive only): restate your understanding
-in one or two sentences.  Iterate using `AskUserQuestion` (header
-"Subject brief", options ``"Yes, that's it"`` / ``"Adjust: ..."`` /
-``"Start over"``) until they confirm.  If `$2` is true but `$0` is
-empty, ask the brief once and accept the first answer without
-iteration.
+in one or two sentences.  Iterate via `AskUserQuestion`
+(header "Subject brief", options ``"Yes, that's it"`` /
+``"Adjust: ..."`` / ``"Start over"``) until confirmed.  If `$3` is
+true but `$1` is empty, ask the brief once and accept the first
+answer without iteration.
 
-What you're listening for, beyond the obvious "what's the object":
+Beyond "what's the object", listen for:
 
-- **Material** — ceramic, metal, wood, plastic, glass.  Material
-  changes what prompt vocabulary works and whether the subject is
-  realistically 3D-extractable (transparent glass is XPart-hostile,
-  per the docs).
+- **Material** — ceramic / metal / wood / plastic / glass.  Drives
+  prompt vocabulary.  **Glass / transparent subjects are
+  XPart-hostile** (no SDF surface to mesh) — warn the user before
+  proceeding and offer to switch the material.
 - **Style** — photorealistic / stylized / cartoon.  Default to
-  photorealistic product photography since it's what
-  Hunyuan3D-2.1 was trained on and what downstream tools (Blender)
-  expect.
-- **Use case** — for game asset / for 3D printing / just to see.
-  Drives whether the user cares about per-part decomposition (asset
-  use cases benefit; "just to see" doesn't).
+  photorealistic product photography (what Hunyuan3D-2.1 was trained
+  on; what Blender expects downstream).
+- **Use case** — game asset / 3D printing / just to see.  This
+  drives the Step 7 parts default (see below).
 
 **Where to output files** (interactive only): ask via
-`AskUserQuestion` (header "Output dir").  Suggest a default of
+`AskUserQuestion` (header "Output dir") with default
 `/tmp/generate-3d-<short-descriptor>` (e.g.
-`/tmp/generate-3d-ceramic-mug`) based on what they described.  The
-user can accept the default or type a custom path.  Create the
-directory with `mkdir -p` before the first pipeline step.
+`/tmp/generate-3d-ceramic-mug`).  Create with `mkdir -p` before
+Step 3.
 
-Save the brief and `OUT_DIR` for the remaining steps.
+Save the brief, the inferred use case, and `OUT_DIR` for later
+steps.
+
+### Step 1.5 — Pre-flight evict (always runs unless `$4=false`)
+
+Before any pipeline work, clear any resident LLM session so the
+first heavy step starts on a clean pod.  This is the cheap insurance
+that prevents the Qwen + XPart collision described in the resource
+model above.
+
+```bash
+curl -sS -X POST "$API_BASE/v1/runner/servers/evict-all" \
+    -H "Authorization: Bearer $LLMMLL_AUTH_TOKEN"
+```
+
+Skip only if `$4=false` AND the user has explicitly said they want
+to preserve a chat session.  In interactive mode with `$4` unset,
+ask once:
+
+> "About to evict any running LLM/image servers on the runner so the
+> 3D pipeline has the full 26 GiB pod budget.  Skip eviction?"
+
+Default answer: "No, evict it" (recommended).
 
 ### Step 2 — Prompt formulation
 
-Read `docs/generate_3d_models.md` (sections "Step 1 — txt2img" and
+Read `./generate_3d_models.md` (sections "Step 1 — txt2img" and
 "Prompting strategy") for the canonical guidance.  Construct a
 prompt that satisfies:
 
 1. **One subject, centered** (no scenes, no environments)
 2. **Soft studio lighting, light gray seamless background**
-3. **Explicit material vocabulary** matching the user's brief
+3. **Explicit material vocabulary** matching the brief
 4. **Photorealistic product photography, sharp focus, high detail**
 
 Avoid: scenes ("on a table"), strong shadows, transparent / glass
-subjects (XPart can't mesh those), text or UI elements.
+subjects, text or UI elements.
 
-If `$2` is true: skip confirmation. Show the prompt to the user
-as a one-liner and proceed immediately.
-Otherwise: show the constructed prompt via `AskUserQuestion`
-(header "Prompt", options ``"Run it"`` / ``"Refine: ..."`` /
-``"Start over"``).  If they ask for refinement, edit the prompt and
-re-ask.  Repeat until confirmed.
+If `$3` is true: skip confirmation, show the prompt as a one-liner,
+proceed.
+Otherwise: confirm via `AskUserQuestion` (header "Prompt", options
+``"Run it"`` / ``"Refine: ..."`` / ``"Start over"``).  Loop until
+confirmed.
 
-### Step 3 — Evict (optional) and run txt2img
+### Step 3 — Run txt2img
 
-**If `$2` is true:** skip the "Proceed?" confirmation. Proceed
-directly to the eviction check below.
-
-**If `$3` is true:** skip the eviction question and evict.
-
-Otherwise, ask the user two questions via `AskUserQuestion`:
-
-**1. Proceed?** (header "Generate image")
-
-- ``"Yes, generate it"`` — proceed to eviction check below
-- ``"Not yet, I want to adjust the prompt"`` — go back to step 2
-- ``"Abort"`` — exit the skill
-
-**2. Evict running servers?** (header "Evict servers") — only ask
-if they confirmed generation.  They may have a running LLM
-session they'd rather keep:
-
-- ``"Yes, evict — I need the GPU"`` — run the eviction curl below
-- ``"No, skip eviction"`` — skip straight to the txt2img script
-- ``"I'm not sure"`` — recommend skipping; the auto-shutdown
-  mechanism usually handles cleanup.  Only evict if they insist.
-
-If evicting (either via `$3` or user confirmation), force-evict
-any servers currently resident on the runner, then run the image
-generation script inline with a `&&` after eviction to avoid immediately restarting the llm
-session they just evicted.  
-
-**IMPORTANT**: if `$3`, you MUST run this **exact** command:
+Eviction is **not** needed here — sd-server's footprint is small
+(~2 GB system RAM) and doesn't collide with anything.
 
 ```bash
-curl -sS -X POST "$ANTHROPIC_BASE_URL/v1/runner/servers/evict-all" \
-    -H "Authorization: Bearer $LLMMLL_AUTH_TOKEN" && \
-  OUT_DIR="$OUT_DIR" \
+API_BASE="$API_BASE" OUT_DIR="$OUT_DIR" \
   ./scripts/test_txt2img.sh "<prompt>"
 ```
 
-else:
-
-```bash
-OUT_DIR="$OUT_DIR" \
-  ./scripts/test_txt2img.sh "<OUT_DIR="$OUT_DIR" \
-prompt>"
-```
-
-The script writes ``<OUT_DIR>/txt2img_<ts>.png`` and prints the
-path on its last line.  Capture it.
+The script writes ``<OUT_DIR>/txt2img_<ts>.png`` and prints the path
+on its last line.  Capture it.
 
 ### Step 4 — Show and confirm the image
 
-Read the generated PNG with the `Read` tool so the user sees it
-inline.
+Read the generated PNG with the `Read` tool.
 
-**If `$2` is true:** skip the confirmation. Show the image and
-proceed to step 5 (background removal).
+If `$3` is true: skip confirmation, proceed to Step 5.
 
-Otherwise ask whether to:
+Otherwise ask:
 
-- ``"Continue to background removal"`` — proceed to step 5
-- ``"Refine via img2img"`` — go to step 4b (edit step)
-- ``"Regenerate from scratch"`` — go to step 2 (new prompt)
-- ``"Abort"`` — exit the skill
+- ``"Continue to background removal"`` → Step 5
+- ``"Refine via img2img"`` → Step 4b
+- ``"Regenerate from scratch"`` → Step 2 with a new prompt
+- ``"Abort"`` → exit
 
 ### Step 4b — Optional img2img edit
 
-Only if the user picks "Refine via img2img" (not available when
-`$2` is true).  Ask them what to change.  Construct an edit prompt
-following the ``./generate_3d_models.md`` rule "additive edits
-are most reliable; full-surface changes are flaky".
+Only if the user picks "Refine via img2img".  Construct an edit
+prompt following `./generate_3d_models.md`'s rule: **additive edits
+are most reliable; full-surface material/colour changes are flaky.**
+Warn the user if their requested change is the latter.
 
-Evict if `$3` is true or user confirms (see step 3 eviction
-check).  Then run:
+No eviction needed (still sd-server territory):
 
 ```bash
-OUT_DIR="$OUT_DIR" \
+API_BASE="$API_BASE" OUT_DIR="$OUT_DIR" \
   ./scripts/test_img2img.sh <last_image.png> "<edit prompt>" \
   qwen-image-edit-2511 0.75
 ```
 
-Show the result and loop back to step 4's choice menu.
+Show the result, loop back to Step 4.
 
 ### Step 5 — Background removal
 
-Run rembg:
+No eviction needed — rembg is ~1.6 GB and `IN_PROCESS_AUTO_UNLOAD`
+cleans it up after the request:
 
 ```bash
-OUT_DIR="$OUT_DIR" \
+API_BASE="$API_BASE" OUT_DIR="$OUT_DIR" \
   ./scripts/test_rembg.sh <last_image.png>
 ```
 
 The script writes ``<OUT_DIR>/rembg_<ts>_cutout.png``.  Read it to
-show the user.
+show the user.  Confirm it looks right (skip confirmation if `$3`);
+if it's wrong, the right fix is usually to refine the input image
+(Step 4b), not to retry rembg.
 
-**If `$2` is true:** skip confirmation, proceed to step 6.
-**Otherwise:** confirm it looks right; if not, go back to step 4
-(usually you want to refine the input image first since rembg has
-no tuning knobs).
+### Step 6 — 3D generation (heavy step)
 
-### Step 6 — 3D generation
+**Eviction matters here.**  Hunyuan3D-2.1 needs ~8 GB transient.
+If `$4` defaulted true (and Step 1.5 ran) the pod is already clear
+and you can skip a second evict.  If the user has had a long
+interactive session that could have re-spawned an LLM (e.g. they
+asked you questions in another window between Step 1 and now), evict
+again just before this step.
 
-Evict if `$3` is true or user confirms (see step 3 eviction
-check).  Run img2-3d:
-
-```bash
-OUT_DIR="$OUT_DIR" \
-  ./scripts/test_img2-3d.sh <cutout.png>
-```
-
-The script writes ``<OUT_DIR>/<id>.glb`` and prints the path.
-**Note: this takes ~3 minutes.**  Tell the user before kicking it
-off.
-
-Use ``open`` on macOS / ``xdg-open`` on Linux to launch the .glb
-in the system viewer:
+When in doubt, evict.  It's cheap (~50 ms when nothing is loaded):
 
 ```bash
-open "$OUT_DIR/<id>.glb"
-```
-
-### Step 7 — Optional parts decomposition
-
-**If `$4` is true:** skip the question and proceed to
-decomposition.
-
-Otherwise, ask the user via `AskUserQuestion`:
-
-- ``"Yes, decompose into parts"`` — proceed
-- ``"No, the assembled mesh is enough"`` — go to summary
-
-Evict if `$3` is true or user confirms (see step 3 eviction
-check).  Run the parts pipeline with split mode enabled so each
-part comes back as a standalone ``.glb`` (ready for Blender import
-as separate objects):
-
-```bash
-OUT_DIR="$OUT_DIR" \
-  ./scripts/test_img2-3d-parts.sh <mesh.glb> 512 42 1
-```
-
-The 4th positional arg ``1`` enables ``split=true``.  Outputs:
-
-- ``<id>_decomposed.glb`` — assembled mesh with each part as a
-  named primitive (drag-into-Blender gives separate objects)
-- ``<id>_exploded.glb`` — same parts spatially separated for
-  visualization
-- ``<id>_part_NN.glb`` — one file per part, ready to import
-  individually
-- ``<id>_bbox.glb`` + ``<id>_gt_bbox.glb`` — segmentation debug
-
-Open the exploded view (it's the most visually informative):
-
-```bash
-open "$OUT_DIR/<id>_exploded.glb"
-```
-
-Optionally open each per-part .glb too if the user wants to inspect
-them individually.
-
-### Step 8 — Final eviction + summary
-
-Evict if `$3` is true or user confirms (see step 3 eviction
-check).  One last eviction so nothing's left resident:
-
-```bash
-curl -sS -X POST "$ANTHROPIC_BASE_URL/v1/runner/servers/evict-all" \
+curl -sS -X POST "$API_BASE/v1/runner/servers/evict-all" \
     -H "Authorization: Bearer $LLMMLL_AUTH_TOKEN"
 ```
 
-Print a summary listing every file produced, with their paths, in
-this format:
+Then run:
+
+```bash
+API_BASE="$API_BASE" OUT_DIR="$OUT_DIR" \
+  ./scripts/test_img2-3d.sh <cutout.png>
+```
+
+The script writes ``<OUT_DIR>/<id>.glb``.  **Tell the user this
+takes ~3 minutes** before kicking it off.
+
+Capture the `id` from the JSON response — every subsequent open /
+parts call needs it substituted explicitly (do not pass a literal
+`<id>`):
+
+```bash
+open "$OUT_DIR/${ID}.glb"   # macOS — xdg-open on Linux
+```
+
+### Step 7 — Optional parts decomposition (heaviest step)
+
+Whether to run this defaults from the use-case signal captured in
+Step 1:
+
+- "game asset" → default `parts=true`
+- "3D printing" → default `parts=true` (each shell prints better
+  separated)
+- "just to see" → default `parts=false`
+
+`$5` overrides the default explicitly.  In interactive mode, confirm
+via `AskUserQuestion`.
+
+**This is the highest-memory step in the pipeline (~17 GB transient
+during XPart load).  Evict unconditionally before it runs**, even if
+you evicted earlier — long-running interactive sessions are exactly
+when an LLM tends to come back:
+
+```bash
+curl -sS -X POST "$API_BASE/v1/runner/servers/evict-all" \
+    -H "Authorization: Bearer $LLMMLL_AUTH_TOKEN"
+```
+
+Default `octree_resolution=256` on a 26 GiB pod.  Bump to 512 only
+if the user explicitly asks for higher-detail decomposition AND
+confirms no chat session is running.  The skill passes 256 + seed 42
++ split=1 by default:
+
+```bash
+API_BASE="$API_BASE" OUT_DIR="$OUT_DIR" \
+  ./scripts/test_img2-3d-parts.sh <mesh.glb> 256 42 1
+```
+
+`split=1` (4th positional) gives one `.glb` per detected part.
+Outputs:
+
+- `${ID}_decomposed.glb` — assembled mesh, each part as a named
+  primitive (drop-in for Blender → separate objects)
+- `${ID}_exploded.glb` — parts spatially separated for inspection
+- `${ID}_part_NN.glb` — one file per part
+- `${ID}_bbox.glb` / `${ID}_gt_bbox.glb` — segmentation debug
+
+Open the exploded view (most informative):
+
+```bash
+open "$OUT_DIR/${ID}_exploded.glb"
+```
+
+### Step 8 — Final eviction + summary
+
+Final eviction so nothing's left resident:
+
+```bash
+curl -sS -X POST "$API_BASE/v1/runner/servers/evict-all" \
+    -H "Authorization: Bearer $LLMMLL_AUTH_TOKEN"
+```
+
+Print a summary listing every produced file:
 
 ```
 ✓ Generated 3D asset for "<one-line brief>"
@@ -324,44 +335,27 @@ this format:
   base:      $OUT_DIR/txt2img_*.png
   edited:    $OUT_DIR/img2img_*.png       (if step 4b ran)
   cutout:    $OUT_DIR/rembg_*_cutout.png
-  mesh:      $OUT_DIR/<id>.glb
-  parts:     $OUT_DIR/<id>_part_*.glb     (if step 7 ran)
-  exploded:  $OUT_DIR/<id>_exploded.glb   (if step 7 ran)
+  mesh:      $OUT_DIR/${ID}.glb
+  parts:     $OUT_DIR/${ID}_part_*.glb    (if step 7 ran)
+  exploded:  $OUT_DIR/${ID}_exploded.glb  (if step 7 ran)
 
 Total wall-clock: <N> seconds
 ```
 
-## Notes on the cluster auto-shutdown story
-
-You're not the only mechanism keeping VRAM free:
-
-- **sd-server** (txt2img, img2img) — the api's
-  ``services/image_service.py`` calls ``shutdown_server`` after
-  every request when ``IMG_SERVER_AUTO_SHUTDOWN=1`` (default on
-  the cluster).  Each call boots a fresh sd-server.
-- **In-process pipelines** (rembg, img23d, img23d_part) — the
-  runner's ``InProcessPipeline.run`` calls ``self.unload()`` after
-  every request when ``IN_PROCESS_AUTO_UNLOAD=1`` (default on the
-  cluster).  Each call cold-loads the model again
-  (~5-30 s depending on pipeline).
-- **Your explicit ``/v1/runner/servers/evict-all`` calls** —
-  optional, user-confirmed.  Ask before evicting; the user may
-  have a running LLM session they want to keep.
-
-Default to **skipping** eviction unless the user confirms or the
-pipeline fails with an OOM / resource error.  The auto-shutdown
-mechanisms above usually handle cleanup, so eviction is a
-fallback, not a prerequisite.
-
 ## Troubleshooting
 
-- **`503 Service Unavailable` on /v1/images/3d/parts** — usually
-  means the runner image is missing one of the XPart deps.  Check
-  the per-part export errors via `kubectl logs` for the runner pod.
+- **Pod OOMKilled (exit 137) mid-pipeline** — almost certainly a
+  concurrent LLM session collided with XPart.  Wait for the pod to
+  restart (`kubectl rollout status deploy/llmmllab-runner -n llmmllab`),
+  then rerun with `$4=true` (the default) so Step 1.5 evicts up
+  front.
+- **`503 Service Unavailable` on /v1/images/3d/parts** — usually a
+  missing XPart dep in the runner image.  Check `kubectl logs` for
+  the runner pod.
 - **Empty `.glb` outputs from img23d_part** — XPart's diffusion
-  produced no valid SDF surfaces; rare with Hunyuan3D-2.1 inputs
-  but possible.  Re-run with a different seed (5th positional) or
-  go back and refine the input image.
-- **The user wants to interrupt mid-pipeline** — pipeline steps
-  are individually killable via Ctrl-C on the script; the api will
-  return a 499.  Evict to free VRAM, then report what was completed.
+  produced no valid SDF surfaces.  Rare with Hunyuan3D-2.1 inputs;
+  re-run with a different seed (5th positional to
+  `test_img2-3d-parts.sh`) or refine the input image first.
+- **Ctrl-C mid-pipeline** — the script returns and the api will
+  surface a 499.  Run `evict-all` afterwards to free VRAM/RAM in
+  case the runner is still holding the model.
