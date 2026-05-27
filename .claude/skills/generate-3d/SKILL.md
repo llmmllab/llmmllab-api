@@ -103,7 +103,8 @@ mechanical / niche shapes).
 | `STEPS` | XPart DiT steps | Yaml default 50.  Higher → finer per-part geometry. |
 | `GUIDANCE_SCALE` | XPart CFG | Bump if the model produces merged or smoothed parts. |
 | `MAX_PARTS` | Cap on K parts | Pipeline default 0 (no cap).  P3-SAM can detect 20-50+ on dense meshes which can OOM the conditioner — set to 8-15 for safer runs.  Ignored when ``AABB_FILE`` is set. |
-| `AABB_FILE` | Caller-specified region boxes | Path to a JSON file with shape ``[K, 2, 3]``: K parts, each with min-corner ``[x, y, z]`` and max-corner ``[x, y, z]`` in the mesh's normalised coordinate space ([-1, 1] usually works).  **Bypasses P3-SAM auto-segmentation entirely** — XPart decomposes exactly along your boundaries.  Use when auto-seg merges parts you want separate, or when you already know the layout (CAD, hand-marked reference). |
+| `AABB` | Caller-specified region boxes (inline) | JSON literal with shape ``[K, 2, 3]``: K parts, each with min-corner ``[x, y, z]`` and max-corner ``[x, y, z]`` in the mesh's normalised coordinate space ([-1, 1] usually works).  **Bypasses P3-SAM auto-segmentation entirely** — XPart decomposes exactly along your boundaries.  Use when auto-seg merges parts you want separate, or when you already know the layout (CAD, hand-marked reference). |
+| `AABB_FILE` | Same as `AABB` but read from a file | Path to a JSON file with the same shape.  Use when the box list is large enough to be awkward inline.  `AABB` wins if both are set. |
 
 ### Example: stubborn industrial object (C-clamp)
 
@@ -116,6 +117,17 @@ STEPS=70 \
 
 ### Example: force decomposition along specific regions
 
+Inline (small box lists):
+
+```bash
+AABB='[[[-1,-1,-1],[-0.2,1,1]], [[-0.2,-1,-1],[0.2,1,1]], [[0.2,-1,-1],[1,1,1]]]' \
+  ./scripts/mesh2parts.sh /tmp/mesh.glb 256
+# → splits the mesh into 3 parts along the X axis
+#   (left third / middle / right third), P3-SAM skipped
+```
+
+From file (large box lists):
+
 ```bash
 cat > /tmp/parts.json <<JSON
 [
@@ -125,7 +137,6 @@ cat > /tmp/parts.json <<JSON
 ]
 JSON
 AABB_FILE=/tmp/parts.json ./scripts/mesh2parts.sh /tmp/mesh.glb 256
-# → splits mesh into 3 parts along the X axis (left third, middle, right third)
 ```
 
 ## Workflow

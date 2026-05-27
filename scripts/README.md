@@ -56,7 +56,8 @@ Set them to override per-request.
 | `OCTREE_RESOLUTION` | img2-3d | Marching-cubes resolution.  Yaml default 384.  256 = fast iteration, 512 = high-fidelity.  Quadratic memory. |
 | `MC_LEVEL`, `BOX_V`, `NUM_CHUNKS` | img2-3d | Advanced MC tuning — see [generate_3d_models.md](../docs/generate_3d_models.md) for full descriptions. |
 | `MAX_PARTS` | mesh2parts | Cap on K parts.  Pipeline default 0 (no cap).  Set 8-15 if P3-SAM is detecting too many parts and OOMing the conditioner.  Ignored when `AABB_FILE` is set. |
-| `AABB_FILE` | mesh2parts | Path to a JSON file with shape `[K, 2, 3]` (K parts × min-corner + max-corner × xyz).  Bypasses P3-SAM auto-segmentation entirely — XPart decomposes exactly along your boundaries.  Coords in normalised mesh space (typically `[-1, 1]`). |
+| `AABB` | mesh2parts | Inline JSON literal with shape `[K, 2, 3]` (K parts × min-corner + max-corner × xyz).  Bypasses P3-SAM auto-segmentation entirely — XPart decomposes exactly along your boundaries.  Coords in normalised mesh space (typically `[-1, 1]`). |
+| `AABB_FILE` | mesh2parts | Same as `AABB` but read from a file (useful for large box lists).  `AABB` wins if both are set. |
 
 **Worked example — stubborn mechanical object:**
 
@@ -67,7 +68,15 @@ STEPS=70 \
 ./scripts/txt2img.sh "single black cast iron C-clamp on white seamless background, deep throat, threaded screw spindle with T-bar at bottom, swivel pad at tip, isolated centered, 4k industrial catalog"
 ```
 
-**Worked example — caller-driven mesh decomposition:**
+**Worked example — caller-driven mesh decomposition (inline):**
+
+```bash
+AABB='[[[-1,-1,-1],[-0.2,1,1]], [[-0.2,-1,-1],[0.2,1,1]], [[0.2,-1,-1],[1,1,1]]]' \
+  ./scripts/mesh2parts.sh /tmp/mesh.glb 256
+# → 3 parts along the X axis, P3-SAM auto-segmentation skipped
+```
+
+**Worked example — same thing from a file:**
 
 ```bash
 cat > /tmp/parts.json <<JSON
@@ -78,7 +87,6 @@ cat > /tmp/parts.json <<JSON
 ]
 JSON
 AABB_FILE=/tmp/parts.json ./scripts/mesh2parts.sh /tmp/mesh.glb 256
-# → 3 parts along the X axis, P3-SAM auto-segmentation skipped
 ```
 
 ## `txt2img.sh`

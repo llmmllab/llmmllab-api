@@ -42,15 +42,18 @@
 #                     0 to disable capping (only if your mesh has few
 #                     natural parts or you have headroom).  Ignored
 #                     when AABB_FILE is set.
-#   AABB_FILE         Path to a JSON file containing caller-specified
-#                     bounding boxes.  Bypasses P3-SAM auto-detection
-#                     entirely — XPart uses your boxes directly.
-#                     File contents: a JSON list shape [K, 2, 3]
-#                     (K parts, each with min-corner [x,y,z] + max-corner
-#                     [x,y,z]).  Mesh coords are normalised to a unit
-#                     cube around the centroid internally, so feeding
-#                     coords in [-1, 1] usually works.
-#                     Example: [[[-0.5,-0.5,-0.5],[0.5,0.5,0.5]]]  # one box
+#   AABB              Inline JSON literal with caller-specified bounding
+#                     boxes — bypasses P3-SAM auto-detection entirely.
+#                     XPart decomposes the mesh along your boundaries.
+#                     Shape: [K, 2, 3] — K parts, each with
+#                     min-corner [x,y,z] + max-corner [x,y,z].  Mesh
+#                     coords are normalised to a unit cube around the
+#                     centroid internally, so feeding coords in [-1, 1]
+#                     usually works.  Example for one box:
+#                       AABB='[[[-0.5,-0.5,-0.5],[0.5,0.5,0.5]]]'
+#   AABB_FILE         Same idea but read from a file (for large lists
+#                     where the JSON wouldn't fit in env / argv).  If
+#                     both AABB and AABB_FILE are set, AABB wins.
 
 set -euo pipefail
 
@@ -114,15 +117,25 @@ add_num_field num_inference_steps "${STEPS:-}"
 add_num_field guidance_scale      "${GUIDANCE_SCALE:-}"
 add_num_field max_parts           "${MAX_PARTS:-}"
 
-# Caller-supplied bounding boxes via --slurpfile (raw JSON pass-through).
-if [[ -n "${AABB_FILE:-}" ]]; then
+# Caller-supplied bounding boxes.  Two forms accepted, ``AABB`` (inline
+# JSON literal) wins over ``AABB_FILE`` (path) if both are set:
+#
+#   AABB='[[[ -1, -1, -1 ], [ 1, 1, 1 ]]]' ./scripts/mesh2parts.sh ...
+#   AABB_FILE=/tmp/boxes.json              ./scripts/mesh2parts.sh ...
+#
+# Either path lands on the wire as the ``aabb`` body field, shape
+# [K, 2, 3] = K parts × (min-corner, max-corner) × (x, y, z).
+if [[ -n "${AABB:-}" ]]; then
+    JQ_ARGS+=(--argjson _aabb "$AABB")
+    JQ_EXPR="${JQ_EXPR%\}}, aabb: \$_aabb}"
+elif [[ -n "${AABB_FILE:-}" ]]; then
     if [[ ! -f "$AABB_FILE" ]]; then
         echo "✘ AABB_FILE not found: $AABB_FILE" >&2
         exit 1
     fi
     # ``--slurpfile`` reads the file as a single value into the named
-    # arg; ``[0]`` unwraps the slurp's outer array if the file already
-    # is a JSON array (the common case).
+    # arg; ``[0]`` unwraps the slurp's outer array since the file
+    # contents are already the JSON array we want to send.
     JQ_ARGS+=(--slurpfile _aabb "$AABB_FILE")
     JQ_EXPR="${JQ_EXPR%\}}, aabb: \$_aabb[0]}"
 fi
@@ -136,7 +149,11 @@ echo "  octree_resolution = $OCTREE"
 [[ -n "${STEPS:-}"             ]] && echo "  num_inference_steps = $STEPS"
 [[ -n "${GUIDANCE_SCALE:-}"    ]] && echo "  guidance_scale      = $GUIDANCE_SCALE"
 [[ -n "${MAX_PARTS:-}"         ]] && echo "  max_parts           = $MAX_PARTS"
-[[ -n "${AABB_FILE:-}"         ]] && echo "  aabb                = (from $AABB_FILE)"
+if [[ -n "${AABB:-}" ]]; then
+    echo "  aabb                = (inline JSON, $(printf '%s' "$AABB" | wc -c) bytes)"
+elif [[ -n "${AABB_FILE:-}" ]]; then
+    echo "  aabb                = (from $AABB_FILE)"
+fi
 echo "  (XPart can take several minutes; no streaming)"
 
 HTTP_STATUS=$(curl -sS -X POST "$API_BASE/v1/images/3d/parts" \

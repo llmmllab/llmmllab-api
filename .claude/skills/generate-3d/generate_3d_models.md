@@ -367,16 +367,99 @@ Our V2.1 outputs work but aren't the sweet spot.
 
 ### Parameter tuning
 
-- `octree_resolution` — marching-cubes resolution for each regenerated
-  part. Default 512 (upstream demo value). 256 is faster (~1.5× speedup)
-  but parts look blockier. Above 512 produces minimal quality gain and
-  large file sizes.
-- `seed` — RNG seed. XPart is mildly nondeterministic; fix the seed
-  for reproducible output.
-- No `cfg_scale` / `num_inference_steps` knobs exposed — XPart's
-  defaults (50 inference steps, cfg_scale -1.0 / unconditional) are
-  baked into the upstream pipeline and work well across the input
-  distribution.
+Every script accepts env vars that map directly to per-request body
+fields the api forwards to the runner pipeline.  Unset → the script
+omits the field → api falls through to the per-model defaults in the
+runner's `.models.yaml`.  Override per-call as needed.
+
+#### txt2img.sh / img2img.sh (image generation)
+
+| Env | Body field | Yaml default | When to bump |
+|---|---|---|---|
+| `NEGATIVE_PROMPT` | `negative_prompt` | (empty) | **Almost always set** for object-specific gens.  E.g. `"G-clamp, vise, multiple objects"` when prompting a C-clamp.  Models confuse similar classes constantly. |
+| `CFG_SCALE` | `cfg_scale` | 4.0 (qwen-image) | Higher = sticks closer to the prompt.  5-7 for stubborn-geometry industrial objects; 8+ if the model still resists.  Too high washes out aesthetics. |
+| `STEPS` | `steps` | 50 (qwen-image) | More steps = finer detail at linear cost.  60-80 for fine industrial / mechanical scenes. |
+| `SAMPLER` | `sampler_name` | `dpm++_2m` (qwen-image) | `dpm++_2m` is sharpest on geometry.  `euler` is fastest.  Also: `dpm++_sde`, `unipc`, `dpmpp_2m_sde`. |
+| `SEED` | `seed` | -1 (random) | Set an int for reproducible regenerations of the same prompt. |
+
+img2img also accepts a 4th positional arg `denoising_strength` (0-1):
+0.0 reproduces the input, 1.0 ignores it.  0.65-0.8 is the
+prompt-guided-edit sweet spot.
+
+#### img2-3d.sh (image → 3D mesh)
+
+| Env | Body field | Yaml default | When to bump |
+|---|---|---|---|
+| `SEED` | `seed` | 42 | Lock for reproducible meshes. |
+| `STEPS` | `num_inference_steps` | 50 | 75-100 for finer geometry.  Linear cost in time. |
+| `GUIDANCE_SCALE` | `guidance_scale` | 7.5 | Lower (4-7) for cleaner geometry; higher (8-10) chases the image harder but introduces spikes / floaters. |
+| `OCTREE_RESOLUTION` | `octree_resolution` | 384 | 256 = fast iteration, 512 = high-fidelity.  Quadratic memory cost. |
+| `MC_LEVEL` | `mc_level` | -1/512 | Marching-cubes iso-level.  More negative thickens output; positive thins and risks holes.  Tweak by ±0.001 increments. |
+| `BOX_V` | `box_v` | 1.01 | SDF bounding-box scale.  Rarely needs tuning. |
+| `NUM_CHUNKS` | `num_chunks` | 8000 | Bump to 400000 if you have VRAM headroom for faster eval. |
+
+#### mesh2parts.sh (mesh → per-part meshes)
+
+| Env | Body field | Default | When to set |
+|---|---|---|---|
+| `STEPS` | `num_inference_steps` | 50 | Higher → finer per-part geometry. |
+| `GUIDANCE_SCALE` | `guidance_scale` | (XPart default) | Bump if you see merged or over-smoothed parts. |
+| `MAX_PARTS` | `max_parts` | 0 (no cap) | P3-SAM can detect 20-50+ parts on dense meshes, OOMing the conditioner (~7-8 GB activation per K=25).  Set 8-15 for safety.  **Ignored when `AABB`/`AABB_FILE` is set.** |
+| `AABB` | `aabb` (inline JSON) | (auto-segment) | **Caller-specified bounding boxes.**  Bypasses P3-SAM auto-segmentation entirely — XPart uses your boxes directly.  Shape `[K, 2, 3]` (K parts × min/max corners × xyz).  Mesh coords are normalised to [-1, 1] around the centroid.  See examples below. |
+| `AABB_FILE` | `aabb` (from file) | (auto-segment) | Same as `AABB` but read from a JSON file.  Use when the box list is too long for env / argv.  `AABB` wins if both are set. |
+
+#### `AABB` / `AABB_FILE` — caller-driven part decomposition
+
+When you already know which regions of the mesh should be separate
+parts, P3-SAM's auto-segmentation is just a guess that you have to
+clean up.  Feeding `aabb` directly skips that step and forces XPart
+to decompose along exactly the boundaries you specify.
+
+Common use cases:
+- **CAD geometry** — you designed the parts, you know where they are
+- **Hand-marked reference** — Blender bounding-box selections,
+  exported to JSON
+- **Repeatable workflows** — same shape decomposed the same way
+  every time
+- **Recovery from bad auto-seg** — P3-SAM merged two parts that
+  should be separate, or split one part into nonsense.  Re-run with
+  explicit boxes.
+
+Inline JSON form:
+
+```bash
+AABB='[[[-1,-1,-1],[-0.2,1,1]], [[-0.2,-1,-1],[0.2,1,1]], [[0.2,-1,-1],[1,1,1]]]' \
+  ./scripts/mesh2parts.sh /tmp/mesh.glb 256
+# → mesh split into 3 parts along the X axis
+```
+
+File form (for larger box lists):
+
+```bash
+cat > /tmp/parts.json <<JSON
+[
+  [[-1.0, -1.0, -1.0], [-0.2,  1.0,  1.0]],
+  [[-0.2, -1.0, -1.0], [ 0.2,  1.0,  1.0]],
+  [[ 0.2, -1.0, -1.0], [ 1.0,  1.0,  1.0]]
+]
+JSON
+AABB_FILE=/tmp/parts.json ./scripts/mesh2parts.sh /tmp/mesh.glb 256
+```
+
+The shape is `[K, 2, 3]`: a list of K parts, each part is
+`[min-corner, max-corner]`, each corner is `[x, y, z]`.  The mesh
+is internally normalised to a unit cube around its centroid before
+P3-SAM operates, so coordinates in the range `[-1, 1]` typically
+work.  If the model produces wildly off output, check whether your
+input mesh is centred / scaled in a non-standard space.
+
+### Why some legacy fields are gone
+
+The earlier api signature included TRELLIS-era params (`ss_steps`,
+`slat_steps`, `ss_cfg_strength`, `slat_cfg_strength`) — those were
+left over from a previous backbone and the Hunyuan3D-2.1 pipeline
+ignored them entirely (no matching kwargs in `_pick`).  They've
+been removed; the native fields above are the actual knobs.
 
 ### Notes on the four outputs
 

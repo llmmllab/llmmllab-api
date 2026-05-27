@@ -30,9 +30,44 @@ curl http://localhost:8000/v1/images/3d \
 
 Backed by Tencent Hunyuan3D-2.1 (shape-only path, ~6 GB VRAM) running in-process on the runner. Returns a `.glb` mesh; gaussian-splat output is not supported by this backbone (the response's `gaussian_url` will be `null`). The response includes `mesh_url` pointing at `GET /v1/images/3d/{filename}`, which streams the binary back through the api without requiring pod access.
 
+### Mesh-to-parts decomposition
+
+```bash
+curl http://localhost:8000/v1/images/3d/parts \
+  -H "Content-Type: application/json" \
+  -d '{"mesh_b64":"<base64 .glb>","octree_resolution":256,"split":true}'
+# -> {"id":"abc123","elapsed_sec":92.4,"mesh_url":"...decomposed.glb",
+#     "part_urls":["...part_00.glb","...part_01.glb",...]}
+```
+
+Backed by Tencent Hunyuan3D-Part (P3-SAM + XPart) running in-process
+on the runner. Decomposes a whole mesh (typically the output of
+`/v1/images/3d`) into semantically meaningful parts. Optional `aabb`
+field (`[K, 2, 3]` bounding boxes) bypasses P3-SAM's auto-segmentation
+when you already know the part layout.
+
+### Image-pipeline tuning
+
+Every image endpoint exposes per-request sampling knobs via the
+request body. Unset fields fall through to per-model defaults from
+the runner's `.models.yaml`. The most commonly used:
+
+- `negative_prompt` — strongly recommended for object-specific gens
+- `cfg_scale` — prompt-faithfulness (default 4.0; bump to 5-7 for stubborn-geometry mechanical objects)
+- `steps` — diffusion sampling steps
+- `sampler_name` — `dpm++_2m` (default), `euler`, `dpm++_sde`, ...
+- `num_inference_steps`, `guidance_scale`, `octree_resolution`, `mc_level`, `box_v`, `num_chunks` — img23d-side knobs
+- `max_parts`, `aabb` — mesh2parts-side knobs
+
+See [`scripts/README.md`](scripts/README.md) for the env-var
+equivalents on the shell scripts, and
+[`.claude/skills/generate-3d/generate_3d_models.md`](.claude/skills/generate-3d/generate_3d_models.md)
+for full parameter reference + tuning advice per use case
+(industrial vs organic, low-fidelity iteration vs final, etc.).
+
 ### Test scripts
 
-See [`scripts/README.md`](scripts/README.md) for ready-made curl + jq harnesses (`txt2img.sh`, `img2img.sh`, `img2-3d.sh`) that exercise each endpoint and decode the responses.
+See [`scripts/README.md`](scripts/README.md) for ready-made curl + jq harnesses (`txt2img.sh`, `img2img.sh`, `img2-3d.sh`, `mesh2parts.sh`) that exercise each endpoint and decode the responses.
 
 ## Quick Start
 
