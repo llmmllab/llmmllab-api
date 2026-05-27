@@ -210,6 +210,31 @@ def test_edit_image_targets_sdapi_img2img_with_ref_images():
     assert payload["denoising_strength"] == 0.8
 
 
+def test_edit_image_forwards_extra_reference_images():
+    fake_b64 = base64.b64encode(b"edited-png").decode("ascii")
+    client = _make_runner_client_for_txt2img(
+        {"images": [fake_b64], "parameters": {}}
+    )
+
+    _run(edit_image(
+        prompt="blend with style",
+        image_b64="cHJpbWFyeQ==",
+        model_id="qwen-image-edit-2511",
+        extra_images_b64=["c3R5bGU=", "c3ViamVjdA=="],
+        client=client,
+    ))
+
+    _, kwargs = client.proxy_request.call_args
+    payload = kwargs["json"]
+    # Primary stays in init_images; primary + extras flow through
+    # extra_images so QwenImageEditPlusPipeline sees them all as
+    # ref_images.
+    assert payload["init_images"] == ["cHJpbWFyeQ=="]
+    assert payload["extra_images"] == [
+        "cHJpbWFyeQ==", "c3R5bGU=", "c3ViamVjdA==",
+    ]
+
+
 def test_edit_image_releases_server_on_failure():
     client = _make_runner_client_for_txt2img({})
     client.proxy_request = AsyncMock(

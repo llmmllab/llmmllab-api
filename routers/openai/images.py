@@ -29,7 +29,7 @@ wired through.
 import logging
 import re
 import time
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -78,11 +78,24 @@ class CreateImageEditRequest(BaseModel):
     Departs from OpenAI's multipart/form-data ``image-edits`` shape on
     purpose — every other image endpoint in this api is JSON with
     base64 inline, and matching that style keeps the test scripts
-    consistent.  ``image`` accepts a base64-encoded PNG or JPEG.
+    consistent.  ``image`` accepts either a single base64-encoded
+    PNG / JPEG or a list of them (Qwen-Image-Edit-2511 supports
+    multi-image conditioning so the model can e.g. blend / restyle /
+    combine subjects across reference images).
     """
 
     prompt: str = Field(..., description="Edit instruction / new prompt")
-    image: str = Field(..., description="Base64-encoded source image (PNG or JPEG)")
+    image: Union[str, List[str]] = Field(
+        ...,
+        description=(
+            "Base64-encoded source image(s).  Single string for plain "
+            "img2img.  List of strings for multi-image conditioning "
+            "(Qwen-Image-Edit-2511 takes the first as the primary "
+            "image being edited and the rest as visual-context "
+            "reference images).  Each entry is a PNG or JPEG base64 "
+            "blob; OpenAI accepts up to 16 references."
+        ),
+    )
     model: str = Field(..., description="Runner model_id (e.g. 'qwen-image-edit-2511')")
     negative_prompt: Optional[str] = Field(None)
     size: Optional[str] = Field("1024x1024", description="WIDTHxHEIGHT")
@@ -127,10 +140,27 @@ async def createImageEdit(body: CreateImageEditRequest, request: Request) -> Ima
     """
     width, height = _parse_size(body.size)
 
+    # Normalise the polymorphic ``image`` field into a primary
+    # (the image being edited) + an optional list of additional
+    # reference images that condition the edit without being the
+    # noise seed.
+    if isinstance(body.image, list):
+        if not body.image:
+            raise HTTPException(
+                status_code=400,
+                detail="`image` was provided as an empty list; need at least one base64 string.",
+            )
+        primary_image = body.image[0]
+        extra_images: Optional[List[str]] = body.image[1:] or None
+    else:
+        primary_image = body.image
+        extra_images = None
+
     try:
         result = await edit_image(
             prompt=body.prompt,
-            image_b64=body.image,
+            image_b64=primary_image,
+            extra_images_b64=extra_images,
             model_id=body.model,
             negative_prompt=body.negative_prompt,
             denoising_strength=body.denoising_strength,

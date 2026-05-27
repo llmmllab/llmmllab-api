@@ -52,6 +52,7 @@ Set them to override per-request.
 | `STEPS` | txt2img, img2img, img2-3d, mesh2parts | Diffusion sampling steps.  Higher = finer detail, linear cost.  Yaml defaults: 50 (qwen-image), 50 (Hunyuan3D DiT), 50 (XPart DiT). |
 | `SAMPLER` | txt2img, img2img | Sampler name.  Yaml default `dpm++_2m`.  Also: `euler`, `dpm++_sde`, `unipc`, `dpmpp_2m_sde`. |
 | `SEED` | all | Integer seed for reproducible runs.  -1 = random. |
+| `EXTRA_IMAGES` | img2img | Comma-separated paths to **additional reference images**.  Primary image (positional arg) is still the one being edited; extras are visual context Qwen-Image-Edit conditions on (style donors, subject refs, palette).  Sent as `image: [primary, ref1, ...]` to the api. |
 | `GUIDANCE_SCALE` | img2-3d, mesh2parts | CFG for the 3D pipelines.  img23d default 7.5; bump if image fidelity is low; lower if you see spikes/floaters. |
 | `OCTREE_RESOLUTION` | img2-3d | Marching-cubes resolution.  Yaml default 384.  256 = fast iteration, 512 = high-fidelity.  Quadratic memory. |
 | `MC_LEVEL`, `BOX_V`, `NUM_CHUNKS` | img2-3d | Advanced MC tuning — see [generate_3d_models.md](../docs/generate_3d_models.md) for full descriptions. |
@@ -152,6 +153,30 @@ or more `b64_json` PNGs in `data[]`.
 **Request shape** departs from OpenAI's multipart `image-edits` API —
 we use JSON with `image` carrying base64 because every other endpoint
 in this api is JSON-with-base64. Keeps the wire surface uniform.
+
+**Multiple reference images (`EXTRA_IMAGES`):** Qwen-Image-Edit-2511
+conditions on additional reference images alongside the primary
+image. Set `EXTRA_IMAGES` to a comma-separated list of paths and
+each one gets base64-encoded and added to the request as part of the
+polymorphic `image` field — a JSON array `[primary, ref1, ref2, ...]`
+when extras are present, a plain string otherwise. The primary
+(positional arg 1) is still the canvas being edited; extras are
+style donors / subject anchors / palette refs / composition borrows.
+
+```bash
+EXTRA_IMAGES=./style.png,./subject.png \
+  ./scripts/img2img.sh ./photo.png \
+    "blend photo with the style of style.png; keep the pose from subject.png"
+```
+
+Practical wins:
+- Style transfer with anchor — text-only style prompts are flaky;
+  a style-donor image is more reliable.
+- Identity preservation — include a clean reference of the subject
+  when editing a low-quality original.
+- Palette matching — `match the color palette of <ref>`.
+- Compositional borrowing — borrow framing/lighting from one image
+  while keeping the subject of another.
 
 ## `rembg.sh`
 

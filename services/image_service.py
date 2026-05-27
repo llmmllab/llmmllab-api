@@ -318,6 +318,7 @@ async def edit_image(
     prompt: str,
     image_b64: str,
     model_id: str,
+    extra_images_b64: Optional[List[str]] = None,
     negative_prompt: Optional[str] = None,
     denoising_strength: Optional[float] = None,
     width: Optional[int] = None,
@@ -381,8 +382,26 @@ async def edit_image(
                 # (Qwen-Image-Edit-2511, use ref_images path) and any
                 # legacy img2img model that falls through (uses
                 # init_image path).
+                # Build the multi-image list for sd-server's two
+                # ingestion paths.  ``image_b64`` is the primary
+                # (the one being edited); ``extra_images_b64`` adds
+                # reference images that condition the edit without
+                # being the noise seed.  For Qwen-Image-Edit-2511,
+                # multi-image conditioning lets you e.g. say "make
+                # this <image1> look like <image2>" or "blend the
+                # subject of <image1> with the style of <image2>".
+                #
+                # sd-server reads:
+                #   init_images[0]  → gen_params.init_image
+                #                    (img2img noise seed)
+                #   extra_images[]  → gen_params.ref_images
+                #                    (Qwen-Image-Edit visual context)
+                # The primary image goes into BOTH so legacy img2img
+                # models that don't read ref_images still see the
+                # source.  Additional refs are appended only to
+                # extra_images.
                 "init_images": [image_b64],
-                "extra_images": [image_b64],
+                "extra_images": [image_b64, *(extra_images_b64 or [])],
                 "denoising_strength": resolved_denoise,
                 "width": resolved_width,
                 "height": resolved_height,
@@ -402,6 +421,7 @@ async def edit_image(
                     "size": f"{width}x{height}",
                     "steps": steps,
                     "denoising_strength": denoising_strength,
+                    "ref_image_count": 1 + len(extra_images_b64 or []),
                 },
             )
             response = await cli.proxy_request(

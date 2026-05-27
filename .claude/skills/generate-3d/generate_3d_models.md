@@ -381,10 +381,41 @@ runner's `.models.yaml`.  Override per-call as needed.
 | `STEPS` | `steps` | 50 (qwen-image) | More steps = finer detail at linear cost.  60-80 for fine industrial / mechanical scenes. |
 | `SAMPLER` | `sampler_name` | `dpm++_2m` (qwen-image) | `dpm++_2m` is sharpest on geometry.  `euler` is fastest.  Also: `dpm++_sde`, `unipc`, `dpmpp_2m_sde`. |
 | `SEED` | `seed` | -1 (random) | Set an int for reproducible regenerations of the same prompt. |
+| `EXTRA_IMAGES` (img2img only) | `image[1:]` | (none) | Comma-separated paths to **additional reference images**.  The primary image (positional arg 1) is the one being edited; extras are visual context Qwen-Image-Edit-2511 uses as conditioning (style donor, subject reference, palette, etc.).  Up to ~16.  See "Multi-image edits" below. |
 
 img2img also accepts a 4th positional arg `denoising_strength` (0-1):
 0.0 reproduces the input, 1.0 ignores it.  0.65-0.8 is the
 prompt-guided-edit sweet spot.
+
+##### Multi-image edits (img2img.sh)
+
+Qwen-Image-Edit-2511 conditions on **multiple** reference images
+when more than one is supplied.  The first image is the canvas being
+edited; subsequent images steer style, subject identity, palette, or
+composition.  The api exposes this via the polymorphic ``image``
+field on ``POST /v1/images/edits`` — a single base64 string for the
+classic single-reference case, or a JSON array
+``[primary_b64, ref1_b64, ref2_b64, ...]`` for multi-reference.
+
+```bash
+# Edit photo.png using style.png and subject.png as additional refs
+EXTRA_IMAGES=./style.png,./subject.png \
+  ./scripts/img2img.sh ./photo.png \
+    "blend the subject of photo.png with the style of style.png; keep the pose from subject.png"
+```
+
+When to reach for it:
+- **Style transfer with anchor** — prompt + style-donor image is more
+  reliable than text-only style prompts, which Qwen-Image-Edit handles
+  poorly.
+- **Identity preservation** — include a clean reference shot of the
+  subject when editing a low-quality original.
+- **Palette matching** — drop in a swatch image and prompt "match
+  the color palette of <ref>".
+- **Compositional borrowing** — borrow framing or lighting from one
+  image while keeping the subject of another.
+
+The denoising_strength still applies to the primary image only.
 
 #### img2-3d.sh (image → 3D mesh)
 

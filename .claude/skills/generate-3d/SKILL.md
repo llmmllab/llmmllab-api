@@ -245,6 +245,14 @@ prompt following `./generate_3d_models.md`'s rule: **additive edits
 are most reliable; full-surface material/colour changes are flaky.**
 Warn the user if their requested change is the latter.
 
+If the user has a **style donor, subject anchor, or palette
+reference image** they want the edit to lean on, set
+`EXTRA_IMAGES=./ref1.png,./ref2.png` before invoking `img2img.sh`.
+Qwen-Image-Edit-2511 will condition on those refs alongside the
+primary image — useful for style transfer with anchor, identity
+preservation, palette matching, or compositional borrowing.  See
+``Multi-image edits`` in `./generate_3d_models.md`.
+
 IF `$3`, RUN EXACTLY THIS:
 
 ```bash
