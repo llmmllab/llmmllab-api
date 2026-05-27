@@ -1,13 +1,6 @@
 ---
 name: generate-3d
-description: |
-  Walk a user from a text description to a final 3D mesh (and optional
-  per-part decomposition).  Conducts a short interview to clarify
-  intent, formulates a prompt per ./generate_3d_models.md, generates
-  an image, removes its background, lifts it to 3D, and (optionally)
-  decomposes into parts.  Force-evicts any resident LLM session before
-  the heavy 3D steps so XPart's ~17 GB transient load doesn't OOM the
-  pod (the live runner is capped at 26 GiB of system RAM).
+description: Drives the text-to-3D pipeline (image gen → bg removal → mesh → optional part decomposition). Use when the user wants to create a 3D model (.glb), mesh, or printable asset from a text description or reference image.
 argument-hint: [description] [out-dir] [auto] [evict] [parts]
 allowed-tools:
   - Bash
@@ -16,7 +9,7 @@ allowed-tools:
   - AskUserQuestion
 ---
 
-# Skill: `/generate-3d`
+# Generate 3D
 
 Drive the full text-to-3D workflow described in
 `./generate_3d_models.md` end-to-end from a single conversation turn.
@@ -24,6 +17,14 @@ When the user invokes this skill, you become a co-author of their 3D
 asset: interview them about the subject, write the prompt, run the
 four-step (or five-step, with parts) pipeline, and show them the
 result.
+
+## Why eviction matters
+
+The heavy 3D steps (img23d and especially mesh2parts) load XPart,
+which has a ~17 GB transient memory footprint.  The live runner pod
+is capped at 26 GiB of system RAM, so any resident LLM session +
+XPart will OOMKill the pod (exit 137).  Every heavy step in this
+skill is therefore preceded by an `evict-all` call.
 
 ## Arguments
 
@@ -62,82 +63,36 @@ else.
 `OUT_DIR` comes from `$2`, the Step 1 interview, or a sensible
 default derived from the subject description.
 
-## Pipeline tuning knobs (env vars passed to each script)
+## Pipeline tuning knobs
 
-Each script accepts optional env vars to tune the underlying model
-per request.  Unset → script omits the field, api falls through to
-the per-model defaults in the runner's ``.models.yaml``.  Set any
-of them right before the script call to override.
+Each script accepts env vars (`NEGATIVE_PROMPT`, `CFG_SCALE`,
+`STEPS`, `SAMPLER`, `SEED`, `GUIDANCE_SCALE`, `OCTREE_RESOLUTION`,
+`MC_LEVEL`, `BOX_V`, `NUM_CHUNKS`, `MAX_PARTS`, `AABB`,
+`AABB_FILE`, `EXTRA_IMAGES`) that override per-model defaults from
+the runner's `.models.yaml`.  Unset → script omits the field, api
+uses the yaml default.
 
-Use these aggressively when the model is producing bad output —
-they're the difference between a workable result and a useless one,
-especially on objects the model hasn't seen often (industrial /
-mechanical / niche shapes).
+**The full table of knobs + when to bump each, and worked examples
+(C-clamp, region-isolated mesh decomposition, multi-image edit) live
+in [`./generate_3d_models.md` §"Parameter tuning"](./generate_3d_models.md#parameter-tuning).**
+Read it when picking knobs for any non-trivial subject.
 
-### txt2img.sh + img2img.sh
+## Eviction discipline
 
-| Env var | Purpose | When to use |
-|---|---|---|
-| `NEGATIVE_PROMPT` | Exclude specific concepts | **Almost always set this** for object-specific gens.  E.g. ``"G-clamp, vise"`` when prompting for a C-clamp; ``"blurry, distorted, deformed, text, watermark"`` always.  Models confuse similar tools / classes constantly. |
-| `CFG_SCALE` | Prompt-faithfulness | Default 4.0.  Bump to 5-7 for stubborn-geometry objects (mechanical parts, technical illustrations).  Range 1.5-8.  Too high washes out aesthetics. |
-| `STEPS` | Diffusion steps | Default 50.  60-80 for fine detail in industrial / mechanical scenes.  Linear cost in time. |
-| `SAMPLER` | Sampler algorithm | Default ``dpm++_2m``.  Also valid: ``euler``, ``dpm++_sde``, ``unipc``, ``dpmpp_2m_sde``. |
-| `SEED` | RNG seed | -1 = random (default).  Set an int for reproducible regenerations of the same prompt. |
-
-### img2-3d.sh
-
-| Env var | Purpose | When to use |
-|---|---|---|
-| `SEED` | RNG seed | Default 42.  Lock for reproducible meshes. |
-| `STEPS` | Hunyuan3D DiT steps | Default 50.  Bump to 75-100 for finer geometry. |
-| `GUIDANCE_SCALE` | CFG for the 3D DiT | Default 7.5.  Try 4-7 if you see over-extrusion / spikes; 8-10 to chase the image harder. |
-| `OCTREE_RESOLUTION` | Marching-cubes res | Default 384.  256 = fast iteration, 512 = high-fidelity.  Quadratic memory. |
-| `MC_LEVEL` | MC iso-level | Default ``-1/512``.  More negative thickens output; positive thins (and risks holes). |
-| `BOX_V` | SDF bbox scale | Default 1.01.  Rarely needs tuning. |
-| `NUM_CHUNKS` | SDF eval chunk | Default 8000.  Bump to 400000 if you have VRAM headroom. |
-
-### mesh2parts.sh
-
-| Env var | Purpose | When to use |
-|---|---|---|
-| `STEPS` | XPart DiT steps | Yaml default 50.  Higher → finer per-part geometry. |
-| `GUIDANCE_SCALE` | XPart CFG | Bump if the model produces merged or smoothed parts. |
-| `MAX_PARTS` | Cap on K parts | Pipeline default 0 (no cap).  P3-SAM can detect 20-50+ on dense meshes which can OOM the conditioner — set to 8-15 for safer runs.  Ignored when ``AABB_FILE`` is set. |
-| `AABB` | Caller-specified region boxes (inline) | JSON literal with shape ``[K, 2, 3]``: K parts, each with min-corner ``[x, y, z]`` and max-corner ``[x, y, z]`` in the mesh's normalised coordinate space ([-1, 1] usually works).  **Bypasses P3-SAM auto-segmentation entirely** — XPart decomposes exactly along your boundaries.  Use when auto-seg merges parts you want separate, or when you already know the layout (CAD, hand-marked reference). |
-| `AABB_FILE` | Same as `AABB` but read from a file | Path to a JSON file with the same shape.  Use when the box list is large enough to be awkward inline.  `AABB` wins if both are set. |
-
-### Example: stubborn industrial object (C-clamp)
+The img23d and mesh2parts steps **must** be preceded by an
+`evict-all` call to free RAM for XPart.  Define a prefix once at the
+start of the run and reuse it everywhere a heavy step is invoked:
 
 ```bash
-NEGATIVE_PROMPT="G-clamp, bar clamp, pipe clamp, vise, pliers, multiple objects, distorted, deformed, blurry, text, watermark" \
-CFG_SCALE=5.5 \
-STEPS=70 \
-./scripts/txt2img.sh "single black cast iron C-clamp on white seamless background, deep U-shaped throat, threaded steel screw spindle with T-bar handle at the bottom, swivel pad on spindle tip facing up into the throat, smooth flat anvil at top, isolated centered, soft studio lighting, sharp focus on threading, 4k industrial catalog photograph"
+EVICT="curl -sS -X POST $API_BASE/v1/runner/servers/evict-all \
+    -H 'Authorization: Bearer $LLMMLL_AUTH_TOKEN' && sleep 5"
 ```
 
-### Example: force decomposition along specific regions
-
-Inline (small box lists):
-
-```bash
-AABB='[[[-1,-1,-1],[-0.2,1,1]], [[-0.2,-1,-1],[0.2,1,1]], [[0.2,-1,-1],[1,1,1]]]' \
-  ./scripts/mesh2parts.sh /tmp/mesh.glb 256
-# → splits the mesh into 3 parts along the X axis
-#   (left third / middle / right third), P3-SAM skipped
-```
-
-From file (large box lists):
-
-```bash
-cat > /tmp/parts.json <<JSON
-[
-  [[-1.0, -1.0, -1.0], [-0.2,  1.0,  1.0]],
-  [[-0.2, -1.0, -1.0], [ 0.2,  1.0,  1.0]],
-  [[ 0.2, -1.0, -1.0], [ 1.0,  1.0,  1.0]]
-]
-JSON
-AABB_FILE=/tmp/parts.json ./scripts/mesh2parts.sh /tmp/mesh.glb 256
-```
+When `$4` (the `evict` arg) is `false` the user has asserted nothing
+else is resident — omit the prefix.  Skip the prefix for txt2img
+(Step 3, lightweight) and rembg (Step 5, in-process auto-unload);
+they don't need it.  All other heavy invocations should be
+`$EVICT && script.sh …`.
 
 ## Workflow
 
@@ -205,25 +160,14 @@ confirmed.
 
 ### Step 3 — Run txt2img
 
-IF `$3`, RUN EXACTLY THIS:
-
-```bash
-curl -sS -X POST "$API_BASE/v1/runner/servers/evict-all" \
-    -H "Authorization: Bearer $LLMMLL_AUTH_TOKEN" && \
-    sleep 5 && \  # give the runner a moment to recover if eviction happened
-    API_BASE="$API_BASE" OUT_DIR="$OUT_DIR" \
-    .claude/skills/generate-3d/scripts/txt2img.sh "<prompt>"
-```
-
-ELSE:
-
 ```bash
 API_BASE="$API_BASE" OUT_DIR="$OUT_DIR" \
   .claude/skills/generate-3d/scripts/txt2img.sh "<prompt>"
 ```
 
-The script writes ``<OUT_DIR>/txt2img_<ts>.png`` and prints the path
-on its last line.  Capture it.
+No eviction prefix — txt2img is lightweight.  The script writes
+``<OUT_DIR>/txt2img_<ts>.png`` and prints the path on its last line.
+Capture it.
 
 ### Step 4 — Show and confirm the image
 
@@ -253,23 +197,10 @@ primary image — useful for style transfer with anchor, identity
 preservation, palette matching, or compositional borrowing.  See
 ``Multi-image edits`` in `./generate_3d_models.md`.
 
-IF `$3`, RUN EXACTLY THIS:
-
 ```bash
-API_BASE="$API_BASE" OUT_DIR="$OUT_DIR" \
+$EVICT && API_BASE="$API_BASE" OUT_DIR="$OUT_DIR" \
   .claude/skills/generate-3d/scripts/img2img.sh <last_image.png> "<edit prompt>" \
   qwen-image-edit-2511 0.75
-```
-
-ELSE:
-
-```bash
-curl -sS -X POST "$API_BASE/v1/runner/servers/evict-all" \
-    -H "Authorization: Bearer $LLMMLL_AUTH_TOKEN" && \
-    sleep 5 && \  # give the runner a moment to recover if eviction happened
-    API_BASE="$API_BASE" OUT_DIR="$OUT_DIR" \
-    .claude/skills/generate-3d/scripts/img2img.sh <last_image.png> "<edit prompt>" \
-    qwen-image-edit-2511 0.75
 ```
 
 Show the result, loop back to Step 4.
@@ -291,21 +222,9 @@ if it's wrong, the right fix is usually to refine the input image
 
 ### Step 6 — 3D generation (heavy step)
 
-IF `$3`, RUN EXACTLY THIS:
-
 ```bash
-curl -sS -X POST "$API_BASE/v1/runner/servers/evict-all" \
-    -H "Authorization: Bearer $LLMMLL_AUTH_TOKEN" && \
-    sleep 5 && \  # give the runner a moment to recover if eviction happened
-    API_BASE="$API_BASE" OUT_DIR="$OUT_DIR" \
-    .claude/skills/generate-3d/scripts/img2-3d.sh <cutout.png>
-```
-
-ELSE:
-
-```bash
-API_BASE="$API_BASE" OUT_DIR="$OUT_DIR" \
-    .claude/skills/generate-3d/scripts/img2-3d.sh <cutout.png>
+$EVICT && API_BASE="$API_BASE" OUT_DIR="$OUT_DIR" \
+  .claude/skills/generate-3d/scripts/img2-3d.sh <cutout.png>
 ```
 
 The script writes ``<OUT_DIR>/<id>.glb``.  **Tell the user this
@@ -334,10 +253,7 @@ via `AskUserQuestion`.
 
 
 ```bash
-curl -sS -X POST "$API_BASE/v1/runner/servers/evict-all" \
-    -H "Authorization: Bearer $LLMMLL_AUTH_TOKEN" && \
-    sleep 5 && \  # give the runner a moment to recover if eviction happened
-    API_BASE="$API_BASE" OUT_DIR="$OUT_DIR" \
+$EVICT && API_BASE="$API_BASE" OUT_DIR="$OUT_DIR" \
   .claude/skills/generate-3d/scripts/mesh2parts.sh <mesh.glb> 256 42
 ```
 

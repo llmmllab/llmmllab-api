@@ -1,5 +1,21 @@
 # Generating 3D models from text — end-to-end pipeline
 
+## Contents
+
+- [Quick start: validated end-to-end run](#quick-start-validated-end-to-end-run-2026-05-24)
+- [Prompting strategy](#prompting-strategy) — per-step (txt2img, img2img, rembg, img23d)
+- [Automated pipelining](#automated-pipelining) — shell / Python / future server-side
+- [Optional 5th step: part decomposition](#optional-5th-step-part-decomposition-hunyuan3d-part)
+  - CLI, endpoint shape, supported input meshes
+  - [Parameter tuning](#parameter-tuning) — all env-var knobs for every script
+    - [txt2img / img2img knobs + multi-image edits](#txt2imgsh--img2imgsh-image-generation)
+    - [img2-3d knobs](#img2-3dsh-image--3d-mesh)
+    - [mesh2parts knobs](#mesh2partssh-mesh--per-part-meshes)
+    - [AABB / AABB_FILE — caller-driven decomposition](#aabb--aabb_file--caller-driven-part-decomposition)
+- [Operational notes](#operational-notes)
+- [Troubleshooting](#troubleshooting)
+- [See also](#see-also)
+
 A four-step pipeline that takes a text prompt and produces a textured 3D
 mesh suitable for use in Blender, Unity, three.js, or any glTF-capable
 viewer. Each step is a single HTTP request to llmmllab-api and is
