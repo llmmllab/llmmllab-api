@@ -7,9 +7,21 @@
 #   ./scripts/img2img.sh path/to/photo.png "make it autumn" qwen-image-edit-2511 0.75
 #
 # Env overrides:
-#   API_BASE   default http://localhost:8000
-#   API_KEY    bearer token; omit for unauth dev endpoints
-#   OUT_DIR    where to drop the decoded PNG (default ./out)
+#   API_BASE         default http://localhost:8000
+#   API_KEY          bearer token; omit for unauth dev endpoints
+#   OUT_DIR          where to drop the decoded PNG (default ./out)
+#   NEGATIVE_PROMPT  things to exclude from the edit.  Same idea as
+#                    txt2img.sh — useful for forcing the edit away
+#                    from specific failure modes (e.g. "blurry,
+#                    distorted, deformed, text, watermark").
+#   CFG_SCALE        prompt-faithfulness (default per yaml: 4.0).
+#                    Higher = more aggressive edit toward the prompt.
+#   STEPS            diffusion steps (default per yaml: 50).
+#   SAMPLER          sampler (default per yaml: dpm++_2m).
+#   SEED             integer seed (default -1 = random).
+#
+# Per-request body fields override the yaml defaults; leave a knob
+# unset to inherit the global config.
 
 set -euo pipefail
 
@@ -43,30 +55,57 @@ PNG_FILE="$OUT_DIR/img2img_${TS}.png"
 # ~128 KB; ``--rawfile`` reads the bytes from disk and avoids argv
 # pressure entirely.
 B64_FILE=$(mktemp -t img2img_b64.XXXXXX)
-trap 'rm -f "$B64_FILE"' EXIT
+BODY_FILE=$(mktemp -t img2img_body.XXXXXX)
+trap 'rm -f "$B64_FILE" "$BODY_FILE"' EXIT
 if base64 --help 2>&1 | grep -q -- '-w'; then
     base64 -w0 "$INPUT" > "$B64_FILE"
 else
     base64 < "$INPUT" | tr -d '\n' > "$B64_FILE"
 fi
 
-# Build the JSON body the same way — but feed the image bytes from
-# ``--rawfile`` and stream curl's body from a file too.
-BODY_FILE=$(mktemp -t img2img_body.XXXXXX)
-trap 'rm -f "$B64_FILE" "$BODY_FILE"' EXIT
-jq -n \
-    --arg prompt "$PROMPT" \
-    --rawfile image "$B64_FILE" \
-    --arg model "$MODEL" \
-    --argjson denoise "$DENOISE" \
-    '{prompt: $prompt, image: $image, model: $model, denoising_strength: $denoise}' \
-    > "$BODY_FILE"
+# Build the body incrementally so unset env vars stay absent from the
+# JSON (api treats absent fields as "use yaml default").
+JQ_ARGS=(
+    --arg prompt "$PROMPT"
+    --rawfile image "$B64_FILE"
+    --arg model "$MODEL"
+    --argjson denoise "$DENOISE"
+)
+JQ_EXPR='{prompt: $prompt, image: $image, model: $model, denoising_strength: $denoise}'
+
+add_str_field () {
+    local field="$1" value="${2:-}"
+    if [[ -n "$value" ]]; then
+        JQ_ARGS+=(--arg "$field" "$value")
+        JQ_EXPR="${JQ_EXPR%\}}, $field: \$$field}"
+    fi
+}
+add_num_field () {
+    local field="$1" value="${2:-}"
+    if [[ -n "$value" ]]; then
+        JQ_ARGS+=(--argjson "$field" "$value")
+        JQ_EXPR="${JQ_EXPR%\}}, $field: \$$field}"
+    fi
+}
+
+add_str_field negative_prompt "${NEGATIVE_PROMPT:-}"
+add_str_field sampler_name    "${SAMPLER:-}"
+add_num_field cfg_scale       "${CFG_SCALE:-}"
+add_num_field steps           "${STEPS:-}"
+add_num_field seed            "${SEED:-}"
+
+jq -n "${JQ_ARGS[@]}" "$JQ_EXPR" > "$BODY_FILE"
 
 echo "→ POST $API_BASE/v1/images/edits"
 echo "  input              = $INPUT ($(wc -c < "$INPUT") bytes)"
 echo "  prompt             = $PROMPT"
 echo "  model              = $MODEL"
 echo "  denoising_strength = $DENOISE"
+[[ -n "${NEGATIVE_PROMPT:-}" ]] && echo "  negative           = $NEGATIVE_PROMPT"
+[[ -n "${CFG_SCALE:-}"       ]] && echo "  cfg_scale          = $CFG_SCALE"
+[[ -n "${STEPS:-}"           ]] && echo "  steps              = $STEPS"
+[[ -n "${SAMPLER:-}"         ]] && echo "  sampler            = $SAMPLER"
+[[ -n "${SEED:-}"            ]] && echo "  seed               = $SEED"
 
 curl -sS -X POST "$API_BASE/v1/images/edits" \
     -H "Content-Type: application/json" \
