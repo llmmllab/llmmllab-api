@@ -268,13 +268,23 @@ def test_generate_3d_posts_to_pipeline_endpoint():
 
 
 def test_generate_3d_forwards_custom_formats_and_params():
+    """The TRELLIS-era ss_*/slat_* fields were dropped in favour of
+    Hunyuan3D-2.1's native sampling knobs.  Verify the native ones
+    reach the runner payload AND that unset ones don't show up at
+    all (so the runner-side ``_pick`` falls through to yaml defaults
+    rather than seeing a literal ``None``)."""
     client = _make_runner_client_for_img23d({"id": "x", "elapsed_sec": 0.1})
 
     _run(generate_3d(
         image_b64="aGVsbG8=",
         formats=["mesh", "gaussian"],
-        seed=99, ss_steps=20, slat_steps=18,
-        ss_cfg_strength=8.0, slat_cfg_strength=4.0,
+        seed=99,
+        num_inference_steps=60,
+        guidance_scale=8.0,
+        octree_resolution=512,
+        mc_level=-0.005,
+        box_v=1.02,
+        num_chunks=400000,
         client=client,
     ))
 
@@ -283,10 +293,31 @@ def test_generate_3d_forwards_custom_formats_and_params():
     payload = kwargs["json"]
     assert payload["formats"] == ["mesh", "gaussian"]
     assert payload["seed"] == 99
-    assert payload["ss_steps"] == 20
-    assert payload["slat_steps"] == 18
-    assert payload["ss_cfg_strength"] == 8.0
-    assert payload["slat_cfg_strength"] == 4.0
+    assert payload["num_inference_steps"] == 60
+    assert payload["guidance_scale"] == 8.0
+    assert payload["octree_resolution"] == 512
+    assert payload["mc_level"] == -0.005
+    assert payload["box_v"] == 1.02
+    assert payload["num_chunks"] == 400000
+
+
+def test_generate_3d_omits_unset_params_from_payload():
+    """Unset (None) sampling knobs are NOT serialised into the
+    payload — pipeline-side ``_pick`` is the right place to fall
+    through to yaml defaults; sending ``"steps": null`` would force
+    a cast attempt on None and silently break that chain."""
+    client = _make_runner_client_for_img23d({"id": "x", "elapsed_sec": 0.1})
+
+    _run(generate_3d(image_b64="aGVsbG8=", client=client))
+
+    http_client = client._get_client.return_value
+    _, kwargs = http_client.post.call_args
+    payload = kwargs["json"]
+    for absent in (
+        "num_inference_steps", "guidance_scale", "octree_resolution",
+        "mc_level", "box_v", "num_chunks",
+    ):
+        assert absent not in payload, f"{absent} should be omitted when not set"
 
 
 def test_generate_3d_propagates_runner_failure():

@@ -24,7 +24,7 @@ from the command line. No Python deps — just `bash`, `curl`, and `jq`.
 
 ## Common configuration
 
-All scripts honour the same environment variables:
+All scripts honour the same connectivity env vars:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
@@ -37,6 +37,49 @@ Each invocation writes:
 - A `<endpoint>_<unix-ts>.json` file with the raw response, useful for
   debugging or replaying.
 - A decoded `.png` (or `.glb`/`.ply`) sibling next to it.
+
+## Tuning per-request (override yaml defaults)
+
+Each script also exposes the underlying sampling / geometry knobs as
+env vars.  Leave any unset → script omits the field → api falls
+through to the per-model defaults in the runner's `.models.yaml`.
+Set them to override per-request.
+
+| Env var | Scripts | Purpose |
+|---|---|---|
+| `NEGATIVE_PROMPT` | txt2img, img2img | Things to exclude (e.g. `"G-clamp, blurry"` when prompting a C-clamp). **Almost always set this** for object-specific gens. |
+| `CFG_SCALE` | txt2img, img2img | Classifier-free guidance.  Yaml default 4.0; bump to 5-7 for stubborn-geometry industrial objects, 8+ if the model still resists.  Too high washes out aesthetics. |
+| `STEPS` | txt2img, img2img, img2-3d, mesh2parts | Diffusion sampling steps.  Higher = finer detail, linear cost.  Yaml defaults: 50 (qwen-image), 50 (Hunyuan3D DiT), 50 (XPart DiT). |
+| `SAMPLER` | txt2img, img2img | Sampler name.  Yaml default `dpm++_2m`.  Also: `euler`, `dpm++_sde`, `unipc`, `dpmpp_2m_sde`. |
+| `SEED` | all | Integer seed for reproducible runs.  -1 = random. |
+| `GUIDANCE_SCALE` | img2-3d, mesh2parts | CFG for the 3D pipelines.  img23d default 7.5; bump if image fidelity is low; lower if you see spikes/floaters. |
+| `OCTREE_RESOLUTION` | img2-3d | Marching-cubes resolution.  Yaml default 384.  256 = fast iteration, 512 = high-fidelity.  Quadratic memory. |
+| `MC_LEVEL`, `BOX_V`, `NUM_CHUNKS` | img2-3d | Advanced MC tuning — see [generate_3d_models.md](../docs/generate_3d_models.md) for full descriptions. |
+| `MAX_PARTS` | mesh2parts | Cap on K parts.  Pipeline default 0 (no cap).  Set 8-15 if P3-SAM is detecting too many parts and OOMing the conditioner.  Ignored when `AABB_FILE` is set. |
+| `AABB_FILE` | mesh2parts | Path to a JSON file with shape `[K, 2, 3]` (K parts × min-corner + max-corner × xyz).  Bypasses P3-SAM auto-segmentation entirely — XPart decomposes exactly along your boundaries.  Coords in normalised mesh space (typically `[-1, 1]`). |
+
+**Worked example — stubborn mechanical object:**
+
+```bash
+NEGATIVE_PROMPT="G-clamp, bar clamp, vise, multiple objects, distorted, deformed, blurry" \
+CFG_SCALE=5.5 \
+STEPS=70 \
+./scripts/txt2img.sh "single black cast iron C-clamp on white seamless background, deep throat, threaded screw spindle with T-bar at bottom, swivel pad at tip, isolated centered, 4k industrial catalog"
+```
+
+**Worked example — caller-driven mesh decomposition:**
+
+```bash
+cat > /tmp/parts.json <<JSON
+[
+  [[-1.0, -1.0, -1.0], [-0.2,  1.0,  1.0]],
+  [[-0.2, -1.0, -1.0], [ 0.2,  1.0,  1.0]],
+  [[ 0.2, -1.0, -1.0], [ 1.0,  1.0,  1.0]]
+]
+JSON
+AABB_FILE=/tmp/parts.json ./scripts/mesh2parts.sh /tmp/mesh.glb 256
+# → 3 parts along the X axis, P3-SAM auto-segmentation skipped
+```
 
 ## `txt2img.sh`
 

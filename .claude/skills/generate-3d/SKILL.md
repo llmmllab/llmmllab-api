@@ -62,6 +62,72 @@ else.
 `OUT_DIR` comes from `$2`, the Step 1 interview, or a sensible
 default derived from the subject description.
 
+## Pipeline tuning knobs (env vars passed to each script)
+
+Each script accepts optional env vars to tune the underlying model
+per request.  Unset → script omits the field, api falls through to
+the per-model defaults in the runner's ``.models.yaml``.  Set any
+of them right before the script call to override.
+
+Use these aggressively when the model is producing bad output —
+they're the difference between a workable result and a useless one,
+especially on objects the model hasn't seen often (industrial /
+mechanical / niche shapes).
+
+### txt2img.sh + img2img.sh
+
+| Env var | Purpose | When to use |
+|---|---|---|
+| `NEGATIVE_PROMPT` | Exclude specific concepts | **Almost always set this** for object-specific gens.  E.g. ``"G-clamp, vise"`` when prompting for a C-clamp; ``"blurry, distorted, deformed, text, watermark"`` always.  Models confuse similar tools / classes constantly. |
+| `CFG_SCALE` | Prompt-faithfulness | Default 4.0.  Bump to 5-7 for stubborn-geometry objects (mechanical parts, technical illustrations).  Range 1.5-8.  Too high washes out aesthetics. |
+| `STEPS` | Diffusion steps | Default 50.  60-80 for fine detail in industrial / mechanical scenes.  Linear cost in time. |
+| `SAMPLER` | Sampler algorithm | Default ``dpm++_2m``.  Also valid: ``euler``, ``dpm++_sde``, ``unipc``, ``dpmpp_2m_sde``. |
+| `SEED` | RNG seed | -1 = random (default).  Set an int for reproducible regenerations of the same prompt. |
+
+### img2-3d.sh
+
+| Env var | Purpose | When to use |
+|---|---|---|
+| `SEED` | RNG seed | Default 42.  Lock for reproducible meshes. |
+| `STEPS` | Hunyuan3D DiT steps | Default 50.  Bump to 75-100 for finer geometry. |
+| `GUIDANCE_SCALE` | CFG for the 3D DiT | Default 7.5.  Try 4-7 if you see over-extrusion / spikes; 8-10 to chase the image harder. |
+| `OCTREE_RESOLUTION` | Marching-cubes res | Default 384.  256 = fast iteration, 512 = high-fidelity.  Quadratic memory. |
+| `MC_LEVEL` | MC iso-level | Default ``-1/512``.  More negative thickens output; positive thins (and risks holes). |
+| `BOX_V` | SDF bbox scale | Default 1.01.  Rarely needs tuning. |
+| `NUM_CHUNKS` | SDF eval chunk | Default 8000.  Bump to 400000 if you have VRAM headroom. |
+
+### mesh2parts.sh
+
+| Env var | Purpose | When to use |
+|---|---|---|
+| `STEPS` | XPart DiT steps | Yaml default 50.  Higher → finer per-part geometry. |
+| `GUIDANCE_SCALE` | XPart CFG | Bump if the model produces merged or smoothed parts. |
+| `MAX_PARTS` | Cap on K parts | Pipeline default 0 (no cap).  P3-SAM can detect 20-50+ on dense meshes which can OOM the conditioner — set to 8-15 for safer runs.  Ignored when ``AABB_FILE`` is set. |
+| `AABB_FILE` | Caller-specified region boxes | Path to a JSON file with shape ``[K, 2, 3]``: K parts, each with min-corner ``[x, y, z]`` and max-corner ``[x, y, z]`` in the mesh's normalised coordinate space ([-1, 1] usually works).  **Bypasses P3-SAM auto-segmentation entirely** — XPart decomposes exactly along your boundaries.  Use when auto-seg merges parts you want separate, or when you already know the layout (CAD, hand-marked reference). |
+
+### Example: stubborn industrial object (C-clamp)
+
+```bash
+NEGATIVE_PROMPT="G-clamp, bar clamp, pipe clamp, vise, pliers, multiple objects, distorted, deformed, blurry, text, watermark" \
+CFG_SCALE=5.5 \
+STEPS=70 \
+./scripts/txt2img.sh "single black cast iron C-clamp on white seamless background, deep U-shaped throat, threaded steel screw spindle with T-bar handle at the bottom, swivel pad on spindle tip facing up into the throat, smooth flat anvil at top, isolated centered, soft studio lighting, sharp focus on threading, 4k industrial catalog photograph"
+```
+
+### Example: force decomposition along specific regions
+
+```bash
+cat > /tmp/parts.json <<JSON
+[
+  [[-1.0, -1.0, -1.0], [-0.2,  1.0,  1.0]],
+  [[-0.2, -1.0, -1.0], [ 0.2,  1.0,  1.0]],
+  [[ 0.2, -1.0, -1.0], [ 1.0,  1.0,  1.0]]
+]
+JSON
+AABB_FILE=/tmp/parts.json ./scripts/mesh2parts.sh /tmp/mesh.glb 256
+# → splits mesh into 3 parts along the X axis (left third, middle, right third)
+```
+
 ## Workflow
 
 ### Step 1 — Interview
