@@ -153,12 +153,57 @@ async def createImageEdit(body: CreateImageEditRequest, request: Request) -> Ima
     )
 
 
+class CreateImageRequestExtra(CreateImageRequest):
+    """OpenAI's ``CreateImageRequest`` + sd-server sampling knobs.
+
+    OpenAI's canonical request omits the diffusion-side controls
+    (negative_prompt, cfg_scale, steps, sampler) because their
+    hosted models don't expose them.  Our backend (stable-
+    diffusion.cpp via sd-server) does, so we extend the schema
+    here.  Fields default to ``None`` → falls through to per-model
+    defaults in ``.models.yaml`` (resolved by
+    ``_resolve_sd_defaults`` in image_service).  Pass any of them
+    in the body to override per-request — same shape the
+    ``/edits`` endpoint already accepts.
+    """
+
+    negative_prompt: Optional[str] = Field(None)
+    cfg_scale: Optional[float] = Field(
+        None,
+        ge=0.0,
+        description=(
+            "Classifier-free guidance scale.  Higher = stronger adherence "
+            "to the prompt at the cost of aesthetic fidelity.  For "
+            "qwen-image the model default is 4.0; bump to 5-7 for "
+            "stubborn-geometry objects (mechanical parts, technical "
+            "illustrations).  None → use the model's yaml default."
+        ),
+    )
+    steps: Optional[int] = Field(
+        None,
+        ge=1,
+        description="Diffusion sampling steps.  None → model default.",
+    )
+    sampler_name: Optional[str] = Field(
+        None,
+        description=(
+            "Sampler name.  Valid options depend on the sd-server build "
+            "but typically include ``euler``, ``dpm++_2m``, ``dpm++_sde``, "
+            "``unipc``, ``dpmpp_2m_sde``.  None → model default."
+        ),
+    )
+    seed: Optional[int] = Field(
+        -1, description="Integer seed.  -1 = random (default)."
+    )
+
+
 @router.post("/generations")
-async def createImage(body: CreateImageRequest, request: Request) -> ImagesResponse:
+async def createImage(body: CreateImageRequestExtra, request: Request) -> ImagesResponse:
     """Generate an image from a prompt using a runner-hosted SD model.
 
-    Defaults are tuned for the Qwen-Image-2512-GGUF Q4_K_M tutorial:
-    40 inference steps, cfg_scale 2.5, sampler ``euler``, 1024×1024.
+    Defaults come from the runner's ``.models.yaml`` entry; per-request
+    overrides via ``negative_prompt`` / ``cfg_scale`` / ``steps`` /
+    ``sampler_name`` / ``seed`` win when present.
     """
     if not body.model:
         raise HTTPException(
@@ -172,8 +217,13 @@ async def createImage(body: CreateImageRequest, request: Request) -> ImagesRespo
         result = await generate_image(
             prompt=body.prompt,
             model_id=body.model,
+            negative_prompt=body.negative_prompt,
             width=width,
             height=height,
+            steps=body.steps,
+            cfg_scale=body.cfg_scale,
+            sampler_name=body.sampler_name,
+            seed=body.seed if body.seed is not None else -1,
             batch_size=body.n or 1,
             user_id=get_user_id(request),
         )
