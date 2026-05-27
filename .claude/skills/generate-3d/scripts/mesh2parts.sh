@@ -4,35 +4,53 @@
 #
 # Two-step interaction, mirroring img2-3d.sh:
 #
-#   1. POST /v1/images/3d/parts        — submit the input mesh (base64-encoded
-#                                        .glb), get back per-part download URLs
-#   2. GET  /v1/images/3d/parts/{file}  — stream each .glb output (per-part files
-#                                        plus exploded / bbox / gt_bbox views)
-#                                        back through the api so clients don't
-#                                        need pod access
+#   1. POST /v1/images/3d/parts         — submit the input mesh
+#                                         (base64-encoded .glb), get back
+#                                         per-part download URLs
+#   2. GET  /v1/images/3d/parts/{file}  — stream each .glb output
+#                                         (per-part files + decomposed /
+#                                         exploded / bbox / gt_bbox
+#                                         views) back through the api
 #
-# Each detected part is exported as its own ``<id>_part_NN.glb`` so you can
-# drop them straight into Blender / three.js / Unity as separate objects
-# without post-processing the combined decomposed.glb.  This script no
-# longer takes a ``split`` toggle — split mode is always on; the assembled
-# ``<id>_decomposed.glb`` is still produced alongside the per-part files
-# so callers who want the joined mesh still have it.
+# Each detected part is exported as its own ``<id>_part_NN.glb`` so you
+# can drop them straight into Blender / three.js / Unity as separate
+# objects.  Split mode is always on; the combined ``<id>_decomposed.glb``
+# is still produced alongside.
 #
 # Usage:
-#   ./mesh2parts.sh path/to/mesh.glb
-#   ./mesh2parts.sh path/to/mesh.glb 256              # lower-res
-#   ./mesh2parts.sh path/to/mesh.glb 512 42           # seed
+#   ./scripts/mesh2parts.sh path/to/mesh.glb
+#   ./scripts/mesh2parts.sh path/to/mesh.glb 256              # lower res
+#   ./scripts/mesh2parts.sh path/to/mesh.glb 512 42           # seed
 #
 # Positional args:
 #   1. input mesh .glb (required) — typically the output of img2-3d.sh
-#   2. octree_resolution (default 512; valid 128 or higher)
-#   3. seed (optional; empty string skips)
+#   2. octree_resolution (default 512; 128+ valid)
+#   3. seed (optional)
 #
-# Env overrides:
-#   API_BASE   default http://localhost:8000
-#   API_KEY    bearer token; omit for unauth dev endpoints
-#   OUT_DIR    where to drop the decoded .glb files + JSON response
-#              (default ./out)
+# Env overrides — unset = use yaml defaults:
+#   API_BASE          default http://localhost:8000
+#   API_KEY           bearer token; omit for unauth dev endpoints
+#   OUT_DIR           where to drop output .glb files (default ./out)
+#   STEPS             XPart DiT inference steps (yaml default 50).
+#   GUIDANCE_SCALE    Classifier-free guidance.  Bumping helps when
+#                     the model produces overly-smoothed or merged
+#                     parts.
+#   MAX_PARTS         Hard cap on K = number of parts the conditioner
+#                     attends over.  P3-SAM can return 20-50+ on dense
+#                     meshes which overflows ~7-8 GB of cross-attention
+#                     activation on a 24 GB card.  Safe range 8-15; set
+#                     0 to disable capping (only if your mesh has few
+#                     natural parts or you have headroom).  Ignored
+#                     when AABB_FILE is set.
+#   AABB_FILE         Path to a JSON file containing caller-specified
+#                     bounding boxes.  Bypasses P3-SAM auto-detection
+#                     entirely — XPart uses your boxes directly.
+#                     File contents: a JSON list shape [K, 2, 3]
+#                     (K parts, each with min-corner [x,y,z] + max-corner
+#                     [x,y,z]).  Mesh coords are normalised to a unit
+#                     cube around the centroid internally, so feeding
+#                     coords in [-1, 1] usually works.
+#                     Example: [[[-0.5,-0.5,-0.5],[0.5,0.5,0.5]]]  # one box
 
 set -euo pipefail
 
@@ -78,9 +96,35 @@ JQ_ARGS=(
     --argjson octree "$OCTREE"
 )
 JQ_EXPR='{mesh_b64: $mesh, octree_resolution: $octree, split: true}'
+
 if [[ -n "$SEED" ]]; then
     JQ_ARGS+=(--argjson seed "$SEED")
-    JQ_EXPR='{mesh_b64: $mesh, octree_resolution: $octree, split: true, seed: $seed}'
+    JQ_EXPR="${JQ_EXPR%\}}, seed: \$seed}"
+fi
+
+add_num_field () {
+    local field="$1" value="${2:-}"
+    if [[ -n "$value" ]]; then
+        JQ_ARGS+=(--argjson "$field" "$value")
+        JQ_EXPR="${JQ_EXPR%\}}, $field: \$$field}"
+    fi
+}
+
+add_num_field num_inference_steps "${STEPS:-}"
+add_num_field guidance_scale      "${GUIDANCE_SCALE:-}"
+add_num_field max_parts           "${MAX_PARTS:-}"
+
+# Caller-supplied bounding boxes via --slurpfile (raw JSON pass-through).
+if [[ -n "${AABB_FILE:-}" ]]; then
+    if [[ ! -f "$AABB_FILE" ]]; then
+        echo "✘ AABB_FILE not found: $AABB_FILE" >&2
+        exit 1
+    fi
+    # ``--slurpfile`` reads the file as a single value into the named
+    # arg; ``[0]`` unwraps the slurp's outer array if the file already
+    # is a JSON array (the common case).
+    JQ_ARGS+=(--slurpfile _aabb "$AABB_FILE")
+    JQ_EXPR="${JQ_EXPR%\}}, aabb: \$_aabb[0]}"
 fi
 
 jq -n "${JQ_ARGS[@]}" "$JQ_EXPR" > "$BODY_FILE"
@@ -88,7 +132,11 @@ jq -n "${JQ_ARGS[@]}" "$JQ_EXPR" > "$BODY_FILE"
 echo "→ POST $API_BASE/v1/images/3d/parts"
 echo "  input             = $INPUT ($(wc -c < "$INPUT") bytes)"
 echo "  octree_resolution = $OCTREE"
-[[ -n "$SEED" ]] && echo "  seed              = $SEED"
+[[ -n "$SEED"                  ]] && echo "  seed                = $SEED"
+[[ -n "${STEPS:-}"             ]] && echo "  num_inference_steps = $STEPS"
+[[ -n "${GUIDANCE_SCALE:-}"    ]] && echo "  guidance_scale      = $GUIDANCE_SCALE"
+[[ -n "${MAX_PARTS:-}"         ]] && echo "  max_parts           = $MAX_PARTS"
+[[ -n "${AABB_FILE:-}"         ]] && echo "  aabb                = (from $AABB_FILE)"
 echo "  (XPart can take several minutes; no streaming)"
 
 HTTP_STATUS=$(curl -sS -X POST "$API_BASE/v1/images/3d/parts" \
@@ -145,14 +193,11 @@ download exploded   "$EXPLODED_URL"
 download bbox       "$BBOX_URL"
 download gt_bbox    "$GT_BBOX_URL"
 
-# Per-part .glb files.  Names are ``<id>_part_NN.glb`` to match what
-# the runner writes, so re-running the script idempotently overwrites
-# in place.
+# Per-part .glb files.
 N=$(jq -r '.part_urls | length' "$RESP_FILE")
 echo "  parts        = $N"
 for i in $(seq 0 $((N-1))); do
     PART_URL=$(jq -r ".part_urls[$i]" "$RESP_FILE")
-    # Mirror the runner's two-digit-pad to match the original filename.
     PART_LABEL=$(printf "part_%02d" "$i")
     download "$PART_LABEL" "$PART_URL"
 done

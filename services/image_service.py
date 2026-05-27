@@ -450,10 +450,12 @@ async def generate_3d(
     image_b64: str,
     formats: Optional[List[str]] = None,
     seed: int = 42,
-    ss_steps: int = 12,
-    slat_steps: int = 12,
-    ss_cfg_strength: float = 7.5,
-    slat_cfg_strength: float = 3.0,
+    num_inference_steps: Optional[int] = None,
+    guidance_scale: Optional[float] = None,
+    octree_resolution: Optional[int] = None,
+    mc_level: Optional[float] = None,
+    box_v: Optional[float] = None,
+    num_chunks: Optional[int] = None,
     client: Optional[RunnerClient] = None,
     user_id: Optional[str] = None,
 ) -> ImageTo3DResult:
@@ -469,12 +471,21 @@ async def generate_3d(
     payload: Dict[str, Any] = {
         "image_b64": image_b64,
         "seed": seed,
-        "ss_steps": ss_steps,
-        "slat_steps": slat_steps,
-        "ss_cfg_strength": ss_cfg_strength,
-        "slat_cfg_strength": slat_cfg_strength,
         "formats": formats or ["mesh"],
     }
+    # Native Hunyuan3D-2.1 sampling/MC knobs.  Pipeline-side
+    # ``_pick`` falls through to yaml defaults for any field we
+    # leave out, so only include non-None values here.
+    for k, v in (
+        ("num_inference_steps", num_inference_steps),
+        ("guidance_scale", guidance_scale),
+        ("octree_resolution", octree_resolution),
+        ("mc_level", mc_level),
+        ("box_v", box_v),
+        ("num_chunks", num_chunks),
+    ):
+        if v is not None:
+            payload[k] = v
 
     logger.info(
         "Submitting img23d request",
@@ -544,6 +555,10 @@ async def generate_3d_parts(
     octree_resolution: Optional[int] = None,
     seed: Optional[int] = None,
     split: bool = False,
+    num_inference_steps: Optional[int] = None,
+    guidance_scale: Optional[float] = None,
+    max_parts: Optional[int] = None,
+    aabb: Optional[List[List[List[float]]]] = None,
     client: Optional[RunnerClient] = None,
     user_id: Optional[str] = None,
 ) -> ImageTo3DPartsResult:
@@ -557,6 +572,19 @@ async def generate_3d_parts(
     Wall-clock is on the order of minutes per request (similar to the
     base Hunyuan3D-2.1 pipeline) so the queue lifecycle wraps the
     whole runner call.
+
+    Region isolation via ``aabb``:
+        Pass a list of axis-aligned bounding boxes, shape
+        ``[K, 2, 3]`` — K parts, each with min/max corners as
+        ``[x, y, z]`` in the mesh's coordinate system.  When set,
+        XPart uses these directly instead of running P3-SAM's
+        auto-segmentation, so the caller can force decomposition
+        along specific regions (e.g. "here's where the head is,
+        here's the torso, here's the legs").  Mesh coordinates are
+        normalised internally; bounding-box coordinates should be
+        in the same space the input mesh uses (P3-SAM normalises
+        the mesh to a unit cube around the centroid before
+        operating, so feeding [-1, 1] coords usually works).
     """
     cli = client or _default_client
     endpoint = await _pick_pipeline_endpoint(cli, "mesh2parts")
@@ -567,6 +595,14 @@ async def generate_3d_parts(
         payload["seed"] = int(seed)
     if split:
         payload["split"] = True
+    if num_inference_steps is not None:
+        payload["num_inference_steps"] = int(num_inference_steps)
+    if guidance_scale is not None:
+        payload["guidance_scale"] = float(guidance_scale)
+    if max_parts is not None:
+        payload["max_parts"] = int(max_parts)
+    if aabb is not None:
+        payload["aabb"] = aabb
 
     logger.info(
         "Submitting mesh2parts request",

@@ -1,19 +1,43 @@
 #!/usr/bin/env bash
 #
-# img2-3d.sh — exercise POST /v1/images/3d (TRELLIS pipeline).
+# img2-3d.sh — exercise POST /v1/images/3d (Hunyuan3D-2.1).
 #
-# Submits a conditioning image, waits for the synchronous TRELLIS run,
-# then downloads the resulting .glb (and .ply if requested) via the
-# api's /v1/images/3d/{filename} proxy endpoint.
+# Two-step interaction:
+#
+#   1. POST /v1/images/3d            — submit the conditioning image,
+#                                      get back paths + download URLs
+#   2. GET  /v1/images/3d/{filename} — stream the .glb mesh back through
+#                                      the api
 #
 # Usage:
 #   ./scripts/img2-3d.sh path/to/photo.png
 #   ./scripts/img2-3d.sh path/to/photo.png "mesh,gaussian"
 #
-# Env overrides:
-#   API_BASE   default http://localhost:8000
-#   API_KEY    bearer token; omit for unauth dev endpoints
-#   OUT_DIR    where to drop the response + downloaded artefacts (default ./out)
+# Env overrides — all default to "use the runner's per-model yaml
+# defaults" when unset.  Pass any of them to override per-request:
+#
+#   API_BASE             default http://localhost:8000
+#   API_KEY              bearer token; omit for unauth dev endpoints
+#   OUT_DIR              where to drop the response + artefacts (default ./out)
+#   SEED                 integer seed for reproducible runs (default 42)
+#   STEPS                Hunyuan3D DiT inference steps (yaml default 50).
+#                        Higher = finer detail at the cost of wall-clock.
+#   GUIDANCE_SCALE       Classifier-free guidance (yaml default 7.5).
+#                        Higher = stronger image-conditioning fidelity
+#                        but more prone to over-extrusion.  4-7 usually
+#                        prints cleaner geometry; 8-10 chases the image
+#                        harder but can introduce spikes / floaters.
+#   OCTREE_RESOLUTION    Marching-cubes resolution (yaml default 384).
+#                        256 = fast iteration, 512 = high-fidelity.
+#                        Quadratic memory cost.
+#   MC_LEVEL             Marching-cubes iso-level (yaml default -1/512).
+#                        More negative thickens output; positive thins
+#                        and risks holes.
+#   BOX_V                Bounding-box scale around the SDF (yaml default
+#                        1.01, rarely needs tuning).
+#   NUM_CHUNKS           SDF evaluation chunk size (yaml default 8000).
+#                        Bump to 400000 for faster output with VRAM
+#                        headroom.
 
 set -euo pipefail
 
@@ -54,21 +78,44 @@ fi
 # Convert "mesh,gaussian" → ["mesh","gaussian"]
 FORMATS_JSON=$(echo "$FORMATS" | jq -R 'split(",")')
 
-jq -n \
-    --rawfile img "$B64_FILE" \
-    --argjson formats "$FORMATS_JSON" \
-    '{image_b64: $img, formats: $formats}' \
-    > "$BODY_FILE"
+JQ_ARGS=(
+    --rawfile img "$B64_FILE"
+    --argjson formats "$FORMATS_JSON"
+)
+JQ_EXPR='{image_b64: $img, formats: $formats}'
+
+add_num_field () {
+    local field="$1" value="${2:-}"
+    if [[ -n "$value" ]]; then
+        JQ_ARGS+=(--argjson "$field" "$value")
+        JQ_EXPR="${JQ_EXPR%\}}, $field: \$$field}"
+    fi
+}
+
+add_num_field seed                "${SEED:-}"
+add_num_field num_inference_steps "${STEPS:-}"
+add_num_field guidance_scale      "${GUIDANCE_SCALE:-}"
+add_num_field octree_resolution   "${OCTREE_RESOLUTION:-}"
+add_num_field mc_level            "${MC_LEVEL:-}"
+add_num_field box_v               "${BOX_V:-}"
+add_num_field num_chunks          "${NUM_CHUNKS:-}"
+
+jq -n "${JQ_ARGS[@]}" "$JQ_EXPR" > "$BODY_FILE"
 
 echo "→ POST $API_BASE/v1/images/3d"
 echo "  input   = $INPUT ($(wc -c < "$INPUT") bytes)"
 echo "  formats = $FORMATS"
+[[ -n "${SEED:-}"              ]] && echo "  seed                = $SEED"
+[[ -n "${STEPS:-}"             ]] && echo "  num_inference_steps = $STEPS"
+[[ -n "${GUIDANCE_SCALE:-}"    ]] && echo "  guidance_scale      = $GUIDANCE_SCALE"
+[[ -n "${OCTREE_RESOLUTION:-}" ]] && echo "  octree_resolution   = $OCTREE_RESOLUTION"
+[[ -n "${MC_LEVEL:-}"          ]] && echo "  mc_level            = $MC_LEVEL"
+[[ -n "${BOX_V:-}"             ]] && echo "  box_v               = $BOX_V"
+[[ -n "${NUM_CHUNKS:-}"        ]] && echo "  num_chunks          = $NUM_CHUNKS"
 echo "  (this can take a few minutes; Hunyuan3D doesn't stream)"
 
 # Capture HTTP status separately so we can surface non-JSON bodies
 # (HTML error pages, plain-text upstream errors) before piping to jq.
-# Without this, jq fails with "Invalid numeric literal" or similar and
-# the real error from the api never surfaces.
 HTTP_STATUS=$(curl -sS -X POST "$API_BASE/v1/images/3d" \
     -H "Content-Type: application/json" \
     "${AUTH_HEADER[@]+"${AUTH_HEADER[@]}"}" \
@@ -113,9 +160,7 @@ if [[ -n "$PREVIEW" ]]; then
     echo "  preview      = $PREVIEW_FILE"
 fi
 
-# Pull each returned artefact through the api's download proxy.  The
-# .glb / .ply live on the runner pod's filesystem; the api streams them
-# back without needing kubectl access.
+# Pull each returned artefact through the api's download proxy.
 download_url() {
     local rel_url="$1"
     [[ -z "$rel_url" || "$rel_url" == "null" ]] && return

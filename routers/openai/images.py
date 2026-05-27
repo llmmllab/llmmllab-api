@@ -250,15 +250,74 @@ async def createImageVariation() -> ImagesResponse:
 
 
 class CreateImageTo3DRequest(BaseModel):
+    """Input for ``POST /v1/images/3d`` — image-to-3D via Hunyuan3D-2.1.
+
+    Sampling/geometry knobs all default to ``None``, which means
+    "fall through to per-model defaults from ``.models.yaml``".
+    Pass any field to override per-request.
+
+    The legacy ``ss_*`` / ``slat_*`` fields were TRELLIS-era params
+    that the Hunyuan3D-2.1 pipeline ignored anyway; they're gone.
+    """
+
     image_b64: str = Field(..., description="Base64-encoded conditioning image (PNG or JPEG)")
     seed: Optional[int] = Field(42, description="RNG seed for reproducible runs")
-    ss_steps: Optional[int] = Field(12, description="Sparse-structure sampler steps")
-    slat_steps: Optional[int] = Field(12, description="SLAT sampler steps")
-    ss_cfg_strength: Optional[float] = Field(7.5, description="Sparse-structure CFG strength")
-    slat_cfg_strength: Optional[float] = Field(3.0, description="SLAT CFG strength")
     formats: Optional[List[str]] = Field(
         default_factory=lambda: ["mesh"],
         description="Outputs to materialise. Allowed: 'mesh' (.glb), 'gaussian' (.ply)",
+    )
+    num_inference_steps: Optional[int] = Field(
+        None,
+        ge=1,
+        description=(
+            "Diffusion sampling steps for Hunyuan3D-2.1's DiT.  "
+            "Pipeline default 50; bump to 75-100 for finer detail "
+            "at the cost of wall-clock."
+        ),
+    )
+    guidance_scale: Optional[float] = Field(
+        None,
+        ge=0.0,
+        description=(
+            "Classifier-free guidance scale.  Pipeline default 7.5; "
+            "higher = stronger prompt-image fidelity but more prone "
+            "to over-extrusion artefacts."
+        ),
+    )
+    octree_resolution: Optional[int] = Field(
+        None,
+        ge=128,
+        description=(
+            "Marching-cubes octree resolution.  Pipeline default 384.  "
+            "Higher = finer mesh detail (quadratic memory cost); "
+            "256 is fast iteration, 512 is high-fidelity output."
+        ),
+    )
+    mc_level: Optional[float] = Field(
+        None,
+        description=(
+            "Marching-cubes iso-level.  Default is ``-1/512`` (slightly "
+            "below 0) which captures the SDF surface tightly.  Pushing "
+            "this more negative (e.g. ``-0.005``) thickens output "
+            "geometry; pushing positive thins it (and risks holes)."
+        ),
+    )
+    box_v: Optional[float] = Field(
+        None,
+        description=(
+            "Bounding-box scale around the SDF.  Default 1.01 — slight "
+            "expansion past the unit cube so marching cubes can close "
+            "off the edges cleanly.  Rarely needs tuning."
+        ),
+    )
+    num_chunks: Optional[int] = Field(
+        None,
+        ge=1,
+        description=(
+            "Marching-cubes evaluation chunk size — how many SDF "
+            "samples to evaluate per GPU call.  Default 8000; bump to "
+            "400000+ if you have VRAM headroom and want faster output."
+        ),
     )
 
 
@@ -287,11 +346,13 @@ async def createImageTo3D(body: CreateImageTo3DRequest, request: Request) -> Cre
         result = await generate_3d(
             image_b64=body.image_b64,
             seed=body.seed or 42,
-            ss_steps=body.ss_steps or 12,
-            slat_steps=body.slat_steps or 12,
-            ss_cfg_strength=body.ss_cfg_strength or 7.5,
-            slat_cfg_strength=body.slat_cfg_strength or 3.0,
             formats=body.formats or ["mesh"],
+            num_inference_steps=body.num_inference_steps,
+            guidance_scale=body.guidance_scale,
+            octree_resolution=body.octree_resolution,
+            mc_level=body.mc_level,
+            box_v=body.box_v,
+            num_chunks=body.num_chunks,
             user_id=get_user_id(request),
         )
     except ImageServiceError as e:
@@ -368,6 +429,49 @@ class CreateImageTo3DPartsRequest(BaseModel):
             "splitting the combined ``decomposed.glb`` scene."
         ),
     )
+    num_inference_steps: Optional[int] = Field(
+        None,
+        ge=1,
+        description=(
+            "XPart DiT sampling steps.  Pipeline default 50.  Higher = "
+            "finer per-part geometry at the cost of wall-clock."
+        ),
+    )
+    guidance_scale: Optional[float] = Field(
+        None,
+        description=(
+            "XPart classifier-free guidance scale.  Default depends on "
+            "the partformer config; bumping helps when the model "
+            "produces overly-smoothed or merged parts."
+        ),
+    )
+    max_parts: Optional[int] = Field(
+        None,
+        ge=0,
+        description=(
+            "Cap on the number of parts the conditioner attends over.  "
+            "P3-SAM can detect 20-50+ on dense fixture meshes, which "
+            "overflows the conditioner's cross-attention activation "
+            "(~7-8 GB per K=25).  Caller sets a tighter cap (8-15 is "
+            "the safe range) or 0 to disable capping.  Ignored when "
+            "``aabb`` is provided."
+        ),
+    )
+    aabb: Optional[List[List[List[float]]]] = Field(
+        None,
+        description=(
+            "OPTIONAL caller-specified bounding boxes — bypasses "
+            "P3-SAM's auto-segmentation entirely.  Shape ``[K, 2, 3]``: "
+            "K parts, each with min-corner ``[x, y, z]`` and max-corner "
+            "``[x, y, z]`` in the mesh's coordinate system.  P3-SAM "
+            "normalises the input mesh to a unit cube around the "
+            "centroid, so feeding coords in ``[-1, 1]`` typically "
+            "works.  Use this when auto-segmentation merges parts "
+            "you want kept separate, or when you know the exact "
+            "regions you want to isolate (e.g. wireframe-driven CAD "
+            "where the geometry is known up-front)."
+        ),
+    )
 
 
 class CreateImageTo3DPartsResponse(BaseModel):
@@ -433,6 +537,10 @@ async def createImageTo3DParts(
             octree_resolution=body.octree_resolution,
             seed=body.seed,
             split=bool(body.split),
+            num_inference_steps=body.num_inference_steps,
+            guidance_scale=body.guidance_scale,
+            max_parts=body.max_parts,
+            aabb=body.aabb,
             user_id=get_user_id(request),
         )
     except ImageServiceError as e:
