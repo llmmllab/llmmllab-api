@@ -165,6 +165,14 @@ class ModelParameters(BaseModel):
         ),
     ] = None
     """Maximum tokens to spend on reasoning (chain-of-thought) before generating final answer"""
+    reasoning_budget_message: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="Text llama.cpp injects before the closing think tag when reasoning_budget is exhausted; cues the model to wrap up",
+        ),
+    ] = None
+    """Text injected on budget exhaustion (passed to llama.cpp --reasoning-budget-message)"""
     flash_attention: Annotated[
         Optional[bool],
         Field(
@@ -253,6 +261,47 @@ class ModelParameters(BaseModel):
         ),
     ] = None
     """Host-memory prompt cache size in MiB. Active KV always lives in VRAM; this provides a RAM fallback for idle slots."""
+
+    ctx_checkpoints: Annotated[
+        Optional[int],
+        Field(
+            default=None,
+            description="Number of in-memory context checkpoints kept per slot (llama.cpp --ctx-checkpoints). "
+            "Each checkpoint is a snapshot of the KV cache at a given position, used to fast-restore "
+            "when a slot's prompt prefix matches a previous one.  Each snapshot is ~150 MiB on "
+            "Qwen3-27B Q6, so the per-slot RAM footprint is ``ctx_checkpoints * 150 MiB``.  "
+            "Higher = better cache hit on conversation branches; lower = less RAM + faster per-turn "
+            "restore.  llama.cpp default 8.  We previously hardcoded 32 — too aggressive for "
+            "multi-session workloads.",
+            ge=0,
+        ),
+    ] = None
+    """Number of in-memory KV checkpoints per slot (llama.cpp --ctx-checkpoints)."""
+
+    context_shift: Annotated[
+        Optional[bool],
+        Field(
+            default=None,
+            description="Whether llama.cpp shifts the context window when it overflows "
+            "(llama.cpp --context-shift / --no-context-shift).  When True, on overflow the "
+            "oldest tokens are dropped and generation continues; when False, the request "
+            "fails with a context-overflow error.  Default True.",
+        ),
+    ] = None
+    """Allow context shifting on overflow (llama.cpp --context-shift)."""
+
+    mirostat: Annotated[
+        Optional[int],
+        Field(
+            default=None,
+            description="Mirostat sampler mode (llama.cpp --mirostat).  0=disabled (use top_p / "
+            "top_k / min_p), 1=Mirostat v1, 2=Mirostat v2.  Adaptive sampling adds per-token "
+            "latency; usually leave at 0 unless you need perplexity-locked output.",
+            ge=0,
+            le=2,
+        ),
+    ] = None
+    """Mirostat sampler mode (llama.cpp --mirostat).  0 = disabled."""
 
     # ------------------------------------------------------------------
     # stable-diffusion.cpp / sd-server sampling defaults.
