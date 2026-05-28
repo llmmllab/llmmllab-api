@@ -59,6 +59,131 @@ def _get_file_extras(content_item: MessageContent) -> Dict[str, Any]:
 _THINK_TAG_RE = re.compile(r"</?think>", re.IGNORECASE)
 
 
+# How many of the most-recent ToolMessages to keep image data intact for.
+# Older ones get their base64 image blobs replaced with size stubs so they
+# stop occupying context window space.  Two is enough for the model to
+# correlate a current screenshot with the immediately-preceding state.
+_KEEP_RECENT_TOOL_IMAGES = 2
+
+# Catches base64 inside a data URI (e.g. ``data:image/png;base64,iVBOR...``).
+# We preserve the ``data:image/...;base64,`` prefix so the placeholder
+# stays recognisable as having been an image.
+_DATA_URI_IMAGE_RE = re.compile(
+    r"(data:image/[a-zA-Z0-9.+-]+;base64,)([A-Za-z0-9+/=]{200,})"
+)
+
+# Catches bare base64 image-sized runs (no data URI) anywhere in the text.
+# 2 KB lower bound on the base64 string excludes ordinary text and
+# short fingerprints while reliably catching real screenshots (smallest
+# practical PNG is well above this).
+_BARE_B64_BLOB_RE = re.compile(r"[A-Za-z0-9+/]{2000,}={0,2}")
+
+
+def _b64_stub(decoded_size_kb: int) -> str:
+    return f"[image redacted from older turn: ~{decoded_size_kb} KB base64]"
+
+
+def _redact_image_blobs_in_string(content: str) -> str:
+    """Replace large base64 runs in a tool-result string with size stubs.
+
+    Used to shrink older ``ToolMessage`` content so MCP servers that
+    return inline screenshots (FreeCAD ``get_view``, Blender viewport
+    captures, etc.) don't accumulate into context overflow over many
+    turns.  Recent images are left alone — see
+    :func:`_redact_old_tool_images`.
+    """
+    def _data_uri_repl(m: re.Match) -> str:
+        size_kb = (len(m.group(2)) * 3) // 4 // 1024  # approx decoded size
+        return f"{m.group(1)}{_b64_stub(size_kb)}"
+
+    def _bare_repl(m: re.Match) -> str:
+        size_kb = (len(m.group(0)) * 3) // 4 // 1024
+        return _b64_stub(size_kb)
+
+    content = _DATA_URI_IMAGE_RE.sub(_data_uri_repl, content)
+    return _BARE_B64_BLOB_RE.sub(_bare_repl, content)
+
+
+def _redact_image_blobs_in_content(
+    content: Union[str, List[Union[str, Dict[str, Any]]]],
+) -> Union[str, List[Union[str, Dict[str, Any]]]]:
+    """Apply :func:`_redact_image_blobs_in_string` to string or list content.
+
+    For list content, drops Anthropic-style ``image`` blocks entirely
+    (replacing each with a text block carrying the size stub) and
+    scrubs any base64 runs that appear inside text blocks.
+    """
+    if isinstance(content, str):
+        return _redact_image_blobs_in_string(content)
+
+    cleaned: List[Union[str, Dict[str, Any]]] = []
+    for item in content:
+        if isinstance(item, dict):
+            t = item.get("type")
+            if t == "image":
+                # Anthropic-style image block: {"type":"image","source":
+                # {"type":"base64","media_type":"image/png","data":"..."}}
+                src = item.get("source") or {}
+                data = src.get("data") or ""
+                size_kb = (len(data) * 3) // 4 // 1024
+                cleaned.append({"type": "text", "text": _b64_stub(size_kb)})
+            elif t == "image_url":
+                # OpenAI-style image_url block.
+                url = (item.get("image_url") or {}).get("url") or ""
+                size_kb = (len(url) * 3) // 4 // 1024
+                cleaned.append({"type": "text", "text": _b64_stub(size_kb)})
+            elif t == "text" and isinstance(item.get("text"), str):
+                cleaned.append(
+                    {**item, "text": _redact_image_blobs_in_string(item["text"])}
+                )
+            else:
+                cleaned.append(item)
+        elif isinstance(item, str):
+            cleaned.append(_redact_image_blobs_in_string(item))
+        else:
+            cleaned.append(item)
+    return cleaned
+
+
+def _redact_old_tool_images(messages: List[AnyMessage]) -> List[AnyMessage]:
+    """Strip large base64 image blobs from all but the most recent N tool messages.
+
+    MCP servers that return screenshots (FreeCAD's ``get_view``, Blender
+    viewport captures, image-generation pipelines) embed base64 inline,
+    and a single 1024×1024 PNG is ~85k tokens.  Three such calls
+    accumulated in history burns the context window without any actual
+    new information — the model only needs the *current* view, not
+    every prior one.
+
+    We keep the last :data:`_KEEP_RECENT_TOOL_IMAGES` tool messages
+    untouched; older ones get their base64 replaced with size stubs.
+    """
+    tool_indices = [
+        i for i, m in enumerate(messages) if isinstance(m, ToolMessage)
+    ]
+    if len(tool_indices) <= _KEEP_RECENT_TOOL_IMAGES:
+        return messages
+    to_scrub = tool_indices[: -_KEEP_RECENT_TOOL_IMAGES]
+    redacted_count = 0
+    for idx in to_scrub:
+        msg = messages[idx]
+        original = msg.content
+        scrubbed = _redact_image_blobs_in_content(original)
+        if scrubbed != original:
+            msg.content = scrubbed  # type: ignore[assignment]
+            redacted_count += 1
+    if redacted_count:
+        logger.info(
+            "Redacted base64 image blobs from older tool messages",
+            extra={
+                "redacted_messages": redacted_count,
+                "total_tool_messages": len(tool_indices),
+                "kept_recent": _KEEP_RECENT_TOOL_IMAGES,
+            },
+        )
+    return messages
+
+
 def _strip_think_tags_from_content(
     content_data: Union[str, List[Union[str, Dict[str, Any]]]],
 ) -> Union[str, List[Union[str, Dict[str, Any]]]]:
@@ -355,7 +480,10 @@ def messages_to_lc_messages(
             continue
 
         converted.append(lc_msg)
-    return converted
+
+    # Post-pass: scrub base64 image blobs out of older tool messages.
+    # See :func:`_redact_old_tool_images` for the rationale.
+    return _redact_old_tool_images(converted)
 
 
 def lc_messages_to_messages(

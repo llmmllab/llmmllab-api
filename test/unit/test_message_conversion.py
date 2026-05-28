@@ -420,3 +420,111 @@ class TestEdgeCases:
 
         result = get_most_recent_user_message_text(messages)
         assert result == "System message"  # Should fall back to last message
+
+
+class TestRedactOldToolImages:
+    """Verify that base64 image blobs in older ToolMessage content
+    get replaced with size stubs so they stop consuming context.
+    """
+
+    def _make_tool_msg(self, content) -> Message:
+        return Message(
+            role=MessageRole.TOOL,
+            content=[
+                MessageContent(
+                    type=MessageContentType.TEXT, text=content, url=None
+                )
+            ],
+            tool_calls=[
+                ToolCall(name="tool_result", args={}, execution_id="t1")
+            ],
+        )
+
+    def _b64_blob(self, kb: int) -> str:
+        # Each base64 char ≈ 0.75 decoded bytes → kb * 1024 bytes needs
+        # ceil(kb * 1024 / 0.75) chars; round up generously to clear the
+        # 2000-char regex floor.
+        return "A" * (kb * 1024 * 4 // 3 + 8)
+
+    def test_recent_tool_image_kept_intact(self):
+        """The latest tool message keeps its base64 image."""
+        b64 = self._b64_blob(50)
+        msgs = [self._make_tool_msg(b64)]
+
+        result = messages_to_lc_messages(msgs)
+        assert b64 in result[-1].content
+
+    def test_old_tool_image_redacted(self):
+        """Tool messages older than the keep-recent window get scrubbed."""
+        big_b64 = self._b64_blob(50)
+        msgs = [
+            self._make_tool_msg(big_b64),  # oldest — should be scrubbed
+            self._make_tool_msg("recent1"),
+            self._make_tool_msg("recent2"),
+        ]
+
+        result = messages_to_lc_messages(msgs)
+        tool_msgs = [m for m in result if isinstance(m, ToolMessage)]
+        assert len(tool_msgs) == 3
+        # Oldest no longer contains the raw base64.
+        assert big_b64 not in tool_msgs[0].content
+        assert "image redacted" in tool_msgs[0].content
+        # Recent ones untouched.
+        assert "recent1" in tool_msgs[1].content
+        assert "recent2" in tool_msgs[2].content
+
+    def test_data_uri_prefix_preserved_in_redacted_tool(self):
+        """Data URI prefix stays so the slot remains recognisable."""
+        big_b64 = self._b64_blob(50)
+        content = f"Got viewport: data:image/png;base64,{big_b64}"
+        msgs = [
+            self._make_tool_msg(content),
+            self._make_tool_msg("recent1"),
+            self._make_tool_msg("recent2"),
+        ]
+
+        result = messages_to_lc_messages(msgs)
+        oldest = [m for m in result if isinstance(m, ToolMessage)][0]
+        assert "data:image/png;base64," in oldest.content
+        assert big_b64 not in oldest.content
+
+    def test_small_base64_not_redacted(self):
+        """Short base64-looking strings (e.g. tokens, hashes) stay intact.
+
+        A 200-char alphanumeric run is well below the 2000-char threshold.
+        """
+        short = "A" * 200
+        msgs = [
+            self._make_tool_msg(short),
+            self._make_tool_msg("recent1"),
+            self._make_tool_msg("recent2"),
+        ]
+
+        result = messages_to_lc_messages(msgs)
+        oldest = [m for m in result if isinstance(m, ToolMessage)][0]
+        assert short in oldest.content
+
+    def test_non_tool_messages_untouched(self):
+        """User/assistant messages aren't candidates for scrubbing.
+
+        Even if an assistant message contains a large base64 blob (e.g.
+        an image-gen response), we leave it alone — only tool results
+        are sources of MCP-driven inline screenshots.
+        """
+        big_b64 = self._b64_blob(50)
+        msgs = [
+            Message(
+                role=MessageRole.ASSISTANT,
+                content=[
+                    MessageContent(
+                        type=MessageContentType.TEXT, text=big_b64, url=None
+                    )
+                ],
+            ),
+            self._make_tool_msg("t1"),
+            self._make_tool_msg("t2"),
+        ]
+
+        result = messages_to_lc_messages(msgs)
+        ai = [m for m in result if isinstance(m, AIMessage)][0]
+        assert big_b64 in ai.content
