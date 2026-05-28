@@ -514,7 +514,15 @@ class CompletionService:
                     and not acc.has_tool_calls
                     and client_tools
                     and (acc.has_content or acc.final_content)
-                    and acc.finish_reason not in ("stop", "length")
+                    # ``length`` is handled by maybe_continue_on_truncation
+                    # above; exclude it here so we don't double-fire.
+                    # ``stop`` used to be excluded too — but the
+                    # observed Claude Code failure mode is exactly
+                    # "model emits text describing the tool call but
+                    # doesn't actually invoke it, finishes with stop".
+                    # Letting the nudge prompt fire on stop is the
+                    # whole point of this branch.
+                    and acc.finish_reason != "length"
                 ):
                     async for event, acc in maybe_continue_on_missing_tool_call(
                         CompletionService._build_and_run,
@@ -535,8 +543,19 @@ class CompletionService:
                     and not acc.has_tool_calls
                     and not acc.final_content
                     and not acc.is_error
-                    and acc.finish_reason != "stop"
                 ):
+                    # Empty response with finish_reason="stop" is the
+                    # exact failure mode that surfaces in a Claude Code
+                    # session as "the model stopped mid-conversation":
+                    # the model emits EOS without producing any content
+                    # or tool calls, the api closes with stop_reason=
+                    # end_turn, and the client has nothing to render.
+                    # The retry below probes for stale runner handles
+                    # and resends the same prompt with the nudge — that's
+                    # exactly what's wanted here.  Previously this
+                    # branch was gated by ``finish_reason != "stop"``,
+                    # which silently skipped the retry for the most
+                    # common case.
                     model_num_ctx = await CompletionService._get_model_num_ctx(model_name)
                     if is_context_overflow(
                         acc.input_tokens,
@@ -665,9 +684,14 @@ class CompletionService:
                         model_parameters,
                     )
 
+            # ``length`` is the truncation branch (handled above by
+            # maybe_continue_on_truncation_nonstream); skip the nudge
+            # here to avoid double-firing.  ``stop`` is the exact
+            # failure mode we want the nudge for, so don't skip on
+            # that.  See streaming-path note further up.
             skip_continuation = (
                 result.chat_response
-                and result.chat_response.finish_reason in ("stop", "length")
+                and result.chat_response.finish_reason == "length"
             )
             if (
                 _CONTINUATION_ENABLED
@@ -693,8 +717,11 @@ class CompletionService:
                 not result.has_content
                 and not result.has_tool_calls
                 and not result.is_error
-                and (result.chat_response.finish_reason or "") != "stop"
             ):
+                # See streaming-path note above: the previous
+                # ``finish_reason != "stop"`` guard suppressed the
+                # retry on the dominant empty-turn failure mode where
+                # the model emits EOS with no content or tool calls.
                 primary_prompt_tokens = int(
                     result.chat_response.prompt_eval_count or 0
                 )
