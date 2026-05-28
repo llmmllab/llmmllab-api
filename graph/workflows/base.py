@@ -309,6 +309,29 @@ class GraphBuilder(ABC):
             task=model_def.task,
         )
 
+        # When thinking is enabled, inject the reasoning-budget tags per
+        # request so llama.cpp actually enforces the budget.  llama-server
+        # auto-populates these from the chat parser when the format supports
+        # thinking, but Qwen3.6's GGUF currently resolves to chat_format=
+        # Content-only (no autoparser match) so the auto-population is
+        # skipped and the budget check at sampling.cpp:296 short-circuits to
+        # "no limit".  Forcing the tags + token count here makes the budget
+        # enforce regardless of whether the chat parser recognised them.
+        # See llama.cpp tools/server/server-task.cpp:493–510.
+        chat_openai_extras: dict = {}
+        if (
+            effective_params
+            and getattr(effective_params, "think", False)
+            and getattr(effective_params, "reasoning_budget", None)
+        ):
+            chat_openai_extras["model_kwargs"] = {
+                "extra_body": {
+                    "reasoning_budget_tokens": effective_params.reasoning_budget,
+                    "reasoning_budget_start_tag": "<think>",
+                    "reasoning_budget_end_tag": "</think>",
+                }
+            }
+
         primary_model = ChatOpenAI(
             base_url=server_handle.base_url,
             api_key=SecretStr("none"),
@@ -320,6 +343,7 @@ class GraphBuilder(ABC):
             # baking one session's id into every request.  See
             # ``_inject_session_id_header`` above.
             http_async_client=_make_runner_http_client(),
+            **chat_openai_extras,
         )
         self.server_handle = server_handle
 

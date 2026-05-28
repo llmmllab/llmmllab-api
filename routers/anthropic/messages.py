@@ -403,6 +403,8 @@ async def stream_message(
 
     text_block_started = False
     text_block_index = 0
+    thinking_block_started = False
+    thinking_block_index = 0
     next_block_index = 0
     output_tokens = 0
     acc = StreamAccumulator()
@@ -422,6 +424,15 @@ async def stream_message(
         ):
             # ---- ServerToolEvent → emit as standard text content blocks ----
             if isinstance(event, ServerToolEvent):
+                if thinking_block_started:
+                    yield _sse(
+                        "content_block_stop",
+                        {
+                            "type": "content_block_stop",
+                            "index": thinking_block_index,
+                        },
+                    )
+                    thinking_block_started = False
                 if text_block_started:
                     yield _sse(
                         "content_block_stop",
@@ -475,10 +486,56 @@ async def stream_message(
                     output_tokens = int(event.eval_count)
                 continue
 
-            # Stream live text deltas
+            # Stream live text + thinking deltas
             if event.message and event.message.content:
                 for part in event.message.content:
+                    # Reasoning / thinking comes first (the model thinks
+                    # before answering).  Emit it as an Anthropic
+                    # ``thinking`` content block so the client can render
+                    # it instead of seeing silence for the whole reasoning
+                    # phase.  Closes itself the moment the first text
+                    # delta arrives below.
+                    if part.type == MessageContentType.THINKING and part.text:
+                        if not thinking_block_started:
+                            yield _sse(
+                                "content_block_start",
+                                {
+                                    "type": "content_block_start",
+                                    "index": next_block_index,
+                                    "content_block": {
+                                        "type": "thinking",
+                                        "thinking": "",
+                                    },
+                                },
+                            )
+                            thinking_block_index = next_block_index
+                            next_block_index += 1
+                            thinking_block_started = True
+                        yield _sse(
+                            "content_block_delta",
+                            {
+                                "type": "content_block_delta",
+                                "index": thinking_block_index,
+                                "delta": {
+                                    "type": "thinking_delta",
+                                    "thinking": part.text,
+                                },
+                            },
+                        )
+                        continue
+
                     if part.type == MessageContentType.TEXT and part.text:
+                        # First text delta closes any open thinking block —
+                        # Anthropic's protocol expects one block at a time.
+                        if thinking_block_started:
+                            yield _sse(
+                                "content_block_stop",
+                                {
+                                    "type": "content_block_stop",
+                                    "index": thinking_block_index,
+                                },
+                            )
+                            thinking_block_started = False
                         if not text_block_started:
                             yield _sse(
                                 "content_block_start",
@@ -554,6 +611,16 @@ async def stream_message(
         # "max_tokens" with zero output content is the closest signal
         # that the generation failed.  No text content is emitted.
         stop_reason = "max_tokens"
+
+    # Close any still-open thinking block (e.g. stream ended with only
+    # reasoning content and no answer — unusual but possible if budget
+    # exhausts at the very end).
+    if thinking_block_started:
+        yield _sse(
+            "content_block_stop",
+            {"type": "content_block_stop", "index": thinking_block_index},
+        )
+        thinking_block_started = False
 
     # Close the text block
     if text_block_started:

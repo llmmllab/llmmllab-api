@@ -243,6 +243,40 @@ class WorkflowExecutor:
                     if hasattr(chunk, "tool_call_chunks") and chunk.tool_call_chunks:
                         streaming_has_tool_call_chunks = True
 
+                    # -- Reasoning / thinking deltas --
+                    # llama-server with --reasoning on emits reasoning
+                    # tokens in ``delta.reasoning_content`` (separate from
+                    # ``delta.content``).  langchain-openai surfaces it on
+                    # the chunk's ``additional_kwargs`` (key varies by
+                    # version: ``reasoning_content`` or ``reasoning``).
+                    # We forward it as a MessageContentType.THINKING part so
+                    # the Anthropic SSE layer can translate it into a
+                    # ``thinking_delta`` block.  Without this the client
+                    # sees zero output during the entire reasoning phase
+                    # (which can be many seconds on a 27B model) and the
+                    # session looks hung.
+                    reasoning_delta = None
+                    add_kw = getattr(chunk, "additional_kwargs", None) or {}
+                    if isinstance(add_kw, dict):
+                        reasoning_delta = (
+                            add_kw.get("reasoning_content")
+                            or add_kw.get("reasoning")
+                        )
+                    if reasoning_delta:
+                        yield self._make_response(
+                            conversation_id,
+                            state,
+                            prev_state,
+                            message_kwargs={
+                                "content": [
+                                    MessageContent(
+                                        type=MessageContentType.THINKING,
+                                        text=reasoning_delta,
+                                    )
+                                ]
+                            },
+                        )
+
                     # -- Regular content tokens --
                     if chunk.content:
                         text_parts = parse_content(chunk.content)
