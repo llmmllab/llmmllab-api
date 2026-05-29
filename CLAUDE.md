@@ -148,7 +148,8 @@ All config is environment-based (`config.py`). Key variables:
 - `AUTH_ISSUER`, `AUTH_AUDIENCE`, `AUTH_JWKS_URI` — JWT auth
 - `TEST_USER_ID` — seeds a local dev user + API key on startup (saved to .env.local)
 - `HF_TOKEN` — HuggingFace model downloads
-- Cache eviction is controlled by the runner via `CACHE_TIMEOUT_MIN` and `EVICTION_TIMEOUT_MIN` env vars
+- `CACHE_TIMEOUT_MIN` (default `5`) — mirrors the runner's value. Used by `RunnerClient._select_runner` to decide when an idle loaded server is "abandoned" (safe to commandeer for a new session) vs "still in use by a paused session." Should match the runner.
+- Cache eviction itself is controlled on the runner side via `CACHE_TIMEOUT_MIN` (soft, default 5min) and `EVICTION_TIMEOUT_MIN` (hard, default 30min)
 - `ENABLE_TOOL_CONTINUATION` — force tool call if model describes but doesn't invoke (default true)
 - `CONTEXT_USAGE_SAFETY_MARGIN` — fraction of num_ctx reserved for conversation input (default 0.85)
 - `CONTEXT_MINIMUM_RATIO` — reject runner servers with less than this fraction of requested context (default 0.80)
