@@ -516,6 +516,42 @@ class CompletionService:
                 # 67-Slack-messages overnight loop (505b274). ``length``
                 # is handled by maybe_continue_on_truncation above.
                 _declared_intent = "[TOOL_INTENT:" in (acc.final_content or "")
+                # Log every turn's tool-intent classification so we can
+                # tell from logs whether the model is using the marker
+                # convention or just stopping cleanly without ever
+                # signalling tool use.  Three states matter:
+                #   marker_yes_call_yes → working as designed (no nudge needed)
+                #   marker_yes_call_no  → nudge fires (rescue path)
+                #   marker_no_call_no_finish_stop  → accepted as final answer
+                #   marker_no_call_no_finish_other → nudge fires (non-stop)
+                if (
+                    _CONTINUATION_ENABLED
+                    and client_tools
+                    and (acc.has_content or acc.final_content)
+                ):
+                    _classification = (
+                        "marker_yes_call_yes" if _declared_intent and acc.has_tool_calls
+                        else "marker_yes_call_no" if _declared_intent
+                        else "marker_no_call_yes" if acc.has_tool_calls
+                        else f"marker_no_call_no_finish_{acc.finish_reason or 'unknown'}"
+                    )
+                    logger.info(
+                        "Tool-intent classification",
+                        extra={
+                            "classification": _classification,
+                            "finish_reason": acc.finish_reason,
+                            "has_tool_calls": acc.has_tool_calls,
+                            "declared_intent": _declared_intent,
+                            "content_preview": (
+                                acc.final_content[:200] if acc.final_content else ""
+                            ),
+                            "will_nudge": (
+                                not acc.has_tool_calls
+                                and acc.finish_reason != "length"
+                                and (acc.finish_reason != "stop" or _declared_intent)
+                            ),
+                        },
+                    )
                 if (
                     _CONTINUATION_ENABLED
                     and not acc.has_tool_calls
@@ -698,6 +734,26 @@ class CompletionService:
                         if hasattr(block, "text") and block.text:
                             _nonstream_text += block.text
             _nonstream_declared_intent = "[TOOL_INTENT:" in _nonstream_text
+            _ns_finish = (
+                result.chat_response.finish_reason if result.chat_response else None
+            )
+            if client_tools and (result.has_content or result.has_tool_calls):
+                _ns_classification = (
+                    "marker_yes_call_yes" if _nonstream_declared_intent and result.has_tool_calls
+                    else "marker_yes_call_no" if _nonstream_declared_intent
+                    else "marker_no_call_yes" if result.has_tool_calls
+                    else f"marker_no_call_no_finish_{_ns_finish or 'unknown'}"
+                )
+                logger.info(
+                    "Tool-intent classification (non-stream)",
+                    extra={
+                        "classification": _ns_classification,
+                        "finish_reason": _ns_finish,
+                        "has_tool_calls": result.has_tool_calls,
+                        "declared_intent": _nonstream_declared_intent,
+                        "content_preview": _nonstream_text[:200],
+                    },
+                )
             skip_continuation = result.chat_response is not None and (
                 result.chat_response.finish_reason == "length"
                 or (
