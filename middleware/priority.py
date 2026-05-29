@@ -176,6 +176,27 @@ class PriorityMiddleware(BaseHTTPMiddleware):
             if not getattr(metadata, "model_id", None):
                 metadata.model_id = body_fields.model_id
 
+        # Pattern-based source demotion: OpenClaw's cron sessions all
+        # share the prompt_cache_key shape `agent:<name>:cron:<job>:run:<uuid>`.
+        # If the caller didn't set X-Request-Source explicitly AND the
+        # session matches that pattern, demote to SCHEDULED → LOW so
+        # interactive user turns aren't queued behind background work.
+        # No-op if the explicit header path already classified the request.
+        if (
+            not request.headers.get("X-Request-Source")
+            and not request.headers.get("X-Request-Priority")
+            and metadata.source == RequestSource.USER
+            and body_fields is not None
+            and body_fields.session_id
+            and ":cron:" in body_fields.session_id
+        ):
+            metadata.source = RequestSource.SCHEDULED
+            metadata.priority = Priority.LOW
+            logger.debug(
+                "demoted to SCHEDULED/LOW via cron session_id pattern",
+                extra={"session_id": metadata.session_id},
+            )
+
         request.state.request_priority_metadata = metadata
 
         token = set_session_id_ctx(metadata.session_id)
