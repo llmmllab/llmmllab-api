@@ -1158,27 +1158,24 @@ class RunnerClient:
         now = time.time()
 
         def _is_busy(hc: int, srv: Optional[dict]) -> bool:
+            """True iff this endpoint is *currently* handling a request
+            for the model. Used only to decide whether to TRIGGER Rule 1
+            fan-out; the "free peer" target check is _is_available which
+            requires use_count==0 + idle (and would never overlap with
+            this definition). 'Recently used within CACHE_TIMEOUT_MIN'
+            is NOT busy here — that case is fan-out target territory,
+            not a fan-out trigger."""
             if hc > 0:
                 return True
             if srv is None:
                 return False
-            # A server that's still loading (cold-start, ~30s) is busy too —
-            # it can't accept requests yet and the slot is reserved.
             if srv.get("starting"):
                 return True
-            # The runner-side use_count is the authoritative count of
-            # in-flight requests it's processing right now. It catches
-            # cases the api-side _active_handles misses (cross-replica,
-            # mid-release).
             if (srv.get("use_count") or 0) > 0:
                 return True
-            idle_since = srv.get("idle_since")
-            if idle_since is None:
-                return True  # actively serving a request right now
-            try:
-                return (now - float(idle_since)) < cache_timeout_sec
-            except (TypeError, ValueError):
-                return True  # malformed timestamp: assume busy to be safe
+            if srv.get("idle_since") is None:
+                return True
+            return False
 
         busy_endpoints = [
             ep for ep, _v, hc, srv in candidates if _is_busy(hc, srv)
