@@ -815,6 +815,22 @@ class RunnerClient:
         call falls back to ranking and resets the pin (in
         ``acquire_server`` on success).
         """
+        # Temporary forensic log: emit one line per selection so we can
+        # tell from logs exactly which path returns and why. Remove
+        # after the runner-fan-out behavior is verified in production.
+        logger.info(
+            "select_runner: start",
+            extra={
+                "model_id": model_id,
+                "endpoints": list(self._endpoints),
+                "global_sticky": self._last_endpoint_for_model.get(model_id),
+                "active_handles_for_model": [
+                    h.runner_host for h in self._active_handles
+                    if h.model_id == model_id
+                ],
+                "session_id_ctx": _session_id_ctx.get(),
+            },
+        )
         # --- Per-session sticky path ---------------------------------
         # Each concurrent session keeps its own pin so two sessions on
         # the same model converge on two different runners (instead of
@@ -842,6 +858,10 @@ class RunnerClient:
                     # turn-level serialisation).
                     self._last_endpoint_per_session.move_to_end(
                         (session_id, model_id)
+                    )
+                    logger.info(
+                        "select_runner: returning per-session sticky",
+                        extra={"endpoint": per_session, "session_id": session_id},
                     )
                     return per_session
                 # Per-session pin no longer eligible — drop it so we
@@ -911,7 +931,23 @@ class RunnerClient:
                     and (e, model_id) in self._model_tensor_split
                     for e in self._endpoints
                 )
+                logger.info(
+                    "select_runner: global-sticky path decision",
+                    extra={
+                        "sticky": sticky,
+                        "sticky_busy_for_model": sticky_busy_for_model,
+                        "alternatives_exist": alternatives_exist,
+                        "tensor_split_keys_for_model": [
+                            k for k in self._model_tensor_split.keys()
+                            if k[1] == model_id
+                        ],
+                    },
+                )
                 if not (sticky_busy_for_model and alternatives_exist):
+                    logger.info(
+                        "select_runner: returning global-sticky",
+                        extra={"endpoint": sticky},
+                    )
                     return sticky
             # Sticky endpoint no longer eligible — drop the pin so the
             # ranking below can choose freshly and ``acquire_server``
@@ -952,7 +988,30 @@ class RunnerClient:
             my_server = await self._find_loaded_server(endpoint, model_id)
             candidates.append((endpoint, vram, here_count, my_server))
 
+        logger.info(
+            "select_runner: candidates",
+            extra={
+                "model_id": model_id,
+                "candidates": [
+                    {
+                        "ep": ep,
+                        "vram": vram,
+                        "here_count": hc,
+                        "srv": (
+                            None if srv is None
+                            else {
+                                "model_id": srv.get("model_id"),
+                                "idle_since": srv.get("idle_since"),
+                            }
+                        ),
+                    }
+                    for ep, vram, hc, srv in candidates
+                ],
+            },
+        )
+
         if not candidates:
+            logger.info("select_runner: no candidates → None")
             return None
 
         # --- Rule 1: parallel-spawn over peer-blocked sticky -----------
@@ -994,9 +1053,20 @@ class RunnerClient:
             (ep, vram) for ep, vram, hc, srv in candidates
             if hc == 0 and srv is None
         ]
+        logger.info(
+            "select_runner: rule1 inputs",
+            extra={
+                "busy_endpoints": busy_endpoints,
+                "empty_endpoints": [e for e, _ in empty_endpoints],
+            },
+        )
         if busy_endpoints and empty_endpoints:
             # Pick the empty peer with most effective VRAM (best spawn target).
             empty_endpoints.sort(key=lambda x: x[1], reverse=True)
+            logger.info(
+                "select_runner: returning rule1 (parallel-spawn empty peer)",
+                extra={"endpoint": empty_endpoints[0][0]},
+            )
             return empty_endpoints[0][0]
 
         # --- Rule 2: prefer a warm idle server over spinning up a new --
