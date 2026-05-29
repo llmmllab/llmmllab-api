@@ -1315,6 +1315,7 @@ class TestPerSessionSticky:
         """
         from services.runner_client import RunnerClient, ServerHandle
         from utils.logging import _session_id_ctx
+        import time
 
         health = MagicMock(status_code=200)
         health.json.return_value = {
@@ -1322,7 +1323,31 @@ class TestPerSessionSticky:
             "gpu": {"0": {"free_mb": 12000}},
             "models": [{"id": "m1", "name": "m1", "task": "TextToText"}],
         }
-        mock = _mock_client(get=AsyncMock(return_value=health))
+        # /v1/servers — both runners have m1 loaded, in-flight
+        # (idle_since=None) so the per-session pin's cache-presence
+        # check passes. The pin's busy-escape will NOT fan-out because
+        # there is no empty peer in this scenario.
+        servers_resp = MagicMock(status_code=200)
+        servers_resp.json.return_value = {
+            "active_servers": 1,
+            "servers": [
+                {
+                    "server_id": "loaded",
+                    "model_id": "m1",
+                    "use_count": 1,
+                    "idle_since": None,
+                    "starting": False,
+                    "healthy": True,
+                }
+            ],
+        }
+
+        async def fake_get(url, **kw):
+            if "/v1/servers" in url:
+                return servers_resp
+            return health
+
+        mock = _mock_client(get=AsyncMock(side_effect=fake_get))
         client = RunnerClient(endpoints=["http://r1:8000", "http://r2:8000"])
         client._client = mock
         client._model_tensor_split = {
@@ -1458,18 +1483,15 @@ class TestSelectRunnerRules:
         assert chosen == "http://r2:8000"
 
     @pytest.mark.asyncio
-    async def test_rule1_loaded_peer_with_empty_alternative_fans_out(self):
-        """A loaded peer (busy OR warm-idle) plus an empty alternative
-        should fan out to the empty alternative.
+    async def test_rule2_long_idle_warm_server_wins(self):
+        """No busy peer, but r1 has a server idle past CACHE_TIMEOUT_MIN
+        → reuse it instead of spinning up on r2 (which has nothing).
 
-        Previously Rule 2 (`prefer warm-idle over spin-up`) hijacked
-        this case: when r1 had a server idle past CACHE_TIMEOUT_MIN
-        and r2 had nothing, r1 was reused instead of r2 being spun up.
-        Result: a runner that's still serving other models on the same
-        box stays pinned to the model under contention even when an
-        idle peer exists. Now Rule 1 catches "loaded peer + empty
-        alternative" and prefers the empty alternative for true
-        parallelism.
+        Per the routing contract: a warm-idle loaded server (idle ≥
+        CACHE_TIMEOUT_MIN, "abandoned" by the previous session) is the
+        right reuse target — Rule 1 only fans out to an empty peer when
+        the loaded peer is currently IN-USE. Cache reuse beats cold
+        spawn when there's no contention.
         """
         from config import CACHE_TIMEOUT_MIN
         import time
@@ -1483,14 +1505,14 @@ class TestSelectRunnerRules:
                     {"server_id": "s1", "model_id": "m1",
                      "healthy": True,
                      "idle_since": long_idle_since,
-                     "use_count": 5}
+                     "use_count": 0}
                 ])
             if "r2" in url and "/v1/servers" in url:
                 return self._servers_resp([])
             return MagicMock(status_code=404)
         client._client = _mock_client(get=AsyncMock(side_effect=fake_get))
         chosen = await client._select_runner("m1")
-        assert chosen == "http://r2:8000"
+        assert chosen == "http://r1:8000"
 
     @pytest.mark.asyncio
     async def test_rule2_short_idle_falls_through_to_ranked(self):

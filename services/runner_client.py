@@ -850,20 +850,97 @@ class RunnerClient:
                     for m in (health.get("models", []) if health else [])
                 }
                 if health and model_id in psession_ids:
-                    # Promote to LRU front and use it.  Don't apply the
-                    # busy-escape here: a session continuing its own
-                    # conversation SHOULD stay on its existing runner
-                    # even while it has an in-flight request there
-                    # (the runner's own slot scheduler handles the
-                    # turn-level serialisation).
-                    self._last_endpoint_per_session.move_to_end(
-                        (session_id, model_id)
+                    # Per-session pin only makes sense when the runner
+                    # actually holds the model's KV cache. If the runner
+                    # no longer has a loaded server for this model (cache
+                    # evicted, runner restarted, etc.), the pin's value
+                    # is gone — drop it and fall through.
+                    sticky_loaded = await self._find_loaded_server(
+                        per_session, model_id
                     )
-                    logger.info(
-                        "select_runner: returning per-session sticky",
-                        extra={"endpoint": per_session, "session_id": session_id},
-                    )
-                    return per_session
+                    if sticky_loaded is None:
+                        logger.info(
+                            "select_runner: per-session sticky has no loaded server — dropping pin",
+                            extra={
+                                "sticky": per_session,
+                                "session_id": session_id,
+                            },
+                        )
+                        self._last_endpoint_per_session.pop(
+                            (session_id, model_id), None
+                        )
+                    else:
+                        # Busy-escape: if the pinned runner's server is
+                        # currently in-use AND an empty peer exists, fall
+                        # through so Rule 1 spawns fresh on the peer for
+                        # true parallelism. Use the same "in-use"
+                        # definition Rule 1 uses (starting, use_count>0,
+                        # actively serving, or used < CACHE_TIMEOUT_MIN).
+                        in_use = False
+                        if sticky_loaded.get("starting"):
+                            in_use = True
+                        elif (sticky_loaded.get("use_count") or 0) > 0:
+                            in_use = True
+                        else:
+                            _is = sticky_loaded.get("idle_since")
+                            if _is is None:
+                                in_use = True
+                            else:
+                                try:
+                                    in_use = (
+                                        time.time() - float(_is)
+                                    ) < (CACHE_TIMEOUT_MIN * 60)
+                                except (TypeError, ValueError):
+                                    in_use = True
+                        if not in_use:
+                            in_use = any(
+                                h.runner_host == per_session
+                                and h.model_id == model_id
+                                for h in self._active_handles
+                            )
+                        empty_peer = False
+                        if in_use:
+                            mapped = (
+                                self._model_map.get(model_id)
+                                or list(self._endpoints)
+                            )
+                            for ep in mapped:
+                                if ep == per_session or self._is_circuit_open(ep):
+                                    continue
+                                ep_loaded = await self._find_loaded_server(
+                                    ep, model_id
+                                )
+                                ep_here = any(
+                                    h.runner_host == ep
+                                    and h.model_id == model_id
+                                    for h in self._active_handles
+                                )
+                                if ep_loaded is None and not ep_here:
+                                    empty_peer = True
+                                    break
+
+                        if in_use and empty_peer:
+                            logger.info(
+                                "select_runner: per-session sticky in-use + empty peer — falling through",
+                                extra={
+                                    "sticky": per_session,
+                                    "session_id": session_id,
+                                },
+                            )
+                            # Leave the pin in place; acquire_server
+                            # re-pins on success of the empty peer.
+                        else:
+                            self._last_endpoint_per_session.move_to_end(
+                                (session_id, model_id)
+                            )
+                            logger.info(
+                                "select_runner: returning per-session sticky",
+                                extra={
+                                    "endpoint": per_session,
+                                    "session_id": session_id,
+                                },
+                            )
+                            return per_session
                 # Per-session pin no longer eligible — drop it so we
                 # fall through to global / ranked below.
                 self._last_endpoint_per_session.pop(
@@ -1076,28 +1153,23 @@ class RunnerClient:
             (ep, vram) for ep, vram, hc, srv in candidates
             if hc == 0 and srv is None
         ]
-        # "Loaded" = has a server for this model, busy OR warm-idle.
-        # When a loaded peer exists AND an empty peer exists, we'd
-        # rather spawn fresh on the empty one (true parallelism, even
-        # if it eats the ~30 s cold-load) than reuse the loaded one
-        # (which may share the runner with other busy models).
-        loaded_endpoints = [
-            ep for ep, _v, hc, srv in candidates
-            if srv is not None or hc > 0
-        ]
         logger.info(
             "select_runner: rule1 inputs",
             extra={
                 "busy_endpoints": busy_endpoints,
-                "loaded_endpoints": loaded_endpoints,
                 "empty_endpoints": [e for e, _ in empty_endpoints],
             },
         )
-        if (busy_endpoints or loaded_endpoints) and empty_endpoints:
-            # Pick the empty peer with most effective VRAM (best spawn target).
+        if busy_endpoints and empty_endpoints:
+            # In-use peer + empty alternative → spawn fresh on the
+            # empty for true parallelism. Rule 2 below still wins when
+            # the only loaded peer is warm-idle (idle ≥ CACHE_TIMEOUT_MIN
+            # — i.e., the previous session has effectively abandoned the
+            # slot and reusing it gives the next request KV-cache /
+            # cold-load benefit).
             empty_endpoints.sort(key=lambda x: x[1], reverse=True)
             logger.info(
-                "select_runner: returning rule1 (fan-out to empty peer)",
+                "select_runner: returning rule1 (in-use + empty peer)",
                 extra={"endpoint": empty_endpoints[0][0]},
             )
             return empty_endpoints[0][0]
