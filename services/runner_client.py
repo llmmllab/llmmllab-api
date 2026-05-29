@@ -907,24 +907,30 @@ class RunnerClient:
                         sticky, model_id
                     )
                     if sticky_loaded is not None:
-                        # Same definition of "busy" Rule 1 uses below
-                        # (`_is_busy`): actively serving OR last used
-                        # within CACHE_TIMEOUT_MIN. A recently-warm
-                        # sticky still risks queuing the new request
-                        # behind a session that hasn't quite released
-                        # its slot, so fall through to the load-aware
-                        # ranked path if an idle peer exists.
-                        idle_since = sticky_loaded.get("idle_since")
-                        if idle_since is None:
+                        # Same definition of "busy" Rule 1's `_is_busy`
+                        # uses below: loading OR processing OR actively
+                        # generating OR last used within CACHE_TIMEOUT_MIN.
+                        # A sticky in any of those states risks queuing
+                        # the new request behind a session that hasn't
+                        # quite released its slot, so fall through to
+                        # the load-aware ranked path if an idle peer
+                        # exists.
+                        if sticky_loaded.get("starting"):
+                            sticky_busy_for_model = True
+                        elif (sticky_loaded.get("use_count") or 0) > 0:
                             sticky_busy_for_model = True
                         else:
-                            try:
-                                sticky_busy_for_model = (
-                                    time.time() - float(idle_since)
-                                ) < (CACHE_TIMEOUT_MIN * 60)
-                            except (TypeError, ValueError):
-                                # Malformed timestamp — treat as busy to be safe.
+                            idle_since = sticky_loaded.get("idle_since")
+                            if idle_since is None:
                                 sticky_busy_for_model = True
+                            else:
+                                try:
+                                    sticky_busy_for_model = (
+                                        time.time() - float(idle_since)
+                                    ) < (CACHE_TIMEOUT_MIN * 60)
+                                except (TypeError, ValueError):
+                                    # Malformed timestamp — treat as busy to be safe.
+                                    sticky_busy_for_model = True
                 alternatives_exist = any(
                     e != sticky
                     and not self._is_circuit_open(e)
@@ -1041,6 +1047,16 @@ class RunnerClient:
                 return True
             if srv is None:
                 return False
+            # A server that's still loading (cold-start, ~30s) is busy too —
+            # it can't accept requests yet and the slot is reserved.
+            if srv.get("starting"):
+                return True
+            # The runner-side use_count is the authoritative count of
+            # in-flight requests it's processing right now. It catches
+            # cases the api-side _active_handles misses (cross-replica,
+            # mid-release).
+            if (srv.get("use_count") or 0) > 0:
+                return True
             idle_since = srv.get("idle_since")
             if idle_since is None:
                 return True  # actively serving a request right now
