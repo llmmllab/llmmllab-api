@@ -874,6 +874,20 @@ class RunnerClient:
                     h.runner_host == sticky and h.model_id == model_id
                     for h in self._active_handles
                 )
+                # Also treat the sticky as busy if the runner itself
+                # reports a loaded server for this model that's actively
+                # serving (idle_since=None). _active_handles only counts
+                # requests this api process knows about; a session
+                # holding the slot via another api replica, or a slot
+                # that's mid-turn between handle release and the next
+                # acquire, looks "free" to _active_handles but is
+                # actually pinned on the runner.
+                if not sticky_busy_for_model:
+                    sticky_loaded = await self._find_loaded_server(
+                        sticky, model_id
+                    )
+                    if sticky_loaded and sticky_loaded.get("idle_since") is None:
+                        sticky_busy_for_model = True
                 alternatives_exist = any(
                     e != sticky
                     and not self._is_circuit_open(e)
