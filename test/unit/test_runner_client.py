@@ -749,42 +749,44 @@ class TestRunnerClientSlidingRefresh:
 class TestRunnerClientAcquireWithMap:
     @pytest.mark.asyncio
     async def test_acquire_uses_cached_map(self):
-        """acquire_server uses cached map, skips /health checks.
+        """acquire_server uses cached map and the load-aware selector.
 
-        Note: acquire_server still calls GET /v1/status on the chosen
-        endpoint for restart-epoch detection (added with runner-restart
-        recovery). What it must *not* do is fall back to the per-endpoint
-        /health scan in _select_runner, since the model map already tells
-        it which runner owns this model.
+        Previously the "fast path" iterated the cached map in config
+        order and bypassed _select_runner entirely. That silently
+        skipped the sticky / parallel-spawn / warm-idle rules, which
+        caused every request for a multi-runner model to land on
+        whichever endpoint happened to be first in config — even when
+        a peer was idle. Now acquire_server always asks _select_runner
+        to pick the best endpoint, falling back to the cached map's
+        config order only if the selector returns nothing.
+
+        acquire_server also calls GET /v1/status on the chosen endpoint
+        for restart-epoch detection.
         """
+        # /health response so _select_runner has candidates to rank.
+        mock_health = MagicMock()
+        mock_health.status_code = 200
+        mock_health.json.return_value = {
+            "status": "ok",
+            "gpu": {"available_vram_bytes": 12e9},
+            "active_servers": 0,
+            "models": ["model-c"],
+        }
         mock_create = MagicMock()
         mock_create.status_code = 201
         mock_create.json.return_value = {"server_id": "abc", "base_url": "http://r2:8001/v1/server/abc", "model": "model-c"}
         mock_create.raise_for_status = MagicMock()
-        # /v1/status response so _check_runner_epoch succeeds quietly.
-        mock_status = MagicMock()
-        mock_status.status_code = 200
-        mock_status.json.return_value = {"startup_epoch": 1}
         mock = _mock_client(
             post=AsyncMock(return_value=mock_create),
-            get=AsyncMock(return_value=mock_status),
+            get=AsyncMock(return_value=mock_health),
         )
         client = RunnerClient(endpoints=["http://r1:8000", "http://r2:8001"])
         client._client = mock
         client._model_map = {"model-a": ["http://r1:8000"], "model-c": ["http://r2:8001"]}
+        client._model_tensor_split = {("http://r2:8001", "model-c"): None}
         handle = await client.acquire_server("model-c")
         assert handle.server_id == "abc"
         assert handle.runner_host == "http://r2:8001"
-        # Must not have hit /health on either endpoint — the cached map
-        # bypasses _select_runner. /v1/status calls are allowed.
-        get_urls = [c.args[0] if c.args else c.kwargs.get("url", "") for c in mock.get.call_args_list]
-        assert all("/health" not in url for url in get_urls), (
-            f"acquire_server with cached map must skip /health checks, got: {get_urls}"
-        )
-        # And the only endpoint touched should be the mapped one.
-        assert all("r2:8001" in url for url in get_urls), (
-            f"acquire_server should only contact the mapped endpoint, got: {get_urls}"
-        )
 
     @pytest.mark.asyncio
     async def test_acquire_fallback_on_missing_model(self):
@@ -807,7 +809,13 @@ class TestRunnerClientAcquireWithMap:
 
     @pytest.mark.asyncio
     async def test_acquire_fallback_on_507(self):
-        """507 on primary runner falls through to next in map."""
+        """507 on primary runner falls through to next in map.
+
+        Mock /health on both runners so _select_runner's load-aware
+        ranking is deterministic: r1 has more free VRAM, so it's
+        picked first. r1 returns 507 on POST, so the loop falls
+        through to r2 which returns 201.
+        """
         calls = [0]
         async def mock_post(url, **kw):
             calls[0] += 1
@@ -818,10 +826,39 @@ class TestRunnerClientAcquireWithMap:
             r.json.return_value = {"server_id": "ghi", "base_url": "http://r2:8001/v1/server/ghi", "model": "model-b"}
             r.raise_for_status = MagicMock()
             return r
-        mock = _mock_client(post=AsyncMock(side_effect=mock_post))
+
+        # /health responses: r1 has more VRAM so the selector picks it
+        # first; the test then verifies fallback to r2 on 507.
+        async def mock_get(url, **kw):
+            r = MagicMock()
+            r.status_code = 200
+            if "r1:8000" in url:
+                r.json.return_value = {
+                    "status": "ok",
+                    "gpu": {"available_vram_bytes": 20e9},
+                    "active_servers": 0,
+                    "models": ["model-b"],
+                }
+            else:
+                r.json.return_value = {
+                    "status": "ok",
+                    "gpu": {"available_vram_bytes": 8e9},
+                    "active_servers": 0,
+                    "models": ["model-b"],
+                }
+            return r
+
+        mock = _mock_client(
+            post=AsyncMock(side_effect=mock_post),
+            get=AsyncMock(side_effect=mock_get),
+        )
         client = RunnerClient(endpoints=["http://r1:8000", "http://r2:8001"])
         client._client = mock
         client._model_map = {"model-b": ["http://r1:8000", "http://r2:8001"]}
+        client._model_tensor_split = {
+            ("http://r1:8000", "model-b"): None,
+            ("http://r2:8001", "model-b"): None,
+        }
         handle = await client.acquire_server("model-b")
         assert handle.server_id == "ghi"
         assert handle.runner_host == "http://r2:8001"
@@ -985,10 +1022,39 @@ class TestRunnerClientCircuitBreaker:
             r.raise_for_status = MagicMock()
             return r
 
-        mock = _mock_client(post=AsyncMock(side_effect=mock_post))
+        # /health responses so _select_runner has deterministic candidates.
+        # r1 has more VRAM so the selector picks it first; the test
+        # verifies fallback to r2 after r1's connection trips its circuit.
+        async def mock_get(url, **kw):
+            r = MagicMock()
+            r.status_code = 200
+            if "r1:8000" in url:
+                r.json.return_value = {
+                    "status": "ok",
+                    "gpu": {"available_vram_bytes": 20e9},
+                    "active_servers": 0,
+                    "models": ["model-a"],
+                }
+            else:
+                r.json.return_value = {
+                    "status": "ok",
+                    "gpu": {"available_vram_bytes": 8e9},
+                    "active_servers": 0,
+                    "models": ["model-a"],
+                }
+            return r
+
+        mock = _mock_client(
+            post=AsyncMock(side_effect=mock_post),
+            get=AsyncMock(side_effect=mock_get),
+        )
         client = RunnerClient(endpoints=["http://r1:8000", "http://r2:8001"])
         client._client = mock
         client._model_map = {"model-a": ["http://r1:8000", "http://r2:8001"]}
+        client._model_tensor_split = {
+            ("http://r1:8000", "model-a"): None,
+            ("http://r2:8001", "model-a"): None,
+        }
 
         handle = await client.acquire_server("model-a")
         assert handle.server_id == "srv-ok"

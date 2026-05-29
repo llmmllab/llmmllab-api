@@ -966,8 +966,15 @@ class RunnerClient:
         # runner that's already loaded ``model_id``, if any.  ``idle_since``
         # is null when the server is actively serving a request, or a
         # unix timestamp when it went idle.
+        # Restrict the candidate scan to the endpoints that the model
+        # map says actually host this model, when populated. Falls back
+        # to all configured endpoints before the first refresh so the
+        # very first request after boot still has something to pick.
+        eligible_endpoints = (
+            self._model_map.get(model_id) or list(self._endpoints)
+        )
         candidates: List[tuple[str, int, int, Optional[dict]]] = []
-        for endpoint in self._endpoints:
+        for endpoint in eligible_endpoints:
             if self._is_circuit_open(endpoint):
                 continue
             health = await self._health(endpoint)
@@ -1324,18 +1331,33 @@ class RunnerClient:
         if config_override:
             payload["config_override"] = config_override
 
-        # Fast path: use cached model map
-        mapped_endpoints = self._model_map.get(model_id)
-        if mapped_endpoints:
-            ordered = list(mapped_endpoints)
+        # Run the load-aware selector to pick the best endpoint regardless
+        # of whether the model map is cached or not. The previous "fast
+        # path: just use mapped_endpoints in map order" silently bypassed
+        # all of _select_runner's sticky/parallel-spawn/warm-idle logic,
+        # which is why every Qwen3_5_9B request landed on whichever
+        # endpoint happened to be first in config (main), even when small
+        # was idle. The selector itself is fast: it reads cached health
+        # state and the in-memory tensor_split + _active_handles maps.
+        best = await self._select_runner(model_id)
+        if best:
+            ordered = [best]
+            # Append remaining mapped (or all) endpoints as failover
+            # targets in case `best` errors mid-acquire. Prefer the map
+            # when populated so we don't dial endpoints that don't host
+            # the model.
+            mapped = self._model_map.get(model_id) or list(self._endpoints)
+            for ep in mapped:
+                if ep != best:
+                    ordered.append(ep)
         else:
-            # Fallback: health-check scan
-            best = await self._select_runner(model_id)
-            if best:
-                ordered = [best]
-                for ep in self._endpoints:
-                    if ep != best:
-                        ordered.append(ep)
+            # Selector found nothing — happens before refresh_model_map
+            # ever runs, or if every endpoint failed health. Fall back
+            # to the historical "try them all in config order" behavior
+            # so the very first request after boot still has a chance.
+            mapped_endpoints = self._model_map.get(model_id)
+            if mapped_endpoints:
+                ordered = list(mapped_endpoints)
             else:
                 ordered = list(self._endpoints)
 
