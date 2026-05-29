@@ -1060,18 +1060,28 @@ class RunnerClient:
             (ep, vram) for ep, vram, hc, srv in candidates
             if hc == 0 and srv is None
         ]
+        # "Loaded" = has a server for this model, busy OR warm-idle.
+        # When a loaded peer exists AND an empty peer exists, we'd
+        # rather spawn fresh on the empty one (true parallelism, even
+        # if it eats the ~30 s cold-load) than reuse the loaded one
+        # (which may share the runner with other busy models).
+        loaded_endpoints = [
+            ep for ep, _v, hc, srv in candidates
+            if srv is not None or hc > 0
+        ]
         logger.info(
             "select_runner: rule1 inputs",
             extra={
                 "busy_endpoints": busy_endpoints,
+                "loaded_endpoints": loaded_endpoints,
                 "empty_endpoints": [e for e, _ in empty_endpoints],
             },
         )
-        if busy_endpoints and empty_endpoints:
+        if (busy_endpoints or loaded_endpoints) and empty_endpoints:
             # Pick the empty peer with most effective VRAM (best spawn target).
             empty_endpoints.sort(key=lambda x: x[1], reverse=True)
             logger.info(
-                "select_runner: returning rule1 (parallel-spawn empty peer)",
+                "select_runner: returning rule1 (fan-out to empty peer)",
                 extra={"endpoint": empty_endpoints[0][0]},
             )
             return empty_endpoints[0][0]

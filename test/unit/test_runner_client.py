@@ -1458,9 +1458,18 @@ class TestSelectRunnerRules:
         assert chosen == "http://r2:8000"
 
     @pytest.mark.asyncio
-    async def test_rule2_long_idle_warm_server_wins(self):
-        """No busy peer, but r1 has a server idle past CACHE_TIMEOUT_MIN
-        → reuse it instead of spinning up on r2 (which has nothing).
+    async def test_rule1_loaded_peer_with_empty_alternative_fans_out(self):
+        """A loaded peer (busy OR warm-idle) plus an empty alternative
+        should fan out to the empty alternative.
+
+        Previously Rule 2 (`prefer warm-idle over spin-up`) hijacked
+        this case: when r1 had a server idle past CACHE_TIMEOUT_MIN
+        and r2 had nothing, r1 was reused instead of r2 being spun up.
+        Result: a runner that's still serving other models on the same
+        box stays pinned to the model under contention even when an
+        idle peer exists. Now Rule 1 catches "loaded peer + empty
+        alternative" and prefers the empty alternative for true
+        parallelism.
         """
         from config import CACHE_TIMEOUT_MIN
         import time
@@ -1481,7 +1490,7 @@ class TestSelectRunnerRules:
             return MagicMock(status_code=404)
         client._client = _mock_client(get=AsyncMock(side_effect=fake_get))
         chosen = await client._select_runner("m1")
-        assert chosen == "http://r1:8000"
+        assert chosen == "http://r2:8000"
 
     @pytest.mark.asyncio
     async def test_rule2_short_idle_falls_through_to_ranked(self):

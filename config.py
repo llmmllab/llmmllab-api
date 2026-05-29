@@ -75,8 +75,11 @@ HF_HOME = os.environ.get("HF_HOME", "/root/.cache/huggingface")
 # ``runner_client._select_runner`` to decide when a server that has
 # been idle for "long enough" can be commandeered by a new session
 # without preempting another session that's merely paused mid-turn.
-# Should match the runner's value; defaulting to 30 (the runner default).
-CACHE_TIMEOUT_MIN = int(os.environ.get("CACHE_TIMEOUT_MIN", "5"))
+# Should match the runner's value. Default bumped to 10 so that
+# multi-turn interactive sessions paused for a few minutes (typing,
+# thinking, switching to another app) don't get their slot
+# commandeered the moment they leave the keyboard.
+CACHE_TIMEOUT_MIN = int(os.environ.get("CACHE_TIMEOUT_MIN", "10"))
 
 # ── External API keys ───────────────────────────────────────────────
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
