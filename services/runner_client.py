@@ -886,8 +886,25 @@ class RunnerClient:
                     sticky_loaded = await self._find_loaded_server(
                         sticky, model_id
                     )
-                    if sticky_loaded and sticky_loaded.get("idle_since") is None:
-                        sticky_busy_for_model = True
+                    if sticky_loaded is not None:
+                        # Same definition of "busy" Rule 1 uses below
+                        # (`_is_busy`): actively serving OR last used
+                        # within CACHE_TIMEOUT_MIN. A recently-warm
+                        # sticky still risks queuing the new request
+                        # behind a session that hasn't quite released
+                        # its slot, so fall through to the load-aware
+                        # ranked path if an idle peer exists.
+                        idle_since = sticky_loaded.get("idle_since")
+                        if idle_since is None:
+                            sticky_busy_for_model = True
+                        else:
+                            try:
+                                sticky_busy_for_model = (
+                                    time.time() - float(idle_since)
+                                ) < (CACHE_TIMEOUT_MIN * 60)
+                            except (TypeError, ValueError):
+                                # Malformed timestamp — treat as busy to be safe.
+                                sticky_busy_for_model = True
                 alternatives_exist = any(
                     e != sticky
                     and not self._is_circuit_open(e)
