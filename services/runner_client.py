@@ -851,16 +851,21 @@ class RunnerClient:
                 }
                 if health and model_id in psession_ids:
                     # Per-session pin only makes sense when the runner
-                    # actually holds the model's KV cache. If the runner
-                    # no longer has a loaded server for this model (cache
-                    # evicted, runner restarted, etc.), the pin's value
-                    # is gone — drop it and fall through.
+                    # holds this session's KV state — either in-memory
+                    # (loaded server present) OR on disk (a saved slot
+                    # checkpoint the runner can restore from). If
+                    # neither, the pin's value is gone; drop it.
                     sticky_loaded = await self._find_loaded_server(
                         per_session, model_id
                     )
+                    has_saved = False
                     if sticky_loaded is None:
+                        has_saved = await self._runner_has_saved_session(
+                            per_session, session_id, model_id
+                        )
+                    if sticky_loaded is None and not has_saved:
                         logger.info(
-                            "select_runner: per-session sticky has no loaded server — dropping pin",
+                            "select_runner: per-session sticky has no loaded server and no saved checkpoint — dropping pin",
                             extra={
                                 "sticky": per_session,
                                 "session_id": session_id,
@@ -869,6 +874,22 @@ class RunnerClient:
                         self._last_endpoint_per_session.pop(
                             (session_id, model_id), None
                         )
+                    elif sticky_loaded is None and has_saved:
+                        # No live server, but on-disk checkpoint exists;
+                        # keep the pin so the next acquire spawns a fresh
+                        # server on the same runner and llama.cpp can
+                        # restore the saved slot.
+                        logger.info(
+                            "select_runner: returning per-session sticky (cache evicted but on-disk checkpoint exists)",
+                            extra={
+                                "endpoint": per_session,
+                                "session_id": session_id,
+                            },
+                        )
+                        self._last_endpoint_per_session.move_to_end(
+                            (session_id, model_id)
+                        )
+                        return per_session
                     else:
                         # Busy-escape: if the pinned runner's server is
                         # currently in-use AND an empty peer exists, fall
@@ -1238,6 +1259,37 @@ class RunnerClient:
             return None
         except Exception:
             return None
+
+    async def _runner_has_saved_session(
+        self, endpoint: str, session_id: str, model_id: str
+    ) -> bool:
+        """Ask the runner whether a slot-save file exists on disk for
+        ``(session_id, model_id)``.
+
+        The runner persists each turn's KV slot to disk so that a server
+        evicted from RAM can be respawned and the session's prefix cache
+        restored from disk. When the per-session pin's runner has no
+        live server (cache evicted) we still want to honor the pin if a
+        saved checkpoint is present — losing the pin would force a
+        cold-start somewhere else and discard the persisted KV cache.
+
+        Failures (network, parse, endpoint not implemented yet) return
+        False so the pin is dropped — that's the safer default; worst
+        case we lose cache reuse, not correctness.
+        """
+        try:
+            client = self._get_client()
+            resp = await client.get(
+                f"{endpoint}/v1/sessions/{session_id}/has-saved",
+                params={"model_id": model_id},
+                timeout=_HEALTH_TIMEOUT,
+            )
+            if resp.status_code != 200:
+                return False
+            data = resp.json()
+            return bool(data.get("has_saved"))
+        except Exception:
+            return False
 
     @staticmethod
     def _parse_tensor_split(tensor_split: Optional[str]) -> Optional[List[float]]:
