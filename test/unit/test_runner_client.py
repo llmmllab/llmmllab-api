@@ -1144,3 +1144,92 @@ class TestRunnerClientStickyEndpoint:
         chosen = await client._select_runner("m1")
         assert chosen == "http://r1:8000"
         assert "m1" not in client._last_endpoint_for_model
+
+
+class TestEffectiveVramByTensorSplit:
+    """``_effective_free_vram_bytes`` should only count GPUs the model
+    can actually live on, based on its ``tensor_split`` pinning.
+    """
+
+    def test_no_tensor_split_sums_all_gpus(self):
+        from services.runner_client import RunnerClient
+
+        health = {
+            "gpu": {
+                "0": {"free_mb": 1000},
+                "1": {"free_mb": 2000},
+                "2": {"free_mb": 3000},
+            }
+        }
+        # 1000 + 2000 + 3000 = 6000 MB
+        result = RunnerClient._effective_free_vram_bytes(health, None)
+        assert result == 6000 * 1024 * 1024
+
+    def test_tensor_split_only_counts_pinned_gpus(self):
+        from services.runner_client import RunnerClient
+
+        health = {
+            "gpu": {
+                "0": {"free_mb": 1000},
+                "1": {"free_mb": 24000},
+                "2": {"free_mb": 24000},
+            }
+        }
+        # "1,0,0" pins to device 0 only — must not credit the 3090s.
+        result = RunnerClient._effective_free_vram_bytes(health, "1,0,0")
+        assert result == 1000 * 1024 * 1024
+
+    def test_tensor_split_splits_across_two_gpus(self):
+        from services.runner_client import RunnerClient
+
+        health = {
+            "gpu": {
+                "0": {"free_mb": 1000},
+                "1": {"free_mb": 24000},
+                "2": {"free_mb": 24000},
+            }
+        }
+        # "0,1,1" skips device 0, uses devices 1 and 2.
+        result = RunnerClient._effective_free_vram_bytes(health, "0,1,1")
+        assert result == 48000 * 1024 * 1024
+
+    def test_malformed_tensor_split_falls_back_to_total(self):
+        from services.runner_client import RunnerClient
+
+        health = {
+            "gpu": {
+                "0": {"free_mb": 1000},
+                "1": {"free_mb": 24000},
+            }
+        }
+        result = RunnerClient._effective_free_vram_bytes(health, "not,a,number")
+        assert result == 25000 * 1024 * 1024
+
+    def test_aggregate_fallback_when_no_per_gpu(self):
+        """Old runner without per-GPU surface — fall back to flat field."""
+        from services.runner_client import RunnerClient
+
+        health = {"gpu": {"available_vram_bytes": 5_000_000_000}}
+        result = RunnerClient._effective_free_vram_bytes(health, "1,0,0")
+        assert result == 5_000_000_000
+
+    def test_aggregate_alongside_per_gpu_prefers_per_gpu(self):
+        """If both are present (current runner shape), per-GPU wins."""
+        from services.runner_client import RunnerClient
+
+        health = {
+            "gpu": {
+                "0": {"free_mb": 1000},
+                "1": {"free_mb": 24000},
+                "available_vram_bytes": 999_999_999_999,
+            }
+        }
+        # Per-GPU sum = 25000 MB, NOT the aggregate poison value.
+        result = RunnerClient._effective_free_vram_bytes(health, None)
+        assert result == 25000 * 1024 * 1024
+
+    def test_empty_health_returns_zero(self):
+        from services.runner_client import RunnerClient
+
+        assert RunnerClient._effective_free_vram_bytes({}, None) == 0
+        assert RunnerClient._effective_free_vram_bytes({"gpu": {}}, "1,0,0") == 0

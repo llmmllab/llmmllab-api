@@ -87,6 +87,14 @@ class RunnerClient:
         self._healthy: list[str] = []
         self._client: Optional[httpx.AsyncClient] = None
         self._model_map: Dict[str, List[str]] = {}
+        # Per-(endpoint, model_id) tensor_split string, captured from
+        # the runner's /v1/models response.  Used by ``_select_runner``
+        # to compute *effective* free VRAM for a model — the model is
+        # pinned to specific GPUs via tensor_split (e.g. "1,0,0" =>
+        # device 0 only), so ranking by total free VRAM across all
+        # GPUs on a runner over-counts capacity for pinned models.
+        # None means "no pinning, use total".
+        self._model_tensor_split: Dict[tuple[str, str], Optional[str]] = {}
         # Pipeline-name → endpoints map, populated alongside the
         # model_map from each runner's /v1/models response by filtering
         # on ``provider == 'in_process'`` and indexing by ``pipeline``.
@@ -797,15 +805,22 @@ class RunnerClient:
 
         # --- Ranked fallback -----------------------------------------
         best_url: Optional[str] = None
-        best_key: Optional[tuple[int, int]] = None  # (negated handle count, vram)
+        best_key: Optional[tuple[int, int]] = None  # (negated handle count, effective vram)
         for endpoint in self._endpoints:
             health = await self._health(endpoint)
             if not health:
                 continue
-            models = health.get("models", [])
-            if model_id not in models:
+            health_models = health.get("models", [])
+            # /health "models" is a list of {id, name, task} dicts —
+            # normalise to a flat id list for membership testing.
+            model_ids = {
+                m.get("id") if isinstance(m, dict) else m
+                for m in health_models
+            }
+            if model_id not in model_ids:
                 continue
-            vram = int(health.get("gpu", {}).get("available_vram_bytes", 0))
+            tensor_split = self._model_tensor_split.get((endpoint, model_id))
+            vram = self._effective_free_vram_bytes(health, tensor_split)
             here_count = sum(
                 1 for h in self._active_handles if h.runner_host == endpoint
             )
@@ -815,6 +830,75 @@ class RunnerClient:
                 best_key = key
                 best_url = endpoint
         return best_url
+
+    @staticmethod
+    def _parse_tensor_split(tensor_split: Optional[str]) -> Optional[List[float]]:
+        """Parse a llama.cpp ``tensor_split`` string into a weight list.
+
+        ``"1,0,0"`` → ``[1.0, 0.0, 0.0]`` (model only uses device 0).
+        Returns None if the string is missing, empty, or malformed —
+        callers treat that as "no pinning, use total VRAM".
+        """
+        if not tensor_split or not isinstance(tensor_split, str):
+            return None
+        try:
+            return [float(x.strip()) for x in tensor_split.split(",") if x.strip()]
+        except ValueError:
+            return None
+
+    @classmethod
+    def _effective_free_vram_bytes(
+        cls,
+        health: dict,
+        tensor_split: Optional[str],
+    ) -> int:
+        """Sum free VRAM only on GPUs the model will actually land on.
+
+        The runner's ``/health`` returns ``gpu`` as either:
+          * a per-GPU dict keyed by gpu id: ``{"0": {"free_mb": ...}, "1": ...}``
+          * an aggregate-only dict containing ``available_vram_bytes``.
+
+        For a model with ``tensor_split = "1,0,0"`` we only count device 0,
+        even if a runner has 60 GB total split across multiple cards —
+        the model can't use VRAM on devices with weight 0.  Falls back to
+        aggregate / total when tensor_split is None or the per-GPU view
+        is unavailable.
+        """
+        gpu = health.get("gpu") or {}
+        weights = cls._parse_tensor_split(tensor_split)
+
+        # Per-GPU dict path (preferred): keys "0","1","2" → entries with free_mb.
+        per_gpu: Dict[int, int] = {}
+        if isinstance(gpu, dict):
+            for k, v in gpu.items():
+                if not isinstance(v, dict) or not str(k).isdigit():
+                    continue
+                free_mb = v.get("free_mb")
+                if free_mb is None:
+                    continue
+                try:
+                    per_gpu[int(k)] = int(float(free_mb) * 1024 * 1024)
+                except (TypeError, ValueError):
+                    continue
+
+        if per_gpu:
+            if weights is not None:
+                # Only count GPUs the model is actually pinned to.
+                return sum(
+                    free for idx, free in per_gpu.items()
+                    if idx < len(weights) and weights[idx] > 0
+                )
+            return sum(per_gpu.values())
+
+        # Fallback: aggregate-only response.
+        if isinstance(gpu, dict):
+            agg = gpu.get("available_vram_bytes")
+            if agg is not None:
+                try:
+                    return int(agg)
+                except (TypeError, ValueError):
+                    pass
+        return 0
 
     async def select_pipeline_endpoint(self, pipeline_name: str) -> str:
         """Pick the best endpoint hosting *pipeline_name*.
@@ -869,7 +953,11 @@ class RunnerClient:
             health = await self._health(endpoint)
             if not health:
                 continue
-            vram = int(health.get("gpu", {}).get("available_vram_bytes", 0))
+            # In-process pipelines don't have a tensor_split — they
+            # use whatever device the pipeline's own GPU-select logic
+            # chose at load time.  Aggregate free VRAM is the right
+            # signal for ranking these.
+            vram = self._effective_free_vram_bytes(health, tensor_split=None)
             here_count = sum(
                 1 for h in self._active_handles if h.runner_host == endpoint
             )
@@ -1112,6 +1200,7 @@ class RunnerClient:
         """
         new_map: Dict[str, List[str]] = {}
         new_pipeline_map: Dict[str, List[str]] = {}
+        new_tensor_split: Dict[tuple[str, str], Optional[str]] = {}
         client = self._get_client()
         tasks = []
         for endpoint in self._endpoints:
@@ -1132,6 +1221,14 @@ class RunnerClient:
                 for model, endpoint in result:
                     model_id = model["id"]
                     new_map.setdefault(model_id, []).append(endpoint)
+                    # Capture tensor_split for VRAM accounting in
+                    # _select_runner.  ``parameters`` is the nested
+                    # ModelParameters object; missing or empty means
+                    # "no pinning, use total free VRAM".
+                    params = model.get("parameters") or {}
+                    new_tensor_split[(endpoint, model_id)] = (
+                        params.get("tensor_split") if isinstance(params, dict) else None
+                    )
                     if model.get("provider") == "in_process":
                         pipeline_name = model.get("pipeline")
                         if pipeline_name:
@@ -1139,6 +1236,7 @@ class RunnerClient:
                             if endpoint not in eps:
                                 eps.append(endpoint)
         self._model_map = new_map
+        self._model_tensor_split = new_tensor_split
         self._pipeline_map = new_pipeline_map
         logger.info(
             f"Model map refreshed: {len(new_map)} models, "
