@@ -87,6 +87,65 @@ def _strip_server_tool_blocks(req_body: Dict[str, Any]) -> Dict[str, Any]:
     return req_body
 
 
+def _coerce_system_messages(req_body: Dict[str, Any]) -> Dict[str, Any]:
+    """Hoist any role=system messages into the top-level `system` field.
+
+    The Anthropic spec only permits role user|assistant in `messages`, but some
+    clients (notably newer claude-cli) send mid-conversation reminders as
+    role=system. Validate-and-reject would surface as 422; instead we
+    concatenate their text into `system` so the model still sees them.
+    Non-text content on system messages is dropped (system field is text-only).
+    """
+    messages = req_body.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return req_body
+
+    hoisted_texts: list[str] = []
+    remaining: list[Any] = []
+    for msg in messages:
+        if isinstance(msg, dict) and msg.get("role") == "system":
+            content = msg.get("content")
+            if isinstance(content, str):
+                if content:
+                    hoisted_texts.append(content)
+            elif isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text = block.get("text")
+                        if isinstance(text, str) and text:
+                            hoisted_texts.append(text)
+            continue
+        remaining.append(msg)
+
+    if not hoisted_texts:
+        return req_body
+
+    existing = req_body.get("system")
+    existing_text = ""
+    existing_blocks: list[Any] = []
+    if isinstance(existing, str):
+        existing_text = existing
+    elif isinstance(existing, list):
+        for block in existing:
+            if isinstance(block, dict) and block.get("type") == "text":
+                t = block.get("text")
+                if isinstance(t, str):
+                    existing_text += ("\n" if existing_text else "") + t
+            existing_blocks.append(block)
+
+    appended = "\n".join(hoisted_texts)
+    merged = (existing_text + "\n" + appended) if existing_text else appended
+
+    if existing_blocks:
+        # Preserve block-typed system entries; append hoisted text as a new block.
+        req_body["system"] = existing_blocks + [{"type": "text", "text": appended}]
+    else:
+        req_body["system"] = merged
+
+    req_body["messages"] = remaining
+    return req_body
+
+
 def _sse(event_type: str, data: dict) -> str:
     """Format a server-sent event with the required Anthropic event/data structure."""
     return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
@@ -783,6 +842,7 @@ async def createMessage(
             raw_per_message_hashes = []
 
         req_body = _strip_server_tool_blocks(req_body)
+        req_body = _coerce_system_messages(req_body)
 
         try:
             stripped_bytes = _json.dumps(req_body, sort_keys=False).encode("utf-8")
