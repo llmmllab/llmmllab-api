@@ -524,11 +524,11 @@ class CompletionService:
                 #   marker_yes_call_no  → nudge fires (rescue path)
                 #   marker_no_call_no_finish_stop  → accepted as final answer
                 #   marker_no_call_no_finish_other → nudge fires (non-stop)
-                if (
-                    _CONTINUATION_ENABLED
-                    and client_tools
-                    and (acc.has_content or acc.final_content)
-                ):
+                # Log unconditionally for any turn that had tools bound
+                # — including tool-only turns with zero text content,
+                # which are the common case for direct tool invocations
+                # and were missed by the original gate.
+                if _CONTINUATION_ENABLED and client_tools:
                     _classification = (
                         "marker_yes_call_yes" if _declared_intent and acc.has_tool_calls
                         else "marker_yes_call_no" if _declared_intent
@@ -541,12 +541,15 @@ class CompletionService:
                             "classification": _classification,
                             "finish_reason": acc.finish_reason,
                             "has_tool_calls": acc.has_tool_calls,
+                            "has_content": acc.has_content,
+                            "final_content_len": len(acc.final_content or ""),
                             "declared_intent": _declared_intent,
                             "content_preview": (
                                 acc.final_content[:200] if acc.final_content else ""
                             ),
                             "will_nudge": (
                                 not acc.has_tool_calls
+                                and (acc.has_content or acc.final_content)
                                 and acc.finish_reason != "length"
                                 and (acc.finish_reason != "stop" or _declared_intent)
                             ),
@@ -737,7 +740,10 @@ class CompletionService:
             _ns_finish = (
                 result.chat_response.finish_reason if result.chat_response else None
             )
-            if client_tools and (result.has_content or result.has_tool_calls):
+            # Same broadened gate as the streaming path — log every
+            # turn that had tools bound, regardless of whether it
+            # produced content or just tool calls.
+            if _CONTINUATION_ENABLED and client_tools:
                 _ns_classification = (
                     "marker_yes_call_yes" if _nonstream_declared_intent and result.has_tool_calls
                     else "marker_yes_call_no" if _nonstream_declared_intent
@@ -750,6 +756,8 @@ class CompletionService:
                         "classification": _ns_classification,
                         "finish_reason": _ns_finish,
                         "has_tool_calls": result.has_tool_calls,
+                        "has_content": result.has_content,
+                        "final_content_len": len(_nonstream_text),
                         "declared_intent": _nonstream_declared_intent,
                         "content_preview": _nonstream_text[:200],
                     },
