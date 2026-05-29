@@ -73,6 +73,12 @@ class ServerHandle:
     base_url: str
     server_id: str
     runner_host: str
+    # The model this handle was acquired for.  Used by the sticky-pin
+    # path in ``_select_runner`` to detect "the sticky endpoint is
+    # already busy serving this same model — try a peer" without an
+    # extra network round-trip.  Empty string for legacy handles
+    # (e.g. embedding only) that haven't been updated.
+    model_id: str = ""
 
 
 class RunnerClient:
@@ -792,8 +798,34 @@ class RunnerClient:
         sticky = self._last_endpoint_for_model.get(model_id)
         if sticky and not self._is_circuit_open(sticky):
             health = await self._health(sticky)
-            if health and model_id in health.get("models", []):
-                return sticky
+            # ``health.models`` is a list of dicts ({id,name,task}),
+            # not bare ids — normalise before the membership test.
+            # Previously this checked ``model_id in [{...}, ...]`` which
+            # always returned False, silently disabling sticky pinning.
+            sticky_model_ids = {
+                m.get("id") if isinstance(m, dict) else m
+                for m in (health.get("models", []) if health else [])
+            }
+            if health and model_id in sticky_model_ids:
+                # Don't pin to a sticky endpoint that's already busy
+                # serving this same model for another session — that
+                # forces concurrent callers to queue on a single
+                # parallel=1 slot when an idle peer exists.  When the
+                # sticky has at least one handle for this model and an
+                # alternative endpoint also hosts it, fall through to
+                # the load-aware ranked path.
+                sticky_busy_for_model = any(
+                    h.runner_host == sticky and h.model_id == model_id
+                    for h in self._active_handles
+                )
+                alternatives_exist = any(
+                    e != sticky
+                    and not self._is_circuit_open(e)
+                    and (e, model_id) in self._model_tensor_split
+                    for e in self._endpoints
+                )
+                if not (sticky_busy_for_model and alternatives_exist):
+                    return sticky
             # Sticky endpoint no longer eligible — drop the pin so the
             # ranking below can choose freshly and ``acquire_server``
             # re-pins on next success.
@@ -1085,6 +1117,7 @@ class RunnerClient:
                         base_url=f"{endpoint}/v1/server/{data['server_id']}",
                         server_id=data["server_id"],
                         runner_host=endpoint,
+                        model_id=model_id,
                     )
                     logger.info(f"Acquired server {handle.server_id} from {endpoint}")
                     self._record_acquire_success(endpoint)
