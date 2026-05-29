@@ -1,17 +1,18 @@
 """
-Pins the cache-sharing fix from 2026-05-22 audit.
+Workflow cache key contract.
 
-Before:
-  Workflow cache key = (user_id, model_name, session_id).
-  Each session triggered a fresh acquire_server + ChatOpenAI build —
-  N concurrent sessions for one model => N workflow builds.
+2026-05-22 audit dropped session_id from the cache key on the
+assumption that the per-request httpx event_hook for X-Session-ID
+made cross-session workflow reuse safe. It IS safe for slot routing
+but it breaks fan-out: the cached workflow's ChatOpenAI has the
+runner base_url baked in at build time, so every session sharing
+the cache lands on whichever runner the first session acquired.
 
-After:
-  Workflow cache key = (user_id, model_name).
-  X-Session-ID is set per-request by an httpx event_hook reading
-  ``_session_id_ctx`` at request time, so a single cached workflow
-  safely serves multiple sessions without contaminating slot LRU on
-  the runner.
+Reinstated session_id in the cache key so each session gets its own
+workflow + its own acquired server handle. The X-Session-ID
+event_hook still applies per request — slot routing on a single
+runner remains correct for sessions sharing a workflow only when
+their handle happens to land on the same runner.
 """
 
 from __future__ import annotations
@@ -39,8 +40,9 @@ def _inject_hook():
     return _inject_session_id_header
 
 
-def test_cache_key_is_session_independent():
-    """``_build_cache_key`` ignores the current session context."""
+def test_cache_key_distinguishes_sessions():
+    """``_build_cache_key`` includes session_id so each session
+    triggers its own acquire_server (enables cross-session fan-out)."""
     ComposerService = _composer_service()
     svc = ComposerService(builder=MagicMock())
     a_token = _session_id_ctx.set("session-A")
@@ -53,7 +55,9 @@ def test_cache_key_is_session_independent():
         k2 = svc._build_cache_key(user_id="alice", model_name="m1")
     finally:
         _session_id_ctx.reset(b_token)
-    assert k1 == k2 == "workflow_alice_m1"
+    assert k1 == "workflow_alice_session-A_m1"
+    assert k2 == "workflow_alice_session-B_m1"
+    assert k1 != k2
 
 
 def test_cache_key_includes_model_name():

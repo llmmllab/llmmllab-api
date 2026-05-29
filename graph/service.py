@@ -27,7 +27,7 @@ from graph.workflows.base import GraphBuilder
 from graph.state import WorkflowState
 from graph.cache import WorkflowCache
 from graph.executor import WorkflowExecutor
-from utils.logging import llmmllogger
+from utils.logging import _session_id_ctx, llmmllogger
 
 
 class ComposerService:
@@ -82,18 +82,25 @@ class ComposerService:
             # 2. Use per-user cache if enabled
             user_cache = None
 
-            # Cache key is (user, model) — session id is no longer part
-            # of it.  The historical reason for adding session id was that
-            # GraphBuilder used to bake ``X-Session-ID`` into
-            # ChatOpenAI(default_headers=...) at build time, so a cached
-            # workflow reused by another session would carry the wrong
-            # session id to the runner.  That binding is now dynamic via
-            # an httpx event_hook (graph/workflows/base.py
-            # ``_inject_session_id_header``), so one CompiledStateGraph
-            # safely serves every session targeting the same (user, model).
-            # Result: N sessions for one model share ONE workflow build
-            # / one acquire_server call instead of N.
+            # Cache key includes session_id so that each session gets its
+            # own workflow with its own acquired server handle. Previously
+            # the key was (user, model) — N sessions for one model shared
+            # ONE workflow / ONE acquire_server, which baked the server
+            # handle into the cached ChatOpenAI and forced every session
+            # to the same runner. That broke fan-out: a fresh session
+            # couldn't route to an idle peer because the cached workflow
+            # was already pinned to whichever runner the first session
+            # acquired. User's stated routing rule is
+            # "same session = same runner; new session = new runner if
+            # the existing one is busy" — incompatible with cross-session
+            # workflow reuse.
+            # X-Session-ID per-request injection (via the httpx
+            # event_hook in graph/workflows/base.py) remains the
+            # mechanism for slot-aware routing within a runner.
+            session_id = _session_id_ctx.get()
             cache_key = f"workflow_{user_id}"
+            if session_id:
+                cache_key += f"_{session_id}"
             if model_name:
                 cache_key += f"_{model_name}"
 
@@ -148,12 +155,15 @@ class ComposerService:
 
         Kept in one place so :meth:`invalidate_workflow` is guaranteed to
         match the key used when the entry was inserted.  Cache key
-        scopes to ``(user_id, model_name)`` — session id is intentionally
-        out of the key because ``X-Session-ID`` is set dynamically per
-        request via httpx event_hook rather than baked into the cached
-        ChatOpenAI instance.
+        scopes to ``(user_id, session_id, model_name)`` — session id is
+        included so each session gets its own workflow and its own
+        acquired server handle, enabling cross-session fan-out across
+        runners.
         """
         cache_key = f"workflow_{user_id}"
+        session_id = _session_id_ctx.get()
+        if session_id:
+            cache_key += f"_{session_id}"
         if model_name:
             cache_key += f"_{model_name}"
         return cache_key
