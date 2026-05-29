@@ -26,6 +26,7 @@ import re
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from collections import OrderedDict
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 import httpx
@@ -63,6 +64,14 @@ from config import (
 
 _HEALTH_TIMEOUT = httpx.Timeout(RUNNER_HEALTH_TIMEOUT_SEC)
 _FAST_TIMEOUT = httpx.Timeout(RUNNER_FAST_TIMEOUT_SEC)
+
+# Upper bound on the per-session sticky-pin map.  Sessions are
+# transient (one per Claude Code / openclaw conversation, plus one
+# per cron run), so this caps memory at ~LIMIT × ~64 bytes ≈ a few MB
+# at the high end.  Oldest entries are evicted on overflow, which is
+# fine — an evicted session's next acquire just re-pins via the
+# ranked path.
+_PER_SESSION_PIN_LIMIT = 4096
 _ACQUIRE_TIMEOUT = httpx.Timeout(RUNNER_ACQUIRE_TIMEOUT_SEC)
 
 
@@ -134,6 +143,18 @@ class RunnerClient:
         # llama.cpp server stays warm for the same model and benefits
         # from cache_prompt across sessions).
         self._last_endpoint_for_model: Dict[str, str] = {}
+        # Per-session sticky pin: ``(session_id, model_id) → endpoint``.
+        # When concurrent sessions both want the same model, the global
+        # ``_last_endpoint_for_model`` pin would bounce them onto whichever
+        # runner most recently acquired, forcing them to alternate and
+        # serialise on a parallel=1 slot.  Per-session pins instead let
+        # each session settle on whichever runner it first acquired
+        # from, so two sessions on the same model converge on two
+        # different runners and run concurrently.
+        # Bounded via :data:`_PER_SESSION_PIN_LIMIT`; oldest evicted.
+        self._last_endpoint_per_session: "OrderedDict[tuple[str, str], str]" = (
+            OrderedDict()
+        )
 
     def _get_client(self) -> httpx.AsyncClient:
         """Lazily create a shared ``httpx.AsyncClient``."""
@@ -794,7 +815,42 @@ class RunnerClient:
         call falls back to ranking and resets the pin (in
         ``acquire_server`` on success).
         """
-        # --- Sticky path ---------------------------------------------
+        # --- Per-session sticky path ---------------------------------
+        # Each concurrent session keeps its own pin so two sessions on
+        # the same model converge on two different runners (instead of
+        # alternating onto one and serialising on a parallel=1 slot).
+        # Falls back to the global pin below when no per-session pin
+        # exists yet — that gives KV-cache reuse benefits to the first
+        # acquire by a brand-new session.
+        session_id = _session_id_ctx.get() or ""
+        if session_id:
+            per_session = self._last_endpoint_per_session.get(
+                (session_id, model_id)
+            )
+            if per_session and not self._is_circuit_open(per_session):
+                health = await self._health(per_session)
+                psession_ids = {
+                    m.get("id") if isinstance(m, dict) else m
+                    for m in (health.get("models", []) if health else [])
+                }
+                if health and model_id in psession_ids:
+                    # Promote to LRU front and use it.  Don't apply the
+                    # busy-escape here: a session continuing its own
+                    # conversation SHOULD stay on its existing runner
+                    # even while it has an in-flight request there
+                    # (the runner's own slot scheduler handles the
+                    # turn-level serialisation).
+                    self._last_endpoint_per_session.move_to_end(
+                        (session_id, model_id)
+                    )
+                    return per_session
+                # Per-session pin no longer eligible — drop it so we
+                # fall through to global / ranked below.
+                self._last_endpoint_per_session.pop(
+                    (session_id, model_id), None
+                )
+
+        # --- Global sticky path --------------------------------------
         sticky = self._last_endpoint_for_model.get(model_id)
         if sticky and not self._is_circuit_open(sticky):
             health = await self._health(sticky)
@@ -1129,6 +1185,22 @@ class RunnerClient:
                     # follow-up acquires (different sessions, same model)
                     # land here and benefit from the warm KV cache.
                     self._last_endpoint_for_model[model_id] = endpoint
+                    # Also pin per-session — this session's next turn
+                    # will land on the same endpoint even if a peer
+                    # later updates the global pin.  Without this,
+                    # concurrent sessions on the same model bounce
+                    # between runners every turn.
+                    session_id = _session_id_ctx.get() or ""
+                    if session_id:
+                        key = (session_id, model_id)
+                        self._last_endpoint_per_session[key] = endpoint
+                        self._last_endpoint_per_session.move_to_end(key)
+                        # LRU eviction so the dict stays bounded.
+                        while (
+                            len(self._last_endpoint_per_session)
+                            > _PER_SESSION_PIN_LIMIT
+                        ):
+                            self._last_endpoint_per_session.popitem(last=False)
                     self._schedule_refresh()
                     return handle
 

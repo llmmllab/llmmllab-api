@@ -1233,3 +1233,107 @@ class TestEffectiveVramByTensorSplit:
 
         assert RunnerClient._effective_free_vram_bytes({}, None) == 0
         assert RunnerClient._effective_free_vram_bytes({"gpu": {}}, "1,0,0") == 0
+
+
+class TestPerSessionSticky:
+    """Per-session sticky pins prevent two concurrent sessions on the
+    same model from alternating onto a single runner and serialising
+    on a parallel=1 slot.
+    """
+
+    @pytest.mark.asyncio
+    async def test_two_sessions_stay_on_their_first_runner(self):
+        """Session A pins to r1, session B falls through to r2 (peer
+        is busy); on each session's *next* turn the per-session pin
+        keeps them on their own runner instead of bouncing.
+        """
+        from services.runner_client import RunnerClient, ServerHandle
+        from utils.logging import _session_id_ctx
+
+        health = MagicMock(status_code=200)
+        health.json.return_value = {
+            "status": "ok",
+            "gpu": {"0": {"free_mb": 12000}},
+            "models": [{"id": "m1", "name": "m1", "task": "TextToText"}],
+        }
+        mock = _mock_client(get=AsyncMock(return_value=health))
+        client = RunnerClient(endpoints=["http://r1:8000", "http://r2:8000"])
+        client._client = mock
+        client._model_tensor_split = {
+            ("http://r1:8000", "m1"): None,
+            ("http://r2:8000", "m1"): None,
+        }
+        # Session A acquired on r1 first → both pins point at r1.
+        client._last_endpoint_for_model["m1"] = "http://r1:8000"
+        client._last_endpoint_per_session[("sess-A", "m1")] = "http://r1:8000"
+        # Session A's active handle is still on r1 (in-flight turn).
+        client._active_handles.add(
+            ServerHandle(
+                base_url="http://r1:8000/v1/server/x",
+                server_id="x",
+                runner_host="http://r1:8000",
+                model_id="m1",
+            )
+        )
+
+        # Session B arrives.  Global sticky says r1 but r1 is busy
+        # with m1 and r2 also hosts it → ranked path picks r2.
+        token = _session_id_ctx.set("sess-B")
+        try:
+            chosen_b = await client._select_runner("m1")
+        finally:
+            _session_id_ctx.reset(token)
+        # Session B picks r2 (r1 is busy with A's handle).
+        assert chosen_b == "http://r2:8000"
+
+        # Simulate session B successfully acquiring on r2 by setting
+        # its per-session pin (acquire_server does this on success).
+        client._last_endpoint_per_session[("sess-B", "m1")] = "http://r2:8000"
+        client._active_handles.add(
+            ServerHandle(
+                base_url="http://r2:8000/v1/server/y",
+                server_id="y",
+                runner_host="http://r2:8000",
+                model_id="m1",
+            )
+        )
+
+        # Session A's NEXT turn: per-session pin says r1, stays there.
+        token = _session_id_ctx.set("sess-A")
+        try:
+            chosen_a2 = await client._select_runner("m1")
+        finally:
+            _session_id_ctx.reset(token)
+        assert chosen_a2 == "http://r1:8000"
+
+        # Session B's NEXT turn: per-session pin says r2, stays there
+        # — does NOT bounce back to r1 even though A's handle is still
+        # there.
+        token = _session_id_ctx.set("sess-B")
+        try:
+            chosen_b2 = await client._select_runner("m1")
+        finally:
+            _session_id_ctx.reset(token)
+        assert chosen_b2 == "http://r2:8000"
+
+    def test_lru_evicts_oldest_per_session_pin(self):
+        """The per-session map is bounded; oldest entries fall off."""
+        from services.runner_client import RunnerClient, _PER_SESSION_PIN_LIMIT
+
+        client = RunnerClient(endpoints=["http://r1:8000"])
+        # Stuff in LIMIT + 5 entries.
+        for i in range(_PER_SESSION_PIN_LIMIT + 5):
+            key = (f"sess-{i}", "m1")
+            client._last_endpoint_per_session[key] = "http://r1:8000"
+            # Simulate the eviction loop from acquire_server.
+            while (
+                len(client._last_endpoint_per_session)
+                > _PER_SESSION_PIN_LIMIT
+            ):
+                client._last_endpoint_per_session.popitem(last=False)
+
+        assert len(client._last_endpoint_per_session) == _PER_SESSION_PIN_LIMIT
+        # Oldest (sess-0) should be gone, newest (sess-LIMIT+4) present.
+        assert ("sess-0", "m1") not in client._last_endpoint_per_session
+        last_key = (f"sess-{_PER_SESSION_PIN_LIMIT + 4}", "m1")
+        assert last_key in client._last_endpoint_per_session
