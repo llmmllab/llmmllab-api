@@ -936,7 +936,24 @@ class RunnerClient:
                                     and h.model_id == model_id
                                     for h in self._active_handles
                                 )
-                                if ep_loaded is None and not ep_here:
+                                # "Available" = no api-side handle AND
+                                # (no loaded server OR server is free).
+                                # Free = use_count==0 AND not starting AND
+                                # idle_since is not None (i.e., not actively
+                                # serving right now). A loaded-but-free peer
+                                # is BETTER than an empty peer because it
+                                # already has the model's weights in RAM —
+                                # avoids the cold-load penalty.
+                                if ep_here:
+                                    continue
+                                if ep_loaded is None:
+                                    empty_peer = True
+                                    break
+                                if (
+                                    not ep_loaded.get("starting")
+                                    and (ep_loaded.get("use_count") or 0) == 0
+                                    and ep_loaded.get("idle_since") is not None
+                                ):
                                     empty_peer = True
                                     break
 
@@ -1166,34 +1183,55 @@ class RunnerClient:
         busy_endpoints = [
             ep for ep, _v, hc, srv in candidates if _is_busy(hc, srv)
         ]
-        # An endpoint is "empty" only if it has neither a loaded server
-        # nor any of our active handles — a handle without a visible
-        # server (e.g. /v1/servers temporarily unreachable) still means
-        # we're using that runner.
-        empty_endpoints = [
-            (ep, vram) for ep, vram, hc, srv in candidates
-            if hc == 0 and srv is None
+        # An endpoint is "available" if we have no api-side handle for
+        # it AND either it has no loaded server OR the loaded server is
+        # currently free (use_count==0, not starting, idle_since set).
+        # A loaded-but-free peer is preferred over an empty one because
+        # the model's weights are already resident — no cold-load
+        # penalty.
+        def _is_available(hc: int, srv: Optional[dict]) -> bool:
+            if hc > 0:
+                return False
+            if srv is None:
+                return True
+            if srv.get("starting"):
+                return False
+            if (srv.get("use_count") or 0) > 0:
+                return False
+            if srv.get("idle_since") is None:
+                return False
+            return True
+
+        # Available endpoints — preferred over empty for cold-load
+        # avoidance. List as (ep, vram, has_loaded) so we can rank
+        # loaded-free first, empty second; VRAM as final tiebreaker.
+        available_endpoints = [
+            (ep, vram, srv is not None)
+            for ep, vram, hc, srv in candidates
+            if _is_available(hc, srv)
         ]
         logger.info(
             "select_runner: rule1 inputs",
             extra={
                 "busy_endpoints": busy_endpoints,
-                "empty_endpoints": [e for e, _ in empty_endpoints],
+                "available_endpoints": [
+                    {"ep": e, "loaded": loaded} for e, _, loaded in available_endpoints
+                ],
             },
         )
-        if busy_endpoints and empty_endpoints:
-            # In-use peer + empty alternative → spawn fresh on the
-            # empty for true parallelism. Rule 2 below still wins when
-            # the only loaded peer is warm-idle (idle ≥ CACHE_TIMEOUT_MIN
-            # — i.e., the previous session has effectively abandoned the
-            # slot and reusing it gives the next request KV-cache /
-            # cold-load benefit).
-            empty_endpoints.sort(key=lambda x: x[1], reverse=True)
-            logger.info(
-                "select_runner: returning rule1 (in-use + empty peer)",
-                extra={"endpoint": empty_endpoints[0][0]},
+        if busy_endpoints and available_endpoints:
+            # In-use peer + free alternative → use the free one for
+            # parallelism. Sort: loaded-free first (warm weights),
+            # then empty (cold-load), with VRAM as tiebreaker.
+            available_endpoints.sort(
+                key=lambda x: (not x[2], -x[1])
             )
-            return empty_endpoints[0][0]
+            picked = available_endpoints[0][0]
+            logger.info(
+                "select_runner: returning rule1 (in-use peer → available peer)",
+                extra={"endpoint": picked},
+            )
+            return picked
 
         # --- Rule 2: prefer a warm idle server over spinning up a new --
         # ``CACHE_TIMEOUT_MIN`` is the threshold below which an idle
