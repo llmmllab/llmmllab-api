@@ -294,6 +294,20 @@ class BaseAgent:
         system_prompt += f"""
 The current date is {current_date}."""
 
+        # When tools are available, ask the model to declare intent before
+        # invoking. The marker lets the api distinguish "model gave a
+        # final answer" (no marker — accept) from "model described a
+        # tool call but forgot to invoke" (marker, no tool_use block —
+        # nudge). See nudge gate in services/completion_service.py.
+        if self.tools:
+            system_prompt += """
+
+When you are about to use a tool, emit the literal marker
+`[TOOL_INTENT:<tool_name>]` on its own line in the same assistant turn,
+immediately followed by the actual tool call. Do not emit this marker
+when you are giving a final answer or just talking — only when a tool
+invocation is the next thing you intend to do."""
+
         # Strip injected commit trailers (Co-Authored-By) from system prompt
         system_prompt = self._SYSTEM_PROMPT_STRIP_RE.sub("", system_prompt).rstrip()
 

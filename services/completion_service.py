@@ -509,20 +509,20 @@ class CompletionService:
                     ):
                         yield event, acc
 
+                # On finish_reason=stop, only nudge when the model
+                # declared `[TOOL_INTENT:` in its text but never emitted
+                # a tool_use block. A clean final-answer turn has no
+                # marker, so we accept it as-is and avoid the
+                # 67-Slack-messages overnight loop (505b274). ``length``
+                # is handled by maybe_continue_on_truncation above.
+                _declared_intent = "[TOOL_INTENT:" in (acc.final_content or "")
                 if (
                     _CONTINUATION_ENABLED
                     and not acc.has_tool_calls
                     and client_tools
                     and (acc.has_content or acc.final_content)
-                    # Skip when the model finished cleanly with ``stop``:
-                    # that is the normal "final answer" turn for an
-                    # agent that already called tools earlier in the
-                    # conversation. Nudging here triggers an unnecessary
-                    # extra tool call, whose result then prompts another
-                    # final-answer turn, and the cycle repeats — the
-                    # 67-Slack-messages overnight regression. ``length``
-                    # is handled by maybe_continue_on_truncation above.
-                    and acc.finish_reason not in ("stop", "length")
+                    and acc.finish_reason != "length"
+                    and (acc.finish_reason != "stop" or _declared_intent)
                 ):
                     async for event, acc in maybe_continue_on_missing_tool_call(
                         CompletionService._build_and_run,
@@ -684,15 +684,26 @@ class CompletionService:
                         model_parameters,
                     )
 
-            # ``length`` is the truncation branch (handled above by
-            # maybe_continue_on_truncation_nonstream); skip the nudge
-            # here to avoid double-firing. Also skip on ``stop`` —
-            # see the streaming-path note above: nudging a clean
-            # final-answer turn forces an unwanted extra tool call
-            # and loops indefinitely across turns.
-            skip_continuation = (
-                result.chat_response is not None
-                and result.chat_response.finish_reason in ("stop", "length")
+            # See streaming-path comment above. On stop, only nudge
+            # when the model declared `[TOOL_INTENT:` in its text but
+            # didn't invoke a tool. ``length`` is handled by
+            # maybe_continue_on_truncation_nonstream.
+            _nonstream_text = ""
+            if result.chat_response and result.chat_response.message:
+                msg_content = result.chat_response.message.content
+                if isinstance(msg_content, str):
+                    _nonstream_text = msg_content
+                elif isinstance(msg_content, list):
+                    for block in msg_content:
+                        if hasattr(block, "text") and block.text:
+                            _nonstream_text += block.text
+            _nonstream_declared_intent = "[TOOL_INTENT:" in _nonstream_text
+            skip_continuation = result.chat_response is not None and (
+                result.chat_response.finish_reason == "length"
+                or (
+                    result.chat_response.finish_reason == "stop"
+                    and not _nonstream_declared_intent
+                )
             )
             if (
                 _CONTINUATION_ENABLED
