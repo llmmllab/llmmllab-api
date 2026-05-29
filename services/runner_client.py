@@ -31,7 +31,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 
 import httpx
 
-from config import MODEL_CACHE_REFRESH_SEC, RUNNER_ENDPOINTS
+from config import CACHE_TIMEOUT_MIN, MODEL_CACHE_REFRESH_SEC, RUNNER_ENDPOINTS
 from models import Model, ModelTask
 from utils.logging import llmmllogger, _session_id_ctx
 
@@ -891,33 +891,128 @@ class RunnerClient:
             # ranked path doesn't try it.
             self._last_endpoint_for_model.pop(model_id, None)
 
-        # --- Ranked fallback -----------------------------------------
-        best_url: Optional[str] = None
-        best_key: Optional[tuple[int, int]] = None  # (negated handle count, effective vram)
+        # --- Gather per-endpoint state ------------------------------
+        # Collected in one pass so the rule layers below can compare
+        # across endpoints without re-fetching.  Each entry:
+        #   ep, vram, here_count, my_server (dict from /v1/servers or None)
+        # ``my_server`` is the existing llama-server instance on that
+        # runner that's already loaded ``model_id``, if any.  ``idle_since``
+        # is null when the server is actively serving a request, or a
+        # unix timestamp when it went idle.
+        candidates: List[tuple[str, int, int, Optional[dict]]] = []
         for endpoint in self._endpoints:
+            if self._is_circuit_open(endpoint):
+                continue
             health = await self._health(endpoint)
             if not health:
                 continue
-            health_models = health.get("models", [])
-            # /health "models" is a list of {id, name, task} dicts —
-            # normalise to a flat id list for membership testing.
             model_ids = {
                 m.get("id") if isinstance(m, dict) else m
-                for m in health_models
+                for m in health.get("models", [])
             }
             if model_id not in model_ids:
                 continue
             tensor_split = self._model_tensor_split.get((endpoint, model_id))
             vram = self._effective_free_vram_bytes(health, tensor_split)
             here_count = sum(
-                1 for h in self._active_handles if h.runner_host == endpoint
+                1 for h in self._active_handles
+                if h.runner_host == endpoint and h.model_id == model_id
             )
-            # Higher tuple = better.  Negate here_count so fewer is higher.
+            my_server = await self._find_loaded_server(endpoint, model_id)
+            candidates.append((endpoint, vram, here_count, my_server))
+
+        if not candidates:
+            return None
+
+        # --- Rule 1: parallel-spawn over peer-blocked sticky -----------
+        # If at least one endpoint has a running server that is in use
+        # (idle_since is None or here_count > 0) AND at least one peer
+        # endpoint has NO server loaded for this model, prefer the
+        # empty peer: spinning up a fresh server there lets the new
+        # session run TRULY in parallel instead of queuing behind the
+        # busy one on a parallel=1 slot.
+        busy_endpoints = [
+            ep for ep, _v, hc, srv in candidates
+            if hc > 0
+            or (srv is not None and srv.get("idle_since") is None)
+        ]
+        # An endpoint is "empty" only if it has neither a loaded server
+        # nor any of our active handles — a handle without a visible
+        # server (e.g. /v1/servers temporarily unreachable) still means
+        # we're using that runner.
+        empty_endpoints = [
+            (ep, vram) for ep, vram, hc, srv in candidates
+            if hc == 0 and srv is None
+        ]
+        if busy_endpoints and empty_endpoints:
+            # Pick the empty peer with most effective VRAM (best spawn target).
+            empty_endpoints.sort(key=lambda x: x[1], reverse=True)
+            return empty_endpoints[0][0]
+
+        # --- Rule 2: prefer a warm idle server over spinning up a new --
+        # ``CACHE_TIMEOUT_MIN`` is the threshold below which an idle
+        # server *might* belong to a session that's merely paused
+        # mid-conversation.  Past that, it's effectively abandoned and
+        # safe to commandeer.  Reusing a warm server skips the ~30 s
+        # cold-load penalty AND avoids preempting an in-progress session.
+        cache_timeout_sec = CACHE_TIMEOUT_MIN * 60
+        now = time.time()
+        warm_idle: List[tuple[str, float]] = []  # (endpoint, idle_seconds)
+        for ep, _vram, hc, srv in candidates:
+            if hc > 0 or srv is None:
+                continue
+            idle_since = srv.get("idle_since")
+            if idle_since is None:
+                continue  # actively serving someone else
+            idle_for = now - float(idle_since)
+            if idle_for >= cache_timeout_sec:
+                warm_idle.append((ep, idle_for))
+        if warm_idle:
+            # Longest-idle first — least likely to overlap with a
+            # paused session, and most likely to be evicted soon if
+            # we don't use it.
+            warm_idle.sort(key=lambda x: x[1], reverse=True)
+            return warm_idle[0][0]
+
+        # --- Rule 3: existing ranked fallback --------------------------
+        # ``(-here_count, effective_vram)`` — fewest concurrent handles
+        # for this model on the endpoint wins, then most free VRAM.
+        best_url: Optional[str] = None
+        best_key: Optional[tuple[int, int]] = None
+        for ep, vram, here_count, _srv in candidates:
             key = (-here_count, vram)
             if best_key is None or key > best_key:
                 best_key = key
-                best_url = endpoint
+                best_url = ep
         return best_url
+
+    async def _find_loaded_server(
+        self, endpoint: str, model_id: str
+    ) -> Optional[dict]:
+        """Return the loaded llama-server entry for ``model_id`` on
+        ``endpoint``, or None if no server is loaded for that model.
+
+        Used by ``_select_runner`` to apply the parallel-spawn and
+        warm-idle reuse rules above.  Reads from ``/v1/servers`` on
+        the runner; failures (network, parse) are non-fatal and just
+        return None so selection falls through to ranked.
+        """
+        try:
+            client = self._get_client()
+            resp = await client.get(
+                f"{endpoint}/v1/servers", timeout=_HEALTH_TIMEOUT
+            )
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            for srv in data.get("servers", []):
+                if not isinstance(srv, dict):
+                    continue
+                if srv.get("model_id") == model_id and srv.get("healthy", True):
+                    return srv
+            return None
+        except Exception:
+            return None
 
     @staticmethod
     def _parse_tensor_split(tensor_split: Optional[str]) -> Optional[List[float]]:

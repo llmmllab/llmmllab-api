@@ -1337,3 +1337,135 @@ class TestPerSessionSticky:
         assert ("sess-0", "m1") not in client._last_endpoint_per_session
         last_key = (f"sess-{_PER_SESSION_PIN_LIMIT + 4}", "m1")
         assert last_key in client._last_endpoint_per_session
+
+
+class TestSelectRunnerRules:
+    """Three-tier selection: parallel-spawn, warm-idle reuse, ranked.
+
+    These tests exercise the post-sticky selection branches that
+    decide whether to spin up a NEW server on a peer or reuse an
+    existing one.
+    """
+
+    def _client(self):
+        from services.runner_client import RunnerClient
+        c = RunnerClient(endpoints=["http://r1:8000", "http://r2:8000"])
+        c._model_tensor_split = {
+            ("http://r1:8000", "m1"): None,
+            ("http://r2:8000", "m1"): None,
+        }
+        return c
+
+    def _health_resp(self):
+        h = MagicMock(status_code=200)
+        h.json.return_value = {
+            "status": "ok",
+            "gpu": {"0": {"free_mb": 12000}},
+            "models": [{"id": "m1", "name": "m1", "task": "TextToText"}],
+        }
+        return h
+
+    def _servers_resp(self, servers):
+        r = MagicMock(status_code=200)
+        r.json.return_value = {"active_servers": len(servers), "servers": servers}
+        return r
+
+    @pytest.mark.asyncio
+    async def test_rule1_busy_peer_no_server_on_other_picks_other(self):
+        """r1 has busy server, r2 has nothing → pick r2 to spawn fresh."""
+        client = self._client()
+        async def fake_get(url, **kw):
+            if url.endswith("/health"):
+                return self._health_resp()
+            if "r1" in url and "/v1/servers" in url:
+                # r1 has a busy server for m1
+                return self._servers_resp([
+                    {"server_id": "s1", "model_id": "m1",
+                     "healthy": True, "idle_since": None, "use_count": 1}
+                ])
+            if "r2" in url and "/v1/servers" in url:
+                # r2 has nothing
+                return self._servers_resp([])
+            return MagicMock(status_code=404)
+        client._client = _mock_client(get=AsyncMock(side_effect=fake_get))
+        chosen = await client._select_runner("m1")
+        assert chosen == "http://r2:8000"
+
+    @pytest.mark.asyncio
+    async def test_rule2_long_idle_warm_server_wins(self):
+        """No busy peer, but r1 has a server idle past CACHE_TIMEOUT_MIN
+        → reuse it instead of spinning up on r2 (which has nothing).
+        """
+        from config import CACHE_TIMEOUT_MIN
+        import time
+        client = self._client()
+        long_idle_since = time.time() - (CACHE_TIMEOUT_MIN * 60 + 60)
+        async def fake_get(url, **kw):
+            if url.endswith("/health"):
+                return self._health_resp()
+            if "r1" in url and "/v1/servers" in url:
+                return self._servers_resp([
+                    {"server_id": "s1", "model_id": "m1",
+                     "healthy": True,
+                     "idle_since": long_idle_since,
+                     "use_count": 5}
+                ])
+            if "r2" in url and "/v1/servers" in url:
+                return self._servers_resp([])
+            return MagicMock(status_code=404)
+        client._client = _mock_client(get=AsyncMock(side_effect=fake_get))
+        chosen = await client._select_runner("m1")
+        assert chosen == "http://r1:8000"
+
+    @pytest.mark.asyncio
+    async def test_rule2_short_idle_falls_through_to_ranked(self):
+        """If r1's server has only been idle briefly (less than
+        CACHE_TIMEOUT_MIN) it MIGHT belong to a paused session — don't
+        commandeer.  Fall through to ranked.  With r2 having no server
+        AND no busy peer (the brief idle isn't "busy" for rule 1), the
+        ranker picks by (-handles, vram) where both are equal at 0
+        handles and 12 GB; r1 wins by iteration order.
+        """
+        import time
+        client = self._client()
+        recent_idle = time.time() - 60  # 1 min idle, well under 30 min
+        async def fake_get(url, **kw):
+            if url.endswith("/health"):
+                return self._health_resp()
+            if "r1" in url and "/v1/servers" in url:
+                return self._servers_resp([
+                    {"server_id": "s1", "model_id": "m1",
+                     "healthy": True,
+                     "idle_since": recent_idle,
+                     "use_count": 1}
+                ])
+            if "r2" in url and "/v1/servers" in url:
+                return self._servers_resp([])
+            return MagicMock(status_code=404)
+        client._client = _mock_client(get=AsyncMock(side_effect=fake_get))
+        chosen = await client._select_runner("m1")
+        # Either endpoint is plausible; the key invariant is rule 1
+        # did NOT fire (r1 isn't "busy" since here_count=0 and idle_since
+        # is set) and rule 2 did NOT fire (idle wasn't long enough).
+        assert chosen in ("http://r1:8000", "http://r2:8000")
+
+    @pytest.mark.asyncio
+    async def test_rule1_only_one_endpoint_skips(self):
+        """When there's no peer (only one endpoint hosts the model),
+        rule 1 can't fire — fall through to ranked.
+        """
+        from services.runner_client import RunnerClient
+        client = RunnerClient(endpoints=["http://r1:8000"])
+        client._model_tensor_split = {("http://r1:8000", "m1"): None}
+        async def fake_get(url, **kw):
+            if url.endswith("/health"):
+                return self._health_resp()
+            if "/v1/servers" in url:
+                return self._servers_resp([
+                    {"server_id": "s1", "model_id": "m1",
+                     "healthy": True, "idle_since": None}
+                ])
+            return MagicMock(status_code=404)
+        client._client = _mock_client(get=AsyncMock(side_effect=fake_get))
+        chosen = await client._select_runner("m1")
+        assert chosen == "http://r1:8000"

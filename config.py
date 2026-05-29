@@ -71,6 +71,13 @@ HF_HOME = os.environ.get("HF_HOME", "/root/.cache/huggingface")
 # Cache eviction is controlled by the runner via CACHE_TIMEOUT_MIN and
 # EVICTION_TIMEOUT_MIN environment variables.
 
+# Mirror of the runner-side ``CACHE_TIMEOUT_MIN`` (minutes).  Used by
+# ``runner_client._select_runner`` to decide when a server that has
+# been idle for "long enough" can be commandeered by a new session
+# without preempting another session that's merely paused mid-turn.
+# Should match the runner's value; defaulting to 30 (the runner default).
+CACHE_TIMEOUT_MIN = int(os.environ.get("CACHE_TIMEOUT_MIN", "30"))
+
 # ── External API keys ───────────────────────────────────────────────
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
