@@ -514,15 +514,15 @@ class CompletionService:
                     and not acc.has_tool_calls
                     and client_tools
                     and (acc.has_content or acc.final_content)
-                    # ``length`` is handled by maybe_continue_on_truncation
-                    # above; exclude it here so we don't double-fire.
-                    # ``stop`` used to be excluded too — but the
-                    # observed Claude Code failure mode is exactly
-                    # "model emits text describing the tool call but
-                    # doesn't actually invoke it, finishes with stop".
-                    # Letting the nudge prompt fire on stop is the
-                    # whole point of this branch.
-                    and acc.finish_reason != "length"
+                    # Skip when the model finished cleanly with ``stop``:
+                    # that is the normal "final answer" turn for an
+                    # agent that already called tools earlier in the
+                    # conversation. Nudging here triggers an unnecessary
+                    # extra tool call, whose result then prompts another
+                    # final-answer turn, and the cycle repeats — the
+                    # 67-Slack-messages overnight regression. ``length``
+                    # is handled by maybe_continue_on_truncation above.
+                    and acc.finish_reason not in ("stop", "length")
                 ):
                     async for event, acc in maybe_continue_on_missing_tool_call(
                         CompletionService._build_and_run,
@@ -686,12 +686,13 @@ class CompletionService:
 
             # ``length`` is the truncation branch (handled above by
             # maybe_continue_on_truncation_nonstream); skip the nudge
-            # here to avoid double-firing.  ``stop`` is the exact
-            # failure mode we want the nudge for, so don't skip on
-            # that.  See streaming-path note further up.
+            # here to avoid double-firing. Also skip on ``stop`` —
+            # see the streaming-path note above: nudging a clean
+            # final-answer turn forces an unwanted extra tool call
+            # and loops indefinitely across turns.
             skip_continuation = (
-                result.chat_response
-                and result.chat_response.finish_reason == "length"
+                result.chat_response is not None
+                and result.chat_response.finish_reason in ("stop", "length")
             )
             if (
                 _CONTINUATION_ENABLED
