@@ -38,6 +38,8 @@ from models.request_priority_metadata import (
 from models.model_parameters import ModelParameters
 from services.completion_state import CompletionResult, StreamAccumulator
 from services.continuation_logic import (
+    maybe_continue_on_hallucinated_tools,
+    maybe_continue_on_hallucinated_tools_nonstream,
     maybe_continue_on_missing_tool_call,
     maybe_continue_on_missing_tool_call_nonstream,
     maybe_continue_on_truncation,
@@ -46,7 +48,10 @@ from services.continuation_logic import (
     maybe_retry_on_empty_nonstream,
 )
 from services.response_handlers import (
+    extract_client_tool_names,
     extract_text,
+    looks_like_anticipated_tool_call,
+    partition_tool_calls_by_validity,
     set_result_response,
     update_stream_delta,
     update_stream_final,
@@ -509,13 +514,66 @@ class CompletionService:
                     ):
                         yield event, acc
 
-                # On finish_reason=stop, only nudge when the model
-                # declared `[TOOL_INTENT:` in its text but never emitted
-                # a tool_use block. A clean final-answer turn has no
-                # marker, so we accept it as-is and avoid the
-                # 67-Slack-messages overnight loop (505b274). ``length``
-                # is handled by maybe_continue_on_truncation above.
+                # ----- Hallucinated tool name detection ------------
+                # The model sometimes emits a tool_use block with a
+                # name that isn't in the bound client_tools list
+                # (commonly ``browser`` or ``memory_get`` — both
+                # pretraining-frequent generic names that no MCP server
+                # actually exposes here).  The client silently drops
+                # those, no tool_result returns, and the conversation
+                # loops with the model trying the same imagined name.
+                # We:
+                #   1. log the hallucination with the bad name(s)
+                #   2. drop the invalid tool_calls from the response
+                #      so the client doesn't even see them
+                #   3. inject a synthetic user-message-style feedback
+                #      ("Tool 'X' doesn't exist, available names: ...")
+                #      and re-run the workflow so the model corrects
+                _valid_tool_names = extract_client_tool_names(client_tools)
+                _valid_calls, _invalid_calls = partition_tool_calls_by_validity(
+                    acc.final_tool_calls, _valid_tool_names
+                )
+                if _invalid_calls:
+                    logger.warning(
+                        "Model emitted hallucinated tool names",
+                        extra={
+                            "invalid_tool_names": sorted(
+                                {tc.name for tc in _invalid_calls if tc.name}
+                            ),
+                            "valid_emitted_count": len(_valid_calls),
+                            "bound_tool_count": len(_valid_tool_names),
+                        },
+                    )
+                    # Drop invalid calls from the accumulator before
+                    # the downstream router emits tool_use SSE blocks
+                    # from them.
+                    acc.final_tool_calls = _valid_calls
+                    acc.has_tool_calls = bool(_valid_calls)
+                    async for event, acc in maybe_continue_on_hallucinated_tools(
+                        CompletionService._build_and_run,
+                        acc,
+                        user_id,
+                        messages,
+                        model_name,
+                        workflow_type,
+                        conversation_id,
+                        client_tools,
+                        _valid_tool_names,
+                        _invalid_calls,
+                        server_tool_names,
+                        model_parameters,
+                    ):
+                        yield event, acc
+
+                # On finish_reason=stop, nudge when the model declared
+                # `[TOOL_INTENT:` in its text (explicit convention) OR
+                # when the text ends with a tool-call precursor pattern
+                # like "Now let me do X:" (heuristic — common
+                # silent-stop right before a tool call the model
+                # forgot to emit).  ``length`` is handled by
+                # maybe_continue_on_truncation above.
                 _declared_intent = "[TOOL_INTENT:" in (acc.final_content or "")
+                _anticipated = looks_like_anticipated_tool_call(acc.final_content)
                 # Log every turn's tool-intent classification so we can
                 # tell from logs whether the model is using the marker
                 # convention or just stopping cleanly without ever
@@ -544,6 +602,7 @@ class CompletionService:
                             "has_content": acc.has_content,
                             "final_content_len": len(acc.final_content or ""),
                             "declared_intent": _declared_intent,
+                            "anticipated_pattern": _anticipated,
                             "content_preview": (
                                 acc.final_content[:200] if acc.final_content else ""
                             ),
@@ -551,7 +610,11 @@ class CompletionService:
                                 not acc.has_tool_calls
                                 and (acc.has_content or acc.final_content)
                                 and acc.finish_reason != "length"
-                                and (acc.finish_reason != "stop" or _declared_intent)
+                                and (
+                                    acc.finish_reason != "stop"
+                                    or _declared_intent
+                                    or _anticipated
+                                )
                             ),
                         },
                     )
@@ -561,7 +624,11 @@ class CompletionService:
                     and client_tools
                     and (acc.has_content or acc.final_content)
                     and acc.finish_reason != "length"
-                    and (acc.finish_reason != "stop" or _declared_intent)
+                    and (
+                        acc.finish_reason != "stop"
+                        or _declared_intent
+                        or _anticipated
+                    )
                 ):
                     async for event, acc in maybe_continue_on_missing_tool_call(
                         CompletionService._build_and_run,
@@ -737,9 +804,70 @@ class CompletionService:
                         if hasattr(block, "text") and block.text:
                             _nonstream_text += block.text
             _nonstream_declared_intent = "[TOOL_INTENT:" in _nonstream_text
+            _ns_anticipated = looks_like_anticipated_tool_call(_nonstream_text)
             _ns_finish = (
                 result.chat_response.finish_reason if result.chat_response else None
             )
+
+            # ----- Hallucinated tool name detection (non-stream) ------
+            # Same logic as the streaming path: drop tool calls with
+            # names not in client_tools, then re-run with synthetic
+            # feedback so the model picks a real name.
+            _ns_valid_names = extract_client_tool_names(client_tools)
+            _ns_response_tool_calls = (
+                result.chat_response.message.tool_calls
+                if result.chat_response and result.chat_response.message
+                else None
+            )
+            _ns_valid_calls, _ns_invalid_calls = partition_tool_calls_by_validity(
+                _ns_response_tool_calls, _ns_valid_names
+            )
+            if _ns_invalid_calls:
+                logger.warning(
+                    "Model emitted hallucinated tool names (non-stream)",
+                    extra={
+                        "invalid_tool_names": sorted(
+                            {tc.name for tc in _ns_invalid_calls if tc.name}
+                        ),
+                        "valid_emitted_count": len(_ns_valid_calls),
+                        "bound_tool_count": len(_ns_valid_names),
+                    },
+                )
+                if result.chat_response and result.chat_response.message:
+                    result.chat_response.message.tool_calls = _ns_valid_calls
+                await maybe_continue_on_hallucinated_tools_nonstream(
+                    CompletionService._build_and_run,
+                    result,
+                    user_id,
+                    messages,
+                    model_name,
+                    workflow_type,
+                    conversation_id,
+                    client_tools,
+                    _ns_valid_names,
+                    _ns_invalid_calls,
+                    server_tool_names,
+                    model_parameters,
+                )
+                # The recursive pass produced result.chat_response.
+                # Refresh the cached text + classification view for
+                # the gate logic below.
+                _nonstream_text = ""
+                if result.chat_response and result.chat_response.message:
+                    msg_content = result.chat_response.message.content
+                    if isinstance(msg_content, str):
+                        _nonstream_text = msg_content
+                    elif isinstance(msg_content, list):
+                        for block in msg_content:
+                            if hasattr(block, "text") and block.text:
+                                _nonstream_text += block.text
+                _nonstream_declared_intent = "[TOOL_INTENT:" in _nonstream_text
+                _ns_anticipated = looks_like_anticipated_tool_call(_nonstream_text)
+                _ns_finish = (
+                    result.chat_response.finish_reason
+                    if result.chat_response else None
+                )
+
             # Same broadened gate as the streaming path — log every
             # turn that had tools bound, regardless of whether it
             # produced content or just tool calls.
@@ -759,6 +887,7 @@ class CompletionService:
                         "has_content": result.has_content,
                         "final_content_len": len(_nonstream_text),
                         "declared_intent": _nonstream_declared_intent,
+                        "anticipated_pattern": _ns_anticipated,
                         "content_preview": _nonstream_text[:200],
                     },
                 )
@@ -767,6 +896,7 @@ class CompletionService:
                 or (
                     result.chat_response.finish_reason == "stop"
                     and not _nonstream_declared_intent
+                    and not _ns_anticipated
                 )
             )
             if (

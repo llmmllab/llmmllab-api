@@ -9,7 +9,10 @@ in ``services.completion_state``). They handle:
 * filtering server-side tool calls out of a response
 * applying a final ChatResponse to either a ``CompletionResult`` (non-streaming)
   or a ``StreamAccumulator`` (streaming)
+* detecting hallucinated tool names (names not in the bound tool list)
 """
+
+import re
 
 from models.chat_response import ChatResponse
 from models.message import Message, MessageContent, MessageContentType, MessageRole
@@ -68,6 +71,157 @@ def filter_tool_calls(
     if not server_tool_names:
         return list(tool_calls)
     return [tc for tc in tool_calls if tc.name not in server_tool_names]
+
+
+def extract_client_tool_names(client_tools: list | None) -> set[str]:
+    """Return the set of bound tool names from a heterogeneous tool list.
+
+    Tools can arrive in several shapes depending on the entry router:
+
+    * **Anthropic flat**: ``{"name": "...", "description": "...", "input_schema": ...}``
+    * **Anthropic server-tool**: ``{"type": "web_search_20250305", ...}`` —
+      derive the name by stripping the version suffix.
+    * **OpenAI function**: ``{"type": "function", "function": {"name": "...", ...}}``
+    * **LangChain BaseTool**: any object with a ``.name`` attribute.
+
+    Used by :func:`partition_tool_calls_by_validity` to detect when the
+    model emits a tool call with a name we never offered it.  The empty
+    set means "no tools bound" — partitioning is a no-op in that case.
+    """
+    names: set[str] = set()
+    if not client_tools:
+        return names
+    for tool in client_tools:
+        if isinstance(tool, dict):
+            # OpenAI function form.
+            fn = tool.get("function")
+            if isinstance(fn, dict) and fn.get("name"):
+                names.add(fn["name"])
+                continue
+            # Direct name (Anthropic flat).
+            n = tool.get("name")
+            if n:
+                names.add(n)
+                continue
+            # Server-tool form: derive from type, strip ``_NNNN`` version.
+            tool_type = tool.get("type", "")
+            if tool_type and tool_type not in {"function", "custom", "tool"}:
+                base = re.sub(r"_\d+$", "", tool_type)
+                if base:
+                    names.add(base)
+            continue
+        # LangChain BaseTool / pydantic model with .name.
+        n = getattr(tool, "name", None)
+        if n:
+            names.add(n)
+    return names
+
+
+def partition_tool_calls_by_validity(
+    tool_calls: list[ToolCall] | None,
+    valid_names: set[str],
+) -> tuple[list[ToolCall], list[ToolCall]]:
+    """Split ``tool_calls`` into ``(valid, invalid)`` by ``valid_names``.
+
+    Used to detect model hallucinations.  When the model emits a tool
+    call with a name that wasn't in the bound list (commonly ``browser``
+    or ``memory_get`` — both pretraining-frequent generic tool names),
+    the client silently drops the call, the model never gets a
+    tool_result, and the conversation degenerates into a "try again
+    with the same imagined name" loop.
+
+    Returns ``(all_calls, [])`` when ``valid_names`` is empty — caller
+    didn't supply bound names, so we can't validate.  Otherwise: any
+    call whose ``name`` isn't in ``valid_names`` lands in the invalid
+    bucket.
+    """
+    if not tool_calls:
+        return [], []
+    if not valid_names:
+        return list(tool_calls), []
+    valid: list[ToolCall] = []
+    invalid: list[ToolCall] = []
+    for tc in tool_calls:
+        if tc.name in valid_names:
+            valid.append(tc)
+        else:
+            invalid.append(tc)
+    return valid, invalid
+
+
+# A heuristic for "the model wrote a tool-call precursor and then
+# stopped before actually calling the tool."
+#
+# Two patterns trigger:
+#   1. The tail of the content contains a setup verb phrase
+#      (``Let me``, ``I'll``, ``Going to``, ``Now``, ``Next``, etc.)
+#      AND ends with a colon, ellipsis, or no terminator at all.
+#   2. The tail ends with an ellipsis (``...``) regardless of phrase.
+#
+# A complete sentence ending with ``.`` is NOT flagged — that would
+# capture every final answer.  Only the colon / ellipsis / open-ended
+# endings combined with a setup phrase are treated as anticipation.
+_SETUP_PHRASE_RE = re.compile(
+    r"\b(?:"
+    r"now\s+let(?:'|’)?s|"
+    r"now\s+let\s+me|"
+    r"let\s+me|"
+    r"let(?:'|’)?s|"
+    r"i(?:'|’)?ll|"
+    r"i\s+will|"
+    r"i(?:'|’)?m\s+going\s+to|"
+    r"going\s+to|"
+    r"(?:^|[\.\n])\s*next\b|"
+    r"(?:^|[\.\n])\s*now\b"
+    r")\b",
+    re.IGNORECASE,
+)
+_OPEN_ENDED_TAIL_RE = re.compile(r"(?:[:\(]|\.{2,})\s*$")
+_TRAILING_ELLIPSIS_RE = re.compile(r"\.{3,}\s*$")
+
+
+def looks_like_anticipated_tool_call(text: str | None) -> bool:
+    """True if ``text`` reads like a setup phrase for a tool call.
+
+    The model often writes "Now let me do X:" and then stops without
+    actually calling the tool — usually a sampler hiccup, not a final
+    answer.  Without the explicit ``[TOOL_INTENT:`` marker the system
+    prompt asks for, the existing gate accepts those turns as terminal.
+    This heuristic fills the gap.
+
+    Triggers when:
+      * the tail contains a setup verb phrase AND ends with ``:`` or
+        ``...`` (or with no terminator at all), OR
+      * the tail ends with a trailing ``...``
+
+    Returns False for sentences ending in ``.`` — that's a normal
+    final answer, not an anticipated tool call.  False positives are
+    further bounded because the nudge fires once per turn.
+    """
+    if not text:
+        return False
+    stripped = text.rstrip()
+    if not stripped:
+        return False
+    # Last 250 chars is plenty; longer responses are typically final
+    # answers (precursors are short by nature).
+    tail = stripped[-250:]
+
+    # A bare ``...`` at the end is a clear continuation marker on its
+    # own, regardless of verb phrase.
+    if _TRAILING_ELLIPSIS_RE.search(tail):
+        return True
+
+    # Otherwise: require a setup verb phrase AND either a colon /
+    # open paren / ellipsis ending, or no sentence terminator at all
+    # (i.e. mid-thought stop).
+    if not _SETUP_PHRASE_RE.search(tail):
+        return False
+    if _OPEN_ENDED_TAIL_RE.search(tail):
+        return True
+    # Trailing char other than a sentence terminator → mid-thought stop.
+    last_char = tail[-1]
+    return last_char not in ".!?\"')]}"
 
 
 def filter_response_tool_calls(

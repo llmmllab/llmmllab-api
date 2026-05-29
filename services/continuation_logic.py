@@ -28,10 +28,12 @@ from models.chat_response import ChatResponse
 from models.message import Message, MessageContent, MessageContentType
 from models.model_parameters import ModelParameters
 from services.completion_state import CompletionResult, StreamAccumulator
+from models.tool_call import ToolCall
 from services.prompt_templates import (
     CONTINUATION_PROMPT,
     EMPTY_RESPONSE_NUDGE,
     TRUNCATION_CONTINUATION_PROMPT,
+    hallucinated_tool_feedback,
 )
 from services.response_handlers import (
     build_followup_messages,
@@ -224,6 +226,125 @@ async def maybe_continue_on_missing_tool_call(
         model_parameters,
     ):
         yield event, acc
+
+
+async def maybe_continue_on_hallucinated_tools(
+    build_and_run: BuildAndRunFn,
+    acc: StreamAccumulator,
+    user_id: str,
+    messages: list[Message],
+    model_name: str,
+    workflow_type,
+    conversation_id: int,
+    client_tools: list | None,
+    valid_tool_names: set[str],
+    invalid_calls: list[ToolCall],
+    server_tool_names: set[str] | None,
+    model_parameters: ModelParameters | None = None,
+) -> AsyncIterator[tuple[Union[ChatResponse, ServerToolEvent], StreamAccumulator]]:
+    """Re-run the workflow with feedback about hallucinated tool names.
+
+    The primary pass emitted tool calls with names that aren't in the
+    bound list — the client would silently drop them and the model
+    would loop indefinitely calling the same nonexistent tool.  Inject
+    a user-message-style error explaining which names were bad and
+    what's actually available, then stream the secondary pass to the
+    client so the corrected response replaces (well, *augments*) the
+    dropped call.
+    """
+    bad_names = [tc.name for tc in invalid_calls if tc.name]
+    if not bad_names:
+        return
+    logger.warning(
+        "Model emitted tool calls with names not in bound list — "
+        "dropping invalid calls and re-running with feedback",
+        extra={
+            "invalid_tool_names": bad_names,
+            "valid_count": len(valid_tool_names),
+            "valid_preview": sorted(valid_tool_names)[:10],
+        },
+    )
+    feedback = hallucinated_tool_feedback(bad_names, valid_tool_names)
+    # Preserve any text the model emitted alongside the bad tool call so
+    # the secondary pass keeps the train-of-thought context.
+    assistant_text = acc.final_content or ""
+    correction_messages = build_followup_messages(
+        messages,
+        feedback,
+        assistant_text=assistant_text or None,
+    )
+    async for event, acc in stream_secondary_pass(
+        build_and_run,
+        acc,
+        user_id,
+        correction_messages,
+        model_name,
+        workflow_type,
+        conversation_id,
+        client_tools,
+        "auto",
+        server_tool_names,
+        model_parameters,
+    ):
+        yield event, acc
+
+
+async def maybe_continue_on_hallucinated_tools_nonstream(
+    build_and_run: BuildAndRunFn,
+    result: CompletionResult,
+    user_id: str,
+    messages: list[Message],
+    model_name: str,
+    workflow_type,
+    conversation_id: int,
+    client_tools: list | None,
+    valid_tool_names: set[str],
+    invalid_calls: list[ToolCall],
+    server_tool_names: set[str] | None,
+    model_parameters: ModelParameters | None = None,
+) -> None:
+    """Non-streaming counterpart to :func:`maybe_continue_on_hallucinated_tools`.
+
+    Replaces ``result.chat_response`` with the corrected pass's final
+    response, the same way ``maybe_continue_on_missing_tool_call_nonstream``
+    does for its nudge.
+    """
+    bad_names = [tc.name for tc in invalid_calls if tc.name]
+    if not bad_names:
+        return
+    logger.warning(
+        "Model emitted tool calls with names not in bound list "
+        "(non-streaming) — dropping and re-running with feedback",
+        extra={
+            "invalid_tool_names": bad_names,
+            "valid_count": len(valid_tool_names),
+        },
+    )
+    feedback = hallucinated_tool_feedback(bad_names, valid_tool_names)
+    assistant_text = (
+        extract_text(result.chat_response.message)
+        if result.chat_response and result.chat_response.message
+        else ""
+    )
+    correction_messages = build_followup_messages(
+        messages,
+        feedback,
+        assistant_text=assistant_text or None,
+    )
+    final = await collect_response(
+        build_and_run,
+        user_id,
+        correction_messages,
+        model_name,
+        workflow_type,
+        conversation_id,
+        client_tools,
+        "auto",
+        server_tool_names,
+        model_parameters,
+    )
+    if final is not None:
+        set_result_response(result, final, server_tool_names)
 
 
 async def maybe_retry_on_empty(
