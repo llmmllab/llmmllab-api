@@ -76,7 +76,7 @@ HF_HOME = os.environ.get("HF_HOME", "/root/.cache/huggingface")
 # been idle for "long enough" can be commandeered by a new session
 # without preempting another session that's merely paused mid-turn.
 # Should match the runner's value; defaulting to 30 (the runner default).
-CACHE_TIMEOUT_MIN = int(os.environ.get("CACHE_TIMEOUT_MIN", "30"))
+CACHE_TIMEOUT_MIN = int(os.environ.get("CACHE_TIMEOUT_MIN", "5"))
 
 # ── External API keys ───────────────────────────────────────────────
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")

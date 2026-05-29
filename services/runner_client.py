@@ -931,10 +931,29 @@ class RunnerClient:
         # empty peer: spinning up a fresh server there lets the new
         # session run TRULY in parallel instead of queuing behind the
         # busy one on a parallel=1 slot.
+        # A server counts as "busy" if it has been used within the
+        # last CACHE_TIMEOUT_MIN — that window protects sessions that
+        # are merely paused mid-conversation from being preempted.
+        # Older idle time is treated as abandoned and handled by
+        # Rule 2 below.
+        cache_timeout_sec = CACHE_TIMEOUT_MIN * 60
+        now = time.time()
+
+        def _is_busy(hc: int, srv: Optional[dict]) -> bool:
+            if hc > 0:
+                return True
+            if srv is None:
+                return False
+            idle_since = srv.get("idle_since")
+            if idle_since is None:
+                return True  # actively serving a request right now
+            try:
+                return (now - float(idle_since)) < cache_timeout_sec
+            except (TypeError, ValueError):
+                return True  # malformed timestamp: assume busy to be safe
+
         busy_endpoints = [
-            ep for ep, _v, hc, srv in candidates
-            if hc > 0
-            or (srv is not None and srv.get("idle_since") is None)
+            ep for ep, _v, hc, srv in candidates if _is_busy(hc, srv)
         ]
         # An endpoint is "empty" only if it has neither a loaded server
         # nor any of our active handles — a handle without a visible
@@ -955,8 +974,8 @@ class RunnerClient:
         # mid-conversation.  Past that, it's effectively abandoned and
         # safe to commandeer.  Reusing a warm server skips the ~30 s
         # cold-load penalty AND avoids preempting an in-progress session.
-        cache_timeout_sec = CACHE_TIMEOUT_MIN * 60
-        now = time.time()
+        # (``cache_timeout_sec`` and ``now`` were already computed above
+        # for the busy-check; reuse them here.)
         warm_idle: List[tuple[str, float]] = []  # (endpoint, idle_seconds)
         for ep, _vram, hc, srv in candidates:
             if hc > 0 or srv is None:

@@ -1450,6 +1450,34 @@ class TestSelectRunnerRules:
         assert chosen in ("http://r1:8000", "http://r2:8000")
 
     @pytest.mark.asyncio
+    async def test_rule1_idle_under_cache_timeout_still_busy(self):
+        """A server that went idle 30 s ago (well within CACHE_TIMEOUT_MIN
+        of 5 min) is still considered busy — a session may be paused
+        mid-conversation.  Rule 1 fires: route new request to empty peer
+        instead of commandeering the maybe-paused server.
+        """
+        import time
+        client = self._client()
+        recently_idle = time.time() - 30  # 30 s ago, ≪ CACHE_TIMEOUT_MIN
+        async def fake_get(url, **kw):
+            if url.endswith("/health"):
+                return self._health_resp()
+            if "r1" in url and "/v1/servers" in url:
+                return self._servers_resp([
+                    {"server_id": "s1", "model_id": "m1",
+                     "healthy": True,
+                     "idle_since": recently_idle,
+                     "use_count": 3}
+                ])
+            if "r2" in url and "/v1/servers" in url:
+                return self._servers_resp([])
+            return MagicMock(status_code=404)
+        client._client = _mock_client(get=AsyncMock(side_effect=fake_get))
+        chosen = await client._select_runner("m1")
+        # r1's recent idle counts as busy; r2 is empty; rule 1 → r2.
+        assert chosen == "http://r2:8000"
+
+    @pytest.mark.asyncio
     async def test_rule1_only_one_endpoint_skips(self):
         """When there's no peer (only one endpoint hosts the model),
         rule 1 can't fire — fall through to ranked.
