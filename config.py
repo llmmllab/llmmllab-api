@@ -235,3 +235,17 @@ IMG_SERVER_AUTO_SHUTDOWN = os.environ.get(
 IMAGE_TOKENS_DEFAULT = int(os.environ.get("IMAGE_TOKENS_DEFAULT", "1500"))
 VISION_PATCH_PX = int(os.environ.get("VISION_PATCH_PX", "28"))
 VISION_MAX_LONG_EDGE_PX = int(os.environ.get("VISION_MAX_LONG_EDGE_PX", "1280"))
+
+# ── Raw Token Debug ────────────────────────────────────────────────
+# When enabled, writes every raw model token (no stripping/modification)
+# plus all user messages to <RAW_TOKEN_DEBUG_DIR>/<session_id>.tokens.
+# Useful for diagnosing premature stops and context overflow patterns.
+RAW_TOKEN_DEBUG = os.environ.get("RAW_TOKEN_DEBUG", "false").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+RAW_TOKEN_DEBUG_DIR = os.environ.get(
+    "RAW_TOKEN_DEBUG_DIR", "/tmp/llmmllab_debug"
+)

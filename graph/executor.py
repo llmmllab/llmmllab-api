@@ -6,6 +6,7 @@ from ComposerService into a generic, reusable component.
 """
 
 import asyncio
+import os
 from typing import (
     Any,
     AsyncIterator,
@@ -37,6 +38,103 @@ from .content_parser import (
     RawToolCallStreamBuffer,
 )
 from .tool_call_parser import RawToolCallParser, _RAW_TOOL_CALL_RE
+
+# ── Raw Token Debug Writer ──────────────────────────────────────────────
+from config import RAW_TOKEN_DEBUG, RAW_TOKEN_DEBUG_DIR
+from utils.logging import _session_id_ctx
+
+
+def _extract_message_text(msg: Any) -> str:  # noqa: F811 - Any imported above
+    """Pull plain text out of a Message or LangChain message for debug output."""
+    parts = getattr(msg, "content", None)
+    if isinstance(parts, str):
+        return parts
+    if isinstance(parts, list):
+        texts: List[str] = []
+        for p in parts:
+            if hasattr(p, "text") and p.text:
+                texts.append(p.text)
+            elif isinstance(p, dict) and p.get("text"):
+                texts.append(p["text"])
+        return "".join(texts)
+    return str(getattr(msg, "content", ""))
+
+
+class _RawTokenWriter:
+    """Append-only file writer that logs user messages + raw model tokens.
+
+    Only does anything when ``config.RAW_TOKEN_DEBUG`` is True.  When the
+    flag is off this still instantiates but all methods are no-ops.
+    """
+
+    def __init__(self, session_id: str, state_dict: Dict[str, Any]):
+        if not RAW_TOKEN_DEBUG:
+            self.fh = None
+            return
+
+        os.makedirs(RAW_TOKEN_DEBUG_DIR, exist_ok=True)
+        path = os.path.join(
+            RAW_TOKEN_DEBUG_DIR, f"{session_id}.tokens"
+        )
+        self.fh = open(path, "a", encoding="utf-8")
+        self._write_header(session_id, state_dict)
+
+    @property
+    def enabled(self) -> bool:
+        return self.fh is not None
+
+    # -- internal header writing ----------------------------------------
+
+    def _write_header(self, session_id: str, state_dict: Dict[str, Any]):
+        now = datetime.now(timezone.utc).isoformat()
+        user_id = state_dict.get("user_id", "?")
+        conv_id = state_dict.get("conversation_id", "?")
+        fh = self.fh
+
+        fh.write(
+            f"=== {now} | session={session_id} user={user_id}"
+            f" conv={conv_id}\n"
+        )
+
+        msgs = state_dict.get("messages", [])
+        for m in msgs:
+            role = getattr(m, "role", "?")
+            if hasattr(role, "value"):
+                role = role.value
+            text = _extract_message_text(m)
+            fh.write(f"[{role}] {text}\n")
+
+        fh.write("--- RAW TOKENS START ---\n")
+        fh.flush()
+
+    # -- public methods -------------------------------------------------
+
+    def write_tokens(self, texts: List[str]):
+        """Write raw token strings (called per-stream-chunk)."""
+        if not self.enabled or not self.fh:
+            return
+        for t in texts:
+            if t:
+                self.fh.write(t)
+        self.fh.flush()
+
+    def write_finish(
+        self, finish_reason: str, prompt_tokens: int, eval_tokens: int
+    ):
+        if not self.enabled or not self.fh:
+            return
+        self.fh.write(
+            f"\n\n--- FINISH: {finish_reason}"
+            f" (prompt={prompt_tokens}, eval={eval_tokens}) ---\n"
+        )
+        self.fh.flush()
+
+    def close(self):
+        if self.fh is not None:
+            try:
+                self.fh.close()
+            except Exception:
+                pass
 
 
 class WorkflowExecutor:
@@ -199,6 +297,10 @@ class WorkflowExecutor:
         # from LangChain.  Used to suppress duplicate content-as-text.
         streaming_has_tool_call_chunks = False
 
+        # Raw token debug writer — initialized once the state dict is ready.
+        session_id = _session_id_ctx.get() or str(uuid.uuid4())
+        debug_writer: Optional[_RawTokenWriter] = None
+
         try:
             # Prepare state dict
             if isinstance(initial_state, dict):
@@ -211,6 +313,8 @@ class WorkflowExecutor:
                 )
             if config is None and thread_id is not None:
                 config = self.create_thread_config(thread_id)
+
+            debug_writer = _RawTokenWriter(session_id, state_dict)
 
             async for event in workflow.astream_events(
                 state_dict,
@@ -263,6 +367,8 @@ class WorkflowExecutor:
                             or add_kw.get("reasoning")
                         )
                     if reasoning_delta:
+                        if debug_writer and debug_writer.enabled:
+                            debug_writer.write_tokens([f"[THINK] {reasoning_delta}"])
                         yield self._make_response(
                             conversation_id,
                             state,
@@ -280,6 +386,8 @@ class WorkflowExecutor:
                     # -- Regular content tokens --
                     if chunk.content:
                         text_parts = parse_content(chunk.content)
+                        if debug_writer and debug_writer.enabled:
+                            debug_writer.write_tokens(text_parts)
                         for raw_text in text_parts:
                             # Pass content through raw - no think tag stripping
                             safe_text, complete_blocks = tc_stream_buf.feed(raw_text)
@@ -512,6 +620,11 @@ class WorkflowExecutor:
                             },
                         )
 
+                        if debug_writer and debug_writer.enabled:
+                            debug_writer.write_finish(
+                                reason, prompt_eval_count, eval_count
+                            )
+
                 # ----------------------------------------------------------------
                 # Structured output (grammar mode)
                 # ----------------------------------------------------------------
@@ -676,6 +789,9 @@ class WorkflowExecutor:
                 total_duration=total_duration,
             )
             return  # Don't fall through to final-message assembly (empty response would overwrite error)
+        finally:
+            if debug_writer is not None:
+                debug_writer.close()
 
         # --------------------------------------------------------------------
         # Build final accumulated message - pass through raw

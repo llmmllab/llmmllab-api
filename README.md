@@ -206,6 +206,15 @@ edge down to a cap.
 | `VISION_PATCH_PX` | Vision-tower patch size in pixels. Qwen-VL family is 28. Default: `28` |
 | `VISION_MAX_LONG_EDGE_PX` | Max long-edge the vision tower processes before patchification. Default: `1280` |
 
+### Raw Token Debug
+
+When enabled, writes every raw model token (no stripping/modification) plus all user messages to `<RAW_TOKEN_DEBUG_DIR>/<session_id>.tokens`. Useful for diagnosing premature stops and context overflow patterns.
+
+| Variable | Description |
+|----------|-------------|
+| `RAW_TOKEN_DEBUG` | Enable raw-token debug logging. When `true`, each workflow's full message history and unmodified streaming tokens are appended to a per-session file under `RAW_TOKEN_DEBUG_DIR`. Default: `false` |
+| `RAW_TOKEN_DEBUG_DIR` | Output directory for debug token files. Default: `/tmp/llmmllab_debug` |
+
 ### Image Server Lifecycle
 
 | Variable | Description |
