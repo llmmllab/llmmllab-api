@@ -110,6 +110,21 @@ class RunnerClient:
         # GPUs on a runner over-counts capacity for pinned models.
         # None means "no pinning, use total".
         self._model_tensor_split: Dict[tuple[str, str], Optional[str]] = {}
+        # Per-(endpoint, model_id) configured ``--parallel`` slot count,
+        # captured from the runner's /v1/models ``parameters.parallel``.
+        # ``_select_runner`` uses it to compute ``slots_free = parallel -
+        # use_count`` so a warm server with a free KV slot is preferred
+        # over cold-starting elsewhere (and so the fan-out trigger fires
+        # only when a server's slots are actually full).  Defaults to 1
+        # when absent (matches llama.cpp's single-slot default).
+        self._model_parallel: Dict[tuple[str, str], int] = {}
+        # Per-(endpoint, model_id) estimated VRAM footprint in bytes,
+        # captured from /v1/models ``details.size`` (+ small overhead).
+        # Mirrors the runner's own ``_estimate_model_size``.  Used by
+        # ``_select_runner`` to decide whether a runner has the headroom
+        # to cold-start a FRESH server for the model (the preferred path
+        # for a new session) vs. having to pack onto an existing one.
+        self._model_size_bytes: Dict[tuple[str, str], int] = {}
         # Pipeline-name → endpoints map, populated alongside the
         # model_map from each runner's /v1/models response by filtering
         # on ``provider == 'in_process'`` and indexing by ``pipeline``.
@@ -794,26 +809,45 @@ class RunnerClient:
         """Pick the best endpoint that hosts *model_id*.
 
         Selection priority (highest first):
-          1. **Sticky preference** — if we've previously acquired this
-             ``model_id`` from an endpoint and it's still healthy + still
-             hosts the model, return it.  Maximises KV-cache reuse on the
-             runner: every session targeting the same model lands on the
-             same llama.cpp server, sharing prefix cache, slot LRU, and
-             saved-KV snapshots.
-          2. **Fallback** — among the remaining eligible endpoints,
-             rank by ``(-active_handles_here, available_vram)``:
-             prefer the endpoint with the FEWEST handles we already
-             hold there, breaking ties by most free VRAM.  This still
-             spreads first-time-loaded models across runners so they
-             don't all pile onto one box.
+
+          0. **Per-session sticky** — a returning session goes back to the
+             runner that holds its KV state (live server with a free slot,
+             or an on-disk slot checkpoint).  KV reuse is the single
+             biggest lever for long multi-turn sessions, so this wins over
+             everything else — it only yields when the pinned server is
+             *full* (no free slot) and a peer can take the session.
+          0b. **Global sticky** — model-level KV-reuse hint.  Short-circuits
+             ONLY in the single-runner case (no other runner hosts the
+             model) when the sticky still has a free slot; otherwise it
+             defers to the ladder so a new session can fan out.
+
+          Then, for a new session (no sticky match), the parallel-aware
+          ladder:
+
+          1. **Cold-start a fresh server** when a runner has no server for
+             the model yet AND enough free VRAM to fit one.  The session
+             gets its own dedicated slots with zero contention.  Among
+             such runners, pick the one with the FEWEST total active
+             servers, then the most free VRAM.
+          2. **Attach to a warm server with a free KV slot**
+             (``use_count < parallel``) when no cold-start headroom exists.
+             Warm weights + shared prefix cache, runs concurrently on its
+             own slot.  Pick the most free slots, then least-loaded runner,
+             then most free VRAM.
+          3. **Ranked fallback** when everything is full — fewest of our
+             handles for the model, then most free VRAM — and let the
+             runner's per-slot queue serialize.
+
+        Slot capacity (``parallel``) and the model's VRAM footprint
+        (``details.size``) come from each runner's ``/v1/models`` and are
+        cached in ``_model_parallel`` / ``_model_size_bytes`` by
+        ``refresh_model_map``; live ``use_count`` and the runner's total
+        ``active_servers`` come from ``/v1/servers`` and ``/health``.
 
         An endpoint that doesn't host the model or doesn't respond to
-        ``/health`` is skipped entirely.
-
-        The sticky preference DOES NOT lock us in forever — when the
-        sticky endpoint becomes unhealthy or loses the model, the next
-        call falls back to ranking and resets the pin (in
-        ``acquire_server`` on success).
+        ``/health`` is skipped entirely.  Sticky pins never lock in
+        forever — an unhealthy/model-less sticky is dropped and
+        ``acquire_server`` re-pins on the next success.
         """
         # Temporary forensic log: emit one line per selection so we can
         # tell from logs exactly which path returns and why. Remove
@@ -891,36 +925,36 @@ class RunnerClient:
                         )
                         return per_session
                     else:
-                        # Busy-escape: if the pinned runner's server is
-                        # currently in-use AND an empty peer exists, fall
-                        # through so Rule 1 spawns fresh on the peer for
-                        # true parallelism. Use the same "in-use"
-                        # definition Rule 1 uses (starting, use_count>0,
-                        # actively serving, or used < CACHE_TIMEOUT_MIN).
-                        in_use = False
-                        if sticky_loaded.get("starting"):
-                            in_use = True
-                        elif (sticky_loaded.get("use_count") or 0) > 0:
-                            in_use = True
-                        else:
-                            _is = sticky_loaded.get("idle_since")
-                            if _is is None:
-                                in_use = True
-                            else:
-                                try:
-                                    in_use = (
-                                        time.time() - float(_is)
-                                    ) < (CACHE_TIMEOUT_MIN * 60)
-                                except (TypeError, ValueError):
-                                    in_use = True
-                        if not in_use:
-                            in_use = any(
-                                h.runner_host == per_session
-                                and h.model_id == model_id
-                                for h in self._active_handles
-                            )
-                        empty_peer = False
-                        if in_use:
+                        # Slot-aware busy-escape.  Keep this session
+                        # pinned to its warm server as long as that
+                        # server still has a free KV slot
+                        # (use_count < parallel) — the returning session
+                        # reuses its prefix cache on a free slot with no
+                        # contention, which is the single biggest lever
+                        # for long multi-turn sessions.  Only when the
+                        # pinned server is FULL (no free slot) AND a peer
+                        # can actually take the session (its own free slot
+                        # or VRAM to cold-start fresh) do we fall through
+                        # and trade KV reuse for avoiding a queue.
+                        parallel = (
+                            self._model_parallel.get((per_session, model_id))
+                            or 1
+                        )
+                        slots_free = self._slots_free(
+                            per_session, model_id, sticky_loaded
+                        )
+                        # Count our own in-flight handles too, in case the
+                        # runner's use_count lags a just-issued request.
+                        here = sum(
+                            1 for h in self._active_handles
+                            if h.runner_host == per_session
+                            and h.model_id == model_id
+                        )
+                        sticky_full = (
+                            slots_free <= 0 or here >= parallel
+                        )
+                        better_peer = False
+                        if sticky_full:
                             mapped = (
                                 self._model_map.get(model_id)
                                 or list(self._endpoints)
@@ -931,42 +965,26 @@ class RunnerClient:
                                 ep_loaded = await self._find_loaded_server(
                                     ep, model_id
                                 )
-                                ep_here = any(
-                                    h.runner_host == ep
-                                    and h.model_id == model_id
-                                    for h in self._active_handles
-                                )
-                                # "Available" = no api-side handle AND
-                                # (no loaded server OR server is free).
-                                # Free = use_count==0 AND not starting AND
-                                # idle_since is not None (i.e., not actively
-                                # serving right now). A loaded-but-free peer
-                                # is BETTER than an empty peer because it
-                                # already has the model's weights in RAM —
-                                # avoids the cold-load penalty.
-                                if ep_here:
-                                    continue
+                                # A peer can take the session if it has a
+                                # free slot, or no server yet (cold-start).
                                 if ep_loaded is None:
-                                    empty_peer = True
+                                    better_peer = True
                                     break
-                                if (
-                                    not ep_loaded.get("starting")
-                                    and (ep_loaded.get("use_count") or 0) == 0
-                                    and ep_loaded.get("idle_since") is not None
-                                ):
-                                    empty_peer = True
+                                if self._slots_free(ep, model_id, ep_loaded) > 0:
+                                    better_peer = True
                                     break
 
-                        if in_use and empty_peer:
+                        if sticky_full and better_peer:
                             logger.info(
-                                "select_runner: per-session sticky in-use + empty peer — falling through",
+                                "select_runner: per-session sticky full + peer available — falling through",
                                 extra={
                                     "sticky": per_session,
                                     "session_id": session_id,
+                                    "slots_free": slots_free,
                                 },
                             )
                             # Leave the pin in place; acquire_server
-                            # re-pins on success of the empty peer.
+                            # re-pins on success of the chosen peer.
                         else:
                             self._last_endpoint_per_session.move_to_end(
                                 (session_id, model_id)
@@ -998,54 +1016,32 @@ class RunnerClient:
                 for m in (health.get("models", []) if health else [])
             }
             if health and model_id in sticky_model_ids:
-                # Don't pin to a sticky endpoint that's already busy
-                # serving this same model for another session — that
-                # forces concurrent callers to queue on a single
-                # parallel=1 slot when an idle peer exists.  When the
-                # sticky has at least one handle for this model and an
-                # alternative endpoint also hosts it, fall through to
-                # the load-aware ranked path.
-                sticky_busy_for_model = any(
-                    h.runner_host == sticky and h.model_id == model_id
-                    for h in self._active_handles
+                # The global pin is a model-level KV-reuse hint (last
+                # runner that served this model).  It short-circuits ONLY
+                # in the single-runner case: when no other runner hosts
+                # the model, the sticky is the sole option, so return it
+                # whenever it still has a free KV slot.  When alternative
+                # runners exist we deliberately fall through to the
+                # parallel-aware ladder below so a NEW session can
+                # cold-start a fresh dedicated server (Rule 1, preferred)
+                # rather than piling onto the warm one — the ladder's
+                # Rule 2 still prefers this warm server's free slot if no
+                # cold-start headroom exists anywhere.
+                sticky_loaded = await self._find_loaded_server(
+                    sticky, model_id
                 )
-                # Also treat the sticky as busy if the runner itself
-                # reports a loaded server for this model that's actively
-                # serving (idle_since=None). _active_handles only counts
-                # requests this api process knows about; a session
-                # holding the slot via another api replica, or a slot
-                # that's mid-turn between handle release and the next
-                # acquire, looks "free" to _active_handles but is
-                # actually pinned on the runner.
-                if not sticky_busy_for_model:
-                    sticky_loaded = await self._find_loaded_server(
-                        sticky, model_id
-                    )
-                    if sticky_loaded is not None:
-                        # Same definition of "busy" Rule 1's `_is_busy`
-                        # uses below: loading OR processing OR actively
-                        # generating OR last used within CACHE_TIMEOUT_MIN.
-                        # A sticky in any of those states risks queuing
-                        # the new request behind a session that hasn't
-                        # quite released its slot, so fall through to
-                        # the load-aware ranked path if an idle peer
-                        # exists.
-                        if sticky_loaded.get("starting"):
-                            sticky_busy_for_model = True
-                        elif (sticky_loaded.get("use_count") or 0) > 0:
-                            sticky_busy_for_model = True
-                        else:
-                            idle_since = sticky_loaded.get("idle_since")
-                            if idle_since is None:
-                                sticky_busy_for_model = True
-                            else:
-                                try:
-                                    sticky_busy_for_model = (
-                                        time.time() - float(idle_since)
-                                    ) < (CACHE_TIMEOUT_MIN * 60)
-                                except (TypeError, ValueError):
-                                    # Malformed timestamp — treat as busy to be safe.
-                                    sticky_busy_for_model = True
+                parallel = self._model_parallel.get((sticky, model_id)) or 1
+                slots_free = self._slots_free(sticky, model_id, sticky_loaded)
+                here = sum(
+                    1 for h in self._active_handles
+                    if h.runner_host == sticky and h.model_id == model_id
+                )
+                sticky_has_free_slot = (
+                    sticky_loaded is not None
+                    and not sticky_loaded.get("starting")
+                    and slots_free > 0
+                    and here < parallel
+                )
                 alternatives_exist = any(
                     e != sticky
                     and not self._is_circuit_open(e)
@@ -1056,23 +1052,21 @@ class RunnerClient:
                     "select_runner: global-sticky path decision",
                     extra={
                         "sticky": sticky,
-                        "sticky_busy_for_model": sticky_busy_for_model,
+                        "sticky_has_free_slot": sticky_has_free_slot,
+                        "slots_free": slots_free,
                         "alternatives_exist": alternatives_exist,
-                        "tensor_split_keys_for_model": [
-                            k for k in self._model_tensor_split.keys()
-                            if k[1] == model_id
-                        ],
                     },
                 )
-                if not (sticky_busy_for_model and alternatives_exist):
+                if sticky_has_free_slot and not alternatives_exist:
                     logger.info(
-                        "select_runner: returning global-sticky",
+                        "select_runner: returning global-sticky (sole runner, free slot)",
                         extra={"endpoint": sticky},
                     )
                     return sticky
-            # Sticky endpoint no longer eligible — drop the pin so the
-            # ranking below can choose freshly and ``acquire_server``
-            # re-pins on next success.
+            # Didn't short-circuit — either the model isn't on the sticky
+            # anymore, or (the common multi-runner case) we're deferring
+            # to the parallel-aware ladder.  Drop the pin so the ranking
+            # below chooses freshly; ``acquire_server`` re-pins on success.
             self._last_endpoint_for_model.pop(model_id, None)
         elif sticky:
             # Sticky has a tripped circuit; clear the pin so the next
@@ -1081,12 +1075,15 @@ class RunnerClient:
 
         # --- Gather per-endpoint state ------------------------------
         # Collected in one pass so the rule layers below can compare
-        # across endpoints without re-fetching.  Each entry:
-        #   ep, vram, here_count, my_server (dict from /v1/servers or None)
-        # ``my_server`` is the existing llama-server instance on that
-        # runner that's already loaded ``model_id``, if any.  ``idle_since``
-        # is null when the server is actively serving a request, or a
-        # unix timestamp when it went idle.
+        # across endpoints without re-fetching.  Each candidate dict:
+        #   ep            endpoint URL
+        #   vram          tensor-split-aware free VRAM (bytes)
+        #   here_count    api-side handles we hold for this model here
+        #   srv           the loaded llama-server for this model (or None)
+        #   total_servers total llama-servers running on this runner
+        #                 (all models) — the "active servers" load signal
+        #   slots_free    configured parallel − live use_count (free KV slots)
+        #   can_cold_start whether a FRESH server for the model would fit
         # Restrict the candidate scan to the endpoints that the model
         # map says actually host this model, when populated. Falls back
         # to all configured endpoints before the first refresh so the
@@ -1094,7 +1091,7 @@ class RunnerClient:
         eligible_endpoints = (
             self._model_map.get(model_id) or list(self._endpoints)
         )
-        candidates: List[tuple[str, int, int, Optional[dict]]] = []
+        candidates: List[dict] = []
         for endpoint in eligible_endpoints:
             if self._is_circuit_open(endpoint):
                 continue
@@ -1114,7 +1111,23 @@ class RunnerClient:
                 if h.runner_host == endpoint and h.model_id == model_id
             )
             my_server = await self._find_loaded_server(endpoint, model_id)
-            candidates.append((endpoint, vram, here_count, my_server))
+            try:
+                total_servers = int(health.get("active_servers") or 0)
+            except (TypeError, ValueError):
+                total_servers = 0
+            candidates.append(
+                {
+                    "ep": endpoint,
+                    "vram": vram,
+                    "here_count": here_count,
+                    "srv": my_server,
+                    "total_servers": total_servers,
+                    "slots_free": self._slots_free(endpoint, model_id, my_server),
+                    "can_cold_start": self._can_cold_start(
+                        endpoint, model_id, vram, my_server
+                    ),
+                }
+            )
 
         logger.info(
             "select_runner: candidates",
@@ -1122,18 +1135,22 @@ class RunnerClient:
                 "model_id": model_id,
                 "candidates": [
                     {
-                        "ep": ep,
-                        "vram": vram,
-                        "here_count": hc,
+                        "ep": c["ep"],
+                        "vram": c["vram"],
+                        "here_count": c["here_count"],
+                        "total_servers": c["total_servers"],
+                        "slots_free": c["slots_free"],
+                        "can_cold_start": c["can_cold_start"],
                         "srv": (
-                            None if srv is None
+                            None if c["srv"] is None
                             else {
-                                "model_id": srv.get("model_id"),
-                                "idle_since": srv.get("idle_since"),
+                                "model_id": c["srv"].get("model_id"),
+                                "use_count": c["srv"].get("use_count"),
+                                "idle_since": c["srv"].get("idle_since"),
                             }
                         ),
                     }
-                    for ep, vram, hc, srv in candidates
+                    for c in candidates
                 ],
             },
         )
@@ -1142,130 +1159,97 @@ class RunnerClient:
             logger.info("select_runner: no candidates → None")
             return None
 
-        # --- Rule 1: parallel-spawn over peer-blocked sticky -----------
-        # If at least one endpoint has a running server that is in use
-        # (idle_since is None or here_count > 0) AND at least one peer
-        # endpoint has NO server loaded for this model, prefer the
-        # empty peer: spinning up a fresh server there lets the new
-        # session run TRULY in parallel instead of queuing behind the
-        # busy one on a parallel=1 slot.
-        # A server counts as "busy" if it has been used within the
-        # last CACHE_TIMEOUT_MIN — that window protects sessions that
-        # are merely paused mid-conversation from being preempted.
-        # Older idle time is treated as abandoned and handled by
-        # Rule 2 below.
-        cache_timeout_sec = CACHE_TIMEOUT_MIN * 60
-        now = time.time()
-
-        def _is_busy(hc: int, srv: Optional[dict]) -> bool:
-            """True iff this endpoint is *currently* handling a request
-            for the model. Used only to decide whether to TRIGGER Rule 1
-            fan-out; the "free peer" target check is _is_available which
-            requires use_count==0 + idle (and would never overlap with
-            this definition). 'Recently used within CACHE_TIMEOUT_MIN'
-            is NOT busy here — that case is fan-out target territory,
-            not a fan-out trigger."""
-            if hc > 0:
-                return True
-            if srv is None:
-                return False
-            if srv.get("starting"):
-                return True
-            if (srv.get("use_count") or 0) > 0:
-                return True
-            if srv.get("idle_since") is None:
-                return True
-            return False
-
-        busy_endpoints = [
-            ep for ep, _v, hc, srv in candidates if _is_busy(hc, srv)
-        ]
-        # An endpoint is "available" if we have no api-side handle for
-        # it AND either it has no loaded server OR the loaded server is
-        # currently free (use_count==0, not starting, idle_since set).
-        # A loaded-but-free peer is preferred over an empty one because
-        # the model's weights are already resident — no cold-load
-        # penalty.
-        def _is_available(hc: int, srv: Optional[dict]) -> bool:
-            if hc > 0:
-                return False
-            if srv is None:
-                return True
-            if srv.get("starting"):
-                return False
-            if (srv.get("use_count") or 0) > 0:
-                return False
-            if srv.get("idle_since") is None:
-                return False
-            return True
-
-        # Available endpoints — preferred over empty for cold-load
-        # avoidance. List as (ep, vram, has_loaded) so we can rank
-        # loaded-free first, empty second; VRAM as final tiebreaker.
-        available_endpoints = [
-            (ep, vram, srv is not None)
-            for ep, vram, hc, srv in candidates
-            if _is_available(hc, srv)
-        ]
-        logger.info(
-            "select_runner: rule1 inputs",
-            extra={
-                "busy_endpoints": busy_endpoints,
-                "available_endpoints": [
-                    {"ep": e, "loaded": loaded} for e, _, loaded in available_endpoints
-                ],
-            },
-        )
-        if busy_endpoints and available_endpoints:
-            # In-use peer + free alternative → use the free one for
-            # parallelism. Sort: loaded-free first (warm weights),
-            # then empty (cold-load), with VRAM as tiebreaker.
-            available_endpoints.sort(
-                key=lambda x: (not x[2], -x[1])
-            )
-            picked = available_endpoints[0][0]
+        # --- Rule 1: prefer a FRESH server when a runner can fit one ---
+        # New session (no sticky matched).  Among runners that have NO
+        # server loaded for this model AND enough free VRAM to start one,
+        # cold-start a dedicated server: the session gets its own full
+        # slot complement with zero contention.  Pick the least-loaded
+        # runner — fewest TOTAL active servers — then most free VRAM.
+        cold = [c for c in candidates if c["can_cold_start"]]
+        if cold:
+            cold.sort(key=lambda c: (c["total_servers"], -c["vram"]))
+            picked = cold[0]["ep"]
             logger.info(
-                "select_runner: returning rule1 (in-use peer → available peer)",
+                "select_runner: returning rule1 (cold-start fresh server)",
                 extra={"endpoint": picked},
             )
             return picked
 
-        # --- Rule 2: prefer a warm idle server over spinning up a new --
-        # ``CACHE_TIMEOUT_MIN`` is the threshold below which an idle
-        # server *might* belong to a session that's merely paused
-        # mid-conversation.  Past that, it's effectively abandoned and
-        # safe to commandeer.  Reusing a warm server skips the ~30 s
-        # cold-load penalty AND avoids preempting an in-progress session.
-        # (``cache_timeout_sec`` and ``now`` were already computed above
-        # for the busy-check; reuse them here.)
-        warm_idle: List[tuple[str, float]] = []  # (endpoint, idle_seconds)
-        for ep, _vram, hc, srv in candidates:
-            if hc > 0 or srv is None:
-                continue
-            idle_since = srv.get("idle_since")
-            if idle_since is None:
-                continue  # actively serving someone else
-            idle_for = now - float(idle_since)
-            if idle_for >= cache_timeout_sec:
-                warm_idle.append((ep, idle_for))
-        if warm_idle:
-            # Longest-idle first — least likely to overlap with a
-            # paused session, and most likely to be evicted soon if
-            # we don't use it.
-            warm_idle.sort(key=lambda x: x[1], reverse=True)
-            return warm_idle[0][0]
+        # --- Rule 2: attach to a warm server with a free KV slot -------
+        # No runner can cold-start (VRAM is full, or the model is already
+        # loaded everywhere it fits).  Use an existing server that still
+        # has a free slot (use_count < parallel): warm weights + shared
+        # prefix cache, and the new session runs concurrently on its own
+        # slot rather than queuing.  Prefer the most free slots, then the
+        # least-loaded runner, then most free VRAM.
+        warm = [
+            c for c in candidates
+            if c["srv"] is not None and c["slots_free"] > 0
+        ]
+        if warm:
+            warm.sort(
+                key=lambda c: (-c["slots_free"], c["total_servers"], -c["vram"])
+            )
+            picked = warm[0]["ep"]
+            logger.info(
+                "select_runner: returning rule2 (warm server, free slot)",
+                extra={"endpoint": picked, "slots_free": warm[0]["slots_free"]},
+            )
+            return picked
 
-        # --- Rule 3: existing ranked fallback --------------------------
-        # ``(-here_count, effective_vram)`` — fewest concurrent handles
-        # for this model on the endpoint wins, then most free VRAM.
-        best_url: Optional[str] = None
-        best_key: Optional[tuple[int, int]] = None
-        for ep, vram, here_count, _srv in candidates:
-            key = (-here_count, vram)
-            if best_key is None or key > best_key:
-                best_key = key
-                best_url = ep
-        return best_url
+        # --- Rule 3: everything full → ranked fallback -----------------
+        # No cold-start headroom and every loaded server's slots are
+        # busy.  Pick the runner with the fewest of our handles for this
+        # model, then most free VRAM, and let the runner's own per-slot
+        # queue serialize the request — admitting it here is no worse than
+        # holding it in our priority queue.
+        candidates.sort(key=lambda c: (c["here_count"], -c["vram"]))
+        picked = candidates[0]["ep"]
+        logger.info(
+            "select_runner: returning rule3 (ranked fallback, all slots busy)",
+            extra={"endpoint": picked},
+        )
+        return picked
+
+    def _slots_free(
+        self, endpoint: str, model_id: str, srv: Optional[dict]
+    ) -> int:
+        """Free KV slots on ``srv`` = configured ``parallel`` − live ``use_count``.
+
+        ``use_count`` from /v1/servers counts in-flight proxied requests,
+        which maps 1:1 onto occupied llama.cpp KV slots.  Returns the
+        configured ``parallel`` when ``srv`` is None (an as-yet-unloaded
+        server would start fresh with all slots free).  Clamped at 0.
+        """
+        parallel = self._model_parallel.get((endpoint, model_id)) or 1
+        if srv is None:
+            return parallel
+        use_count = 0
+        try:
+            use_count = int(srv.get("use_count") or 0)
+        except (TypeError, ValueError):
+            use_count = 0
+        return max(0, parallel - use_count)
+
+    def _can_cold_start(
+        self, endpoint: str, model_id: str, vram: int, srv: Optional[dict]
+    ) -> bool:
+        """True iff a FRESH server for ``model_id`` would fit on ``endpoint``.
+
+        Only meaningful when no server is loaded for the model yet
+        (``srv is None``) — otherwise the runner reuses the existing one.
+        ``vram`` is the tensor-split-aware free VRAM from
+        ``_effective_free_vram_bytes``; the size estimate mirrors the
+        runner's ``_estimate_model_size`` (gguf ``details.size`` + 128 MB).
+        Falls back to "fits" when the size is unknown (size 0) so a
+        missing estimate never blocks the preferred cold-start path.
+        """
+        if srv is not None:
+            return False
+        size = self._model_size_bytes.get((endpoint, model_id)) or 0
+        if size <= 0:
+            return True
+        return vram >= (size + 128 * 1024 * 1024)
 
     async def _find_loaded_server(
         self, endpoint: str, model_id: str
@@ -1728,6 +1712,8 @@ class RunnerClient:
         new_map: Dict[str, List[str]] = {}
         new_pipeline_map: Dict[str, List[str]] = {}
         new_tensor_split: Dict[tuple[str, str], Optional[str]] = {}
+        new_parallel: Dict[tuple[str, str], int] = {}
+        new_size_bytes: Dict[tuple[str, str], int] = {}
         client = self._get_client()
         tasks = []
         for endpoint in self._endpoints:
@@ -1753,9 +1739,32 @@ class RunnerClient:
                     # ModelParameters object; missing or empty means
                     # "no pinning, use total free VRAM".
                     params = model.get("parameters") or {}
-                    new_tensor_split[(endpoint, model_id)] = (
-                        params.get("tensor_split") if isinstance(params, dict) else None
+                    if isinstance(params, dict):
+                        new_tensor_split[(endpoint, model_id)] = params.get(
+                            "tensor_split"
+                        )
+                        par = params.get("parallel")
+                        try:
+                            new_parallel[(endpoint, model_id)] = (
+                                int(par) if par else 1
+                            )
+                        except (TypeError, ValueError):
+                            new_parallel[(endpoint, model_id)] = 1
+                    else:
+                        new_tensor_split[(endpoint, model_id)] = None
+                        new_parallel[(endpoint, model_id)] = 1
+                    details = model.get("details") or {}
+                    sz = (
+                        details.get("size")
+                        if isinstance(details, dict)
+                        else None
                     )
+                    try:
+                        new_size_bytes[(endpoint, model_id)] = (
+                            int(sz) if sz else 0
+                        )
+                    except (TypeError, ValueError):
+                        new_size_bytes[(endpoint, model_id)] = 0
                     if model.get("provider") == "in_process":
                         pipeline_name = model.get("pipeline")
                         if pipeline_name:
@@ -1764,6 +1773,8 @@ class RunnerClient:
                                 eps.append(endpoint)
         self._model_map = new_map
         self._model_tensor_split = new_tensor_split
+        self._model_parallel = new_parallel
+        self._model_size_bytes = new_size_bytes
         self._pipeline_map = new_pipeline_map
         logger.info(
             f"Model map refreshed: {len(new_map)} models, "

@@ -1133,23 +1133,82 @@ class TestRunnerClientStickyEndpoint:
         assert client._last_endpoint_for_model["m1"] == "http://r1:8000"
 
     @pytest.mark.asyncio
-    async def test_select_runner_prefers_sticky_endpoint(self):
-        """``_select_runner`` returns the pinned endpoint when healthy."""
-        health = MagicMock(status_code=200)
-        health.json.return_value = {
-            "status": "ok",
-            "gpu": {"available_vram_bytes": 12000000000},
-            "models": ["m1"],
+    async def test_global_sticky_dominates_sole_runner_with_free_slot(self):
+        """The global pin short-circuits in the single-runner case when
+        the sticky still has a warm server with a free KV slot — there's
+        no peer to fan out to, so KV reuse wins."""
+        async def fake_get(url, **kw):
+            resp = MagicMock(status_code=200)
+            if url.endswith("/health"):
+                resp.json.return_value = {
+                    "status": "ok",
+                    "gpu": {"0": {"free_mb": 12000}},
+                    "models": [{"id": "m1", "name": "m1", "task": "TextToText"}],
+                }
+                return resp
+            if "/v1/servers" in url:
+                resp.json.return_value = {
+                    "active_servers": 1,
+                    "servers": [
+                        {"server_id": "s1", "model_id": "m1",
+                         "healthy": True, "idle_since": None, "use_count": 0}
+                    ],
+                }
+                return resp
+            return MagicMock(status_code=404)
+        client = RunnerClient(endpoints=["http://r1:8000"])
+        client._client = _mock_client(get=AsyncMock(side_effect=fake_get))
+        client._model_tensor_split = {("http://r1:8000", "m1"): None}
+        client._model_parallel = {("http://r1:8000", "m1"): 2}
+        client._last_endpoint_for_model["m1"] = "http://r1:8000"
+
+        chosen = await client._select_runner("m1")
+        assert chosen == "http://r1:8000"
+
+    @pytest.mark.asyncio
+    async def test_global_sticky_yields_to_fanout_when_peer_can_cold_start(self):
+        """With more than one runner hosting the model, the global pin
+        does NOT lock traffic to itself — a new session cold-starts a
+        fresh server on an empty peer (Rule 1) instead of piling onto the
+        warm sticky.  This is the fan-out the per-session pin relies on."""
+        async def fake_get(url, **kw):
+            resp = MagicMock(status_code=200)
+            if url.endswith("/health"):
+                resp.json.return_value = {
+                    "status": "ok",
+                    "gpu": {"0": {"free_mb": 12000}},
+                    "models": [{"id": "m1", "name": "m1", "task": "TextToText"}],
+                }
+                return resp
+            if "r2" in url and "/v1/servers" in url:
+                # sticky r2 has a warm server with a free slot
+                resp.json.return_value = {
+                    "active_servers": 1,
+                    "servers": [
+                        {"server_id": "s2", "model_id": "m1",
+                         "healthy": True, "idle_since": None, "use_count": 0}
+                    ],
+                }
+                return resp
+            if "r1" in url and "/v1/servers" in url:
+                resp.json.return_value = {"active_servers": 0, "servers": []}
+                return resp
+            return MagicMock(status_code=404)
+        client = RunnerClient(endpoints=["http://r1:8000", "http://r2:8000"])
+        client._client = _mock_client(get=AsyncMock(side_effect=fake_get))
+        client._model_tensor_split = {
+            ("http://r1:8000", "m1"): None,
+            ("http://r2:8000", "m1"): None,
         }
-        mock = _mock_client(get=AsyncMock(return_value=health))
-        client = RunnerClient(
-            endpoints=["http://r1:8000", "http://r2:8000"]
-        )
-        client._client = mock
+        client._model_parallel = {
+            ("http://r1:8000", "m1"): 2,
+            ("http://r2:8000", "m1"): 2,
+        }
         client._last_endpoint_for_model["m1"] = "http://r2:8000"
 
         chosen = await client._select_runner("m1")
-        assert chosen == "http://r2:8000"
+        # r1 is empty with VRAM → cold-start fresh there, not sticky r2.
+        assert chosen == "http://r1:8000"
 
     @pytest.mark.asyncio
     async def test_select_runner_drops_pin_when_sticky_unhealthy(self):
@@ -1431,11 +1490,14 @@ class TestPerSessionSticky:
 
 
 class TestSelectRunnerRules:
-    """Three-tier selection: parallel-spawn, warm-idle reuse, ranked.
+    """Three-tier parallel-aware selection ladder (post-sticky):
 
-    These tests exercise the post-sticky selection branches that
-    decide whether to spin up a NEW server on a peer or reuse an
-    existing one.
+      1. cold-start a fresh server where one fits (VRAM headroom, no
+         server loaded for the model yet) — fewest active servers, then
+         most VRAM;
+      2. attach to a warm server with a free KV slot
+         (``use_count < parallel``) when no cold-start headroom exists;
+      3. ranked fallback when everything is full.
     """
 
     def _client(self):
@@ -1483,15 +1545,13 @@ class TestSelectRunnerRules:
         assert chosen == "http://r2:8000"
 
     @pytest.mark.asyncio
-    async def test_rule2_long_idle_warm_server_wins(self):
-        """No busy peer, but r1 has a server idle past CACHE_TIMEOUT_MIN
-        → reuse it instead of spinning up on r2 (which has nothing).
-
-        Per the routing contract: a warm-idle loaded server (idle ≥
-        CACHE_TIMEOUT_MIN, "abandoned" by the previous session) is the
-        right reuse target — Rule 1 only fans out to an empty peer when
-        the loaded peer is currently IN-USE. Cache reuse beats cold
-        spawn when there's no contention.
+    async def test_cold_start_preferred_over_warm_idle(self):
+        """r1 has an idle warm server (free slots); r2 is empty with VRAM.
+        A new session cold-starts a fresh dedicated server on r2 rather
+        than reusing the warm r1 — the explicit "prefer a NEW server when
+        there's space" policy.  (A *returning* session would instead hit
+        the per-session sticky path and reuse its own warm server; this
+        path only governs new sessions with no pin.)
         """
         from config import CACHE_TIMEOUT_MIN
         import time
@@ -1512,6 +1572,102 @@ class TestSelectRunnerRules:
             return MagicMock(status_code=404)
         client._client = _mock_client(get=AsyncMock(side_effect=fake_get))
         chosen = await client._select_runner("m1")
+        assert chosen == "http://r2:8000"
+
+    @pytest.mark.asyncio
+    async def test_warm_free_slot_when_no_cold_start_headroom(self):
+        """Both runners have the model loaded (no empty peer to cold-start
+        on), but r2's server has a free KV slot while r1's is full.  The
+        new session packs onto r2's free slot (Rule 2) — warm weights,
+        runs concurrently on its own slot."""
+        client = self._client()
+        client._model_parallel = {
+            ("http://r1:8000", "m1"): 2,
+            ("http://r2:8000", "m1"): 2,
+        }
+        async def fake_get(url, **kw):
+            if url.endswith("/health"):
+                return self._health_resp()
+            if "r1" in url and "/v1/servers" in url:
+                # r1 full: 2 of 2 slots in use
+                return self._servers_resp([
+                    {"server_id": "s1", "model_id": "m1",
+                     "healthy": True, "idle_since": None, "use_count": 2}
+                ])
+            if "r2" in url and "/v1/servers" in url:
+                # r2 has one free slot (1 of 2 used)
+                return self._servers_resp([
+                    {"server_id": "s2", "model_id": "m1",
+                     "healthy": True, "idle_since": None, "use_count": 1}
+                ])
+            return MagicMock(status_code=404)
+        client._client = _mock_client(get=AsyncMock(side_effect=fake_get))
+        chosen = await client._select_runner("m1")
+        assert chosen == "http://r2:8000"
+
+    @pytest.mark.asyncio
+    async def test_ranked_fallback_when_all_slots_full(self):
+        """No cold-start headroom and every loaded server is at capacity.
+        Fall through to the ranked tiebreak (fewest of our handles, then
+        most VRAM) and let the runner queue — here both servers are full
+        so a runner is still returned rather than None."""
+        client = self._client()
+        client._model_parallel = {
+            ("http://r1:8000", "m1"): 1,
+            ("http://r2:8000", "m1"): 1,
+        }
+        async def fake_get(url, **kw):
+            if url.endswith("/health"):
+                return self._health_resp()
+            if "/v1/servers" in url:
+                return self._servers_resp([
+                    {"server_id": "sx", "model_id": "m1",
+                     "healthy": True, "idle_since": None, "use_count": 1}
+                ])
+            return MagicMock(status_code=404)
+        client._client = _mock_client(get=AsyncMock(side_effect=fake_get))
+        chosen = await client._select_runner("m1")
+        assert chosen in ("http://r1:8000", "http://r2:8000")
+
+    @pytest.mark.asyncio
+    async def test_cold_start_blocked_by_insufficient_vram(self):
+        """A runner with the model unloaded but NOT enough free VRAM to
+        fit it must not be chosen for a cold-start; the warm server with
+        a free slot wins instead."""
+        client = self._client()
+        client._model_parallel = {
+            ("http://r1:8000", "m1"): 2,
+            ("http://r2:8000", "m1"): 2,
+        }
+        # Model needs ~10 GB; r2 (empty) only has ~1 GB free → can't fit.
+        client._model_size_bytes = {
+            ("http://r1:8000", "m1"): 10 * 1024 * 1024 * 1024,
+            ("http://r2:8000", "m1"): 10 * 1024 * 1024 * 1024,
+        }
+        def _health_for(free_mb):
+            h = MagicMock(status_code=200)
+            h.json.return_value = {
+                "status": "ok",
+                "gpu": {"0": {"free_mb": free_mb}},
+                "models": [{"id": "m1", "name": "m1", "task": "TextToText"}],
+            }
+            return h
+        async def fake_get(url, **kw):
+            if url.endswith("/health"):
+                # r1 has the model loaded (low free VRAM); r2 empty but
+                # also starved of VRAM so it can't cold-start.
+                return _health_for(1000)
+            if "r1" in url and "/v1/servers" in url:
+                return self._servers_resp([
+                    {"server_id": "s1", "model_id": "m1",
+                     "healthy": True, "idle_since": None, "use_count": 1}
+                ])
+            if "r2" in url and "/v1/servers" in url:
+                return self._servers_resp([])
+            return MagicMock(status_code=404)
+        client._client = _mock_client(get=AsyncMock(side_effect=fake_get))
+        chosen = await client._select_runner("m1")
+        # r2 can't fit a fresh server → fall to r1's warm free slot.
         assert chosen == "http://r1:8000"
 
     @pytest.mark.asyncio
