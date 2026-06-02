@@ -7,6 +7,7 @@ from ComposerService into a generic, reusable component.
 
 import asyncio
 import os
+import uuid
 from typing import (
     Any,
     AsyncIterator,
