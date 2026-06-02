@@ -38,6 +38,7 @@ from utils.message_conversion import (
     extract_text_from_message,
 )
 from utils.grammar_generator import parse_structured_output
+
 # services.token_counter is imported lazily inside ``_trim_messages_to_context``
 # to avoid a module-load cycle: services.token_counter → services.runner_client
 # → graph.* → agents.chat → agents.base.  The trim path is the only consumer.
@@ -312,11 +313,14 @@ The current date is {current_date}."""
         if self.tools or request_tools:
             system_prompt += """
 
+IMPORTANT:
 When you are about to use a tool, emit the literal marker
 `[TOOL_INTENT:<tool_name>]` on its own line in the same assistant turn,
 immediately followed by the actual tool call. Do not emit this marker
 when you are giving a final answer or just talking — only when a tool
-invocation is the next thing you intend to do."""
+invocation is the next thing you intend to do.
+
+"""
 
         # Strip injected commit trailers (Co-Authored-By) from system prompt
         system_prompt = self._SYSTEM_PROMPT_STRIP_RE.sub("", system_prompt).rstrip()
@@ -385,9 +389,7 @@ invocation is the next thing you intend to do."""
                     _json.dumps(
                         {
                             "name": getattr(t, "name", "<tool>") or "<tool>",
-                            "description": (
-                                getattr(t, "description", "") or ""
-                            )[:200],
+                            "description": (getattr(t, "description", "") or "")[:200],
                         },
                         ensure_ascii=False,
                     )
@@ -429,7 +431,7 @@ invocation is the next thing you intend to do."""
 
         Counts use llama.cpp's ``/tokenize`` endpoint via the runner proxy —
         the previous ``len // 3`` heuristic over-counted dense JSON / tool
-        payloads by ~2× and triggered false context-overflow trims under
+        payloads by ~2x and triggered false context-overflow trims under
         claude-cli traffic.  If the tokenizer call fails (network blip,
         runner unreachable) we skip the trim and let llama-server itself
         decide whether the prompt fits — its own context guard will refuse
