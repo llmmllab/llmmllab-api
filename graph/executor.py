@@ -45,19 +45,25 @@ from utils.logging import _session_id_ctx
 
 
 def _extract_message_text(msg: Any) -> str:  # noqa: F811 - Any imported above
-    """Pull plain text out of a Message or LangChain message for debug output."""
-    parts = getattr(msg, "content", None)
+    """Pull plain text out of a Message or LangChain message for debug output.
+
+    Handles dict-shaped messages too: ``state_dict`` is produced by
+    ``model_dump()`` in the executor, so by the time the debug writer sees
+    them the messages are plain dicts — attribute access (``getattr``)
+    silently returns nothing, which is why the header logged blank text.
+    """
+    parts = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
     if isinstance(parts, str):
         return parts
     if isinstance(parts, list):
         texts: List[str] = []
         for p in parts:
-            if hasattr(p, "text") and p.text:
-                texts.append(p.text)
-            elif isinstance(p, dict) and p.get("text"):
+            if isinstance(p, dict) and p.get("text"):
                 texts.append(p["text"])
+            elif hasattr(p, "text") and p.text:
+                texts.append(p.text)
         return "".join(texts)
-    return str(getattr(msg, "content", ""))
+    return "" if parts is None else str(parts)
 
 
 class _RawTokenWriter:
@@ -98,7 +104,14 @@ class _RawTokenWriter:
 
         msgs = state_dict.get("messages", [])
         for m in msgs:
-            role = getattr(m, "role", "?")
+            # Messages are dicts here (state_dict came from model_dump()).
+            # Fall back to ``type`` (LangChain) when ``role`` is absent,
+            # and use dict access — attribute access silently failed,
+            # which is why every line logged ``[?]`` with blank text.
+            if isinstance(m, dict):
+                role = m.get("role") or m.get("type") or "?"
+            else:
+                role = getattr(m, "role", None) or getattr(m, "type", None) or "?"
             if hasattr(role, "value"):
                 role = role.value
             text = _extract_message_text(m)

@@ -51,6 +51,7 @@ from services.response_handlers import (
     extract_client_tool_names,
     extract_text,
     looks_like_anticipated_tool_call,
+    looks_like_premature_stop,
     partition_tool_calls_by_validity,
     set_result_response,
     update_stream_delta,
@@ -574,6 +575,10 @@ class CompletionService:
                 # maybe_continue_on_truncation above.
                 _declared_intent = "[TOOL_INTENT:" in (acc.final_content or "")
                 _anticipated = looks_like_anticipated_tool_call(acc.final_content)
+                # Degenerate premature stop: a tiny finish=stop answer
+                # ("I", "Done") emitted mid-tool-loop — the model bailed
+                # and the user would otherwise have to nudge by hand.
+                _premature = looks_like_premature_stop(acc.final_content, messages)
                 # Log every turn's tool-intent classification so we can
                 # tell from logs whether the model is using the marker
                 # convention or just stopping cleanly without ever
@@ -603,6 +608,7 @@ class CompletionService:
                             "final_content_len": len(acc.final_content or ""),
                             "declared_intent": _declared_intent,
                             "anticipated_pattern": _anticipated,
+                            "premature_stop": _premature,
                             "content_preview": (
                                 acc.final_content[:200] if acc.final_content else ""
                             ),
@@ -614,6 +620,7 @@ class CompletionService:
                                     acc.finish_reason != "stop"
                                     or _declared_intent
                                     or _anticipated
+                                    or _premature
                                 )
                             ),
                         },
@@ -628,6 +635,7 @@ class CompletionService:
                         acc.finish_reason != "stop"
                         or _declared_intent
                         or _anticipated
+                        or _premature
                     )
                 ):
                     async for event, acc in maybe_continue_on_missing_tool_call(
@@ -805,6 +813,7 @@ class CompletionService:
                             _nonstream_text += block.text
             _nonstream_declared_intent = "[TOOL_INTENT:" in _nonstream_text
             _ns_anticipated = looks_like_anticipated_tool_call(_nonstream_text)
+            _ns_premature = looks_like_premature_stop(_nonstream_text, messages)
             _ns_finish = (
                 result.chat_response.finish_reason if result.chat_response else None
             )
@@ -863,6 +872,7 @@ class CompletionService:
                                 _nonstream_text += block.text
                 _nonstream_declared_intent = "[TOOL_INTENT:" in _nonstream_text
                 _ns_anticipated = looks_like_anticipated_tool_call(_nonstream_text)
+                _ns_premature = looks_like_premature_stop(_nonstream_text, messages)
                 _ns_finish = (
                     result.chat_response.finish_reason
                     if result.chat_response else None
@@ -888,6 +898,7 @@ class CompletionService:
                         "final_content_len": len(_nonstream_text),
                         "declared_intent": _nonstream_declared_intent,
                         "anticipated_pattern": _ns_anticipated,
+                        "premature_stop": _ns_premature,
                         "content_preview": _nonstream_text[:200],
                     },
                 )
@@ -897,6 +908,7 @@ class CompletionService:
                     result.chat_response.finish_reason == "stop"
                     and not _nonstream_declared_intent
                     and not _ns_anticipated
+                    and not _ns_premature
                 )
             )
             if (

@@ -370,3 +370,36 @@ class TestAgentRunStructured:
         assert isinstance(result, Greeting)
         assert result.name == "World"
         assert call_count[0] == 2
+
+
+class TestToolIntentMarkerGating:
+    """The [TOOL_INTENT:] instruction must be emitted whenever tools are
+    available for the request — including the dynamic-tool case where
+    tools arrive per-call and self.tools is empty (Claude Code / MCP).
+
+    Regression: gating on self.tools alone silently disabled the marker
+    for every dynamic-tool session, so the model never signalled tool
+    intent and the nudge gate was inert.
+    """
+
+    def test_no_tools_no_marker(self):
+        agent = _make_base_agent()  # self.tools == []
+        sp, _ = agent._separate_system_prompt([])
+        assert "[TOOL_INTENT:" not in sp
+
+    def test_per_request_tools_inject_marker(self):
+        agent = _make_base_agent()  # self.tools == []
+        fake_tool = MagicMock()
+        fake_tool.name = "read_file"
+        sp, _ = agent._separate_system_prompt([], [fake_tool])
+        assert "[TOOL_INTENT:" in sp
+
+    def test_constructor_tools_still_inject_marker(self):
+        model = MagicMock()
+        fake_tool = MagicMock()
+        fake_tool.name = "read_file"
+        agent = BaseAgent(
+            model=model, system_prompt="You are helpful.", tools=[fake_tool]
+        )
+        sp, _ = agent._separate_system_prompt([])
+        assert "[TOOL_INTENT:" in sp

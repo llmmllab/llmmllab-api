@@ -13,11 +13,13 @@ model emits tool_use blocks with names that aren't in the bound list:
        "Now let me X:" precursor pattern.
 """
 
+from models.message import Message, MessageContent, MessageContentType, MessageRole
 from models.tool_call import ToolCall
 from services.prompt_templates import hallucinated_tool_feedback
 from services.response_handlers import (
     extract_client_tool_names,
     looks_like_anticipated_tool_call,
+    looks_like_premature_stop,
     partition_tool_calls_by_validity,
 )
 
@@ -200,3 +202,73 @@ class TestLooksLikeAnticipatedToolCall:
         # "let me X" pattern present anywhere in the tail it should
         # still match.  Add the colon the model usually adds:
         assert looks_like_anticipated_tool_call(text + ":")
+
+
+def _text_msg(role, text):
+    return Message(
+        role=role,
+        content=[MessageContent(type=MessageContentType.TEXT, text=text)],
+    )
+
+
+def _tool_result_msg_openai():
+    """OpenAI shape: a dedicated TOOL-role message."""
+    return Message(
+        role=MessageRole.TOOL,
+        content=[MessageContent(type=MessageContentType.TOOL_RESULT, text="ok")],
+    )
+
+
+def _tool_result_msg_anthropic():
+    """Anthropic shape: tool result folded into a USER message."""
+    return Message(
+        role=MessageRole.USER,
+        content=[MessageContent(type=MessageContentType.TOOL_RESULT, text="ok")],
+    )
+
+
+class TestLooksLikePrematureStop:
+    """Tight gate: a tiny finish=stop answer mid-tool-loop is a bail."""
+
+    def test_degenerate_single_token_after_tool_result(self):
+        msgs = [
+            _text_msg(MessageRole.USER, "fix the fstab"),
+            _tool_result_msg_openai(),
+        ]
+        assert looks_like_premature_stop("I", msgs)
+        assert looks_like_premature_stop("Done", msgs)
+        assert looks_like_premature_stop("Ok", msgs)
+
+    def test_anthropic_tool_result_shape(self):
+        msgs = [_tool_result_msg_anthropic()]
+        assert looks_like_premature_stop("I", msgs)
+
+    def test_long_answer_not_premature(self):
+        msgs = [_tool_result_msg_openai()]
+        long = "I verified the fstab entry and both swapfiles are active now."
+        assert not looks_like_premature_stop(long, msgs)
+
+    def test_short_answer_but_not_mid_tool_loop(self):
+        # Last message is a plain user question, not a tool result —
+        # a short "Yes" here is a legitimate final answer, not a bail.
+        msgs = [_text_msg(MessageRole.USER, "is it done?")]
+        assert not looks_like_premature_stop("Yes", msgs)
+
+    def test_empty_content_not_flagged(self):
+        # Empty is handled by the empty-retry path, not this one.
+        msgs = [_tool_result_msg_openai()]
+        assert not looks_like_premature_stop("", msgs)
+        assert not looks_like_premature_stop("   ", msgs)
+
+    def test_no_messages(self):
+        assert not looks_like_premature_stop("I", [])
+        assert not looks_like_premature_stop("I", None)
+
+    def test_assistant_turns_skipped_to_find_tool_result(self):
+        # The model's own just-emitted assistant turn shouldn't mask the
+        # preceding tool result.
+        msgs = [
+            _tool_result_msg_openai(),
+            _text_msg(MessageRole.ASSISTANT, "I"),
+        ]
+        assert looks_like_premature_stop("I", msgs)

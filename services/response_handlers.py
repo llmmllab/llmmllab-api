@@ -224,6 +224,71 @@ def looks_like_anticipated_tool_call(text: str | None) -> bool:
     return last_char not in ".!?\"')]}"
 
 
+# Max stripped length of a finish=stop answer that still counts as a
+# "premature" bail when the conversation is mid-tool-loop.  Deliberately
+# tiny — catches degenerate one-word stops ("I", "Done", "Ok", "Let me")
+# without re-prompting genuine short final answers.  A real answer to a
+# user question is rarely this short AND mid-tool-loop at the same time.
+_PREMATURE_STOP_MAX_CHARS = 16
+
+
+def _last_turn_is_tool_result(messages: list | None) -> bool:
+    """True when the most recent non-assistant message is a tool result.
+
+    Handles both wire shapes:
+      * OpenAI: a message with ``role == TOOL``
+      * Anthropic: a ``USER`` message carrying ``TOOL_RESULT`` content
+        blocks (tool results are folded into user turns there)
+
+    Used to confirm we're mid-agentic-loop before treating a tiny
+    finish=stop answer as a premature bail rather than a final reply.
+    """
+    if not messages:
+        return False
+    for msg in reversed(messages):
+        role = getattr(msg, "role", None)
+        # Skip the model's own just-emitted assistant turn(s).
+        if role in (MessageRole.ASSISTANT, MessageRole.AGENT):
+            continue
+        if role == MessageRole.TOOL:
+            return True
+        content = getattr(msg, "content", None)
+        if isinstance(content, list):
+            for part in content:
+                ptype = getattr(part, "type", None) or (
+                    part.get("type") if isinstance(part, dict) else None
+                )
+                if ptype in (MessageContentType.TOOL_RESULT, "tool_result"):
+                    return True
+        # First non-assistant message decides; stop scanning.
+        return False
+    return False
+
+
+def looks_like_premature_stop(
+    final_content: str | None, messages: list | None
+) -> bool:
+    """True when a ``finish=stop`` turn looks like the model bailed mid-task.
+
+    The degenerate failure mode (observed repeatedly on Qwen3.6-27B at
+    deep context): after a tool result the model emits a one-token answer
+    like ``"I"`` or ``"Done"`` and ends the turn cleanly, forcing the user
+    to manually prompt it to continue.  This is NOT caught by the
+    ``[TOOL_INTENT:`` marker (the model doesn't emit it) nor by
+    :func:`looks_like_anticipated_tool_call` (no setup phrase).
+
+    Tight gate to avoid re-prompting genuine short answers:
+      * the visible answer is <= ``_PREMATURE_STOP_MAX_CHARS`` chars, AND
+      * the conversation is mid-tool-loop (last non-assistant message is
+        a tool result) — i.e. the model was clearly expected to keep
+        working, not deliver a final reply.
+    """
+    text = (final_content or "").strip()
+    if not text or len(text) > _PREMATURE_STOP_MAX_CHARS:
+        return False
+    return _last_turn_is_tool_result(messages)
+
+
 def filter_response_tool_calls(
     response: ChatResponse | None,
     server_tool_names: set[str] | None,

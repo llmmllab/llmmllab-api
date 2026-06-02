@@ -268,13 +268,21 @@ class BaseAgent:
     _SYSTEM_PROMPT_STRIP_RE = re.compile(r"^[^*\n]*Co-Authored-By:.*$\n?", re.MULTILINE)
 
     def _separate_system_prompt(
-        self, messages: MessageInput
+        self, messages: MessageInput, request_tools: Optional[List[Any]] = None
     ) -> tuple[str, List[Message]]:
         """
         Extract system prompt from messages if present.
 
         Args:
             messages: Input messages for the agent
+            request_tools: Tools supplied for THIS invocation (the per-call
+                ``tools`` argument).  The tool-intent marker instruction
+                must be gated on the *effective* tool set — ``self.tools``
+                (constructor-time) OR these — because dynamic-tool callers
+                (Claude Code, MCP sessions) pass tools per request and leave
+                ``self.tools`` empty.  Gating on ``self.tools`` alone meant
+                the marker instruction was never emitted for those sessions,
+                silently disabling the whole tool-intent nudge mechanism.
 
         returns:
             str: Extracted system prompt
@@ -299,7 +307,9 @@ The current date is {current_date}."""
         # final answer" (no marker — accept) from "model described a
         # tool call but forgot to invoke" (marker, no tool_use block —
         # nudge). See nudge gate in services/completion_service.py.
-        if self.tools:
+        # Gate on the *effective* tool set (constructor OR per-request) so
+        # dynamic-tool callers actually receive the instruction.
+        if self.tools or request_tools:
             system_prompt += """
 
 When you are about to use a tool, emit the literal marker
@@ -561,7 +571,7 @@ invocation is the next thing you intend to do."""
                 node_name=self._node_metadata.node_name,
                 node_type=self._node_metadata.node_type,
             )
-            system_prompt, convo = self._separate_system_prompt(messages)
+            system_prompt, convo = self._separate_system_prompt(messages, tools)
 
             # Use persistent agent - creates once and reuses for state continuity
             # Deduplicate tools by name since StructuredTool objects are not hashable
@@ -754,7 +764,7 @@ invocation is the next thing you intend to do."""
                 node_name=self._node_metadata.node_name,
                 node_type=self._node_metadata.node_type,
             )
-            system_prompt, convo = self._separate_system_prompt(message_input)
+            system_prompt, convo = self._separate_system_prompt(message_input, tools)
 
             # Use persistent agent - creates once and reuses for state continuity
             combined_tools = list((self.tools or []) + (tools or []))
