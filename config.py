@@ -156,7 +156,14 @@ RUNNER_RETRY_BACKOFF_BASE = int(os.environ.get("RUNNER_RETRY_BACKOFF_BASE", "1")
 # When a llama.cpp server handle is evicted by the runner, the service
 # releases the stale handle, refreshes the model map, and retries the
 # workflow with a fresh server. Set to 0 to disable retries entirely.
-STALE_SERVER_RETRIES = int(os.environ.get("STALE_SERVER_RETRIES", "1"))
+#
+# Default is 2 (not 1): the dominant stale-handle cause in production is a
+# runner pod being OOMKilled and restarting, which drops every in-memory
+# server handle at once.  A single retry can land back on the same runner
+# mid-restart (its /server/create then 500s and trips the circuit breaker),
+# exhausting the lone retry.  A second retry — after the model-map refresh
+# has had a beat to route around the tripped endpoint — recovers cleanly.
+STALE_SERVER_RETRIES = int(os.environ.get("STALE_SERVER_RETRIES", "2"))
 
 # Per-request-category HTTP timeouts for the runner client.  Health
 # checks are cheap and should fail fast; "fast" covers small-body

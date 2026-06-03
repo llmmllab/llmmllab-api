@@ -425,7 +425,7 @@ class TestStaleServerRetriesConfig:
 
     def test_default_value(self):
         from config import STALE_SERVER_RETRIES
-        assert STALE_SERVER_RETRIES == 1
+        assert STALE_SERVER_RETRIES == 2
 
     def test_env_override(self, monkeypatch):
         monkeypatch.setenv("STALE_SERVER_RETRIES", "3")

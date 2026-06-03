@@ -266,6 +266,35 @@ class BaseAgent:
         """
         self._log_operation_error(operation, error, **context)
 
+    @staticmethod
+    def _maybe_raise_stale_server(error: Exception) -> None:
+        """Convert a stale-handle 404 into a ``StaleServerError`` (raises).
+
+        A 404 "Server <id> not found" from a runner means the llama.cpp
+        server backing our current ``ServerHandle`` was evicted (TTL reap,
+        VRAM eviction, or — most commonly in production — the whole runner
+        pod was OOMKilled and restarted, dropping every in-memory handle).
+        LangChain's ``ChatOpenAI`` surfaces this as an ``openai.NotFoundError``
+        whose text contains "404" + "Server ... not found"; it is NOT a
+        connection error and NOT in the transient 5xx set, so without this
+        translation it propagates verbatim and the turn fails ("Chat Agent
+        failed").  Re-raising as ``StaleServerError`` lets the
+        CompletionService release the dead handle, refresh the model map, and
+        transparently re-acquire a fresh server.
+
+        Does nothing (returns) when *error* is not a stale-handle 404, so the
+        caller's own error handling proceeds unchanged.
+        """
+        error_body = str(error).lower()
+        if (
+            "404" in error_body or "not found" in error_body
+        ) and "server" in error_body:
+            m = re.search(r"server\s+([a-f0-9]+)", str(error), re.IGNORECASE)
+            server_id = m.group(1) if m else "unknown"
+            from graph.errors import StaleServerError
+
+            raise StaleServerError(server_id, error) from error
+
     _SYSTEM_PROMPT_STRIP_RE = re.compile(r"^[^*\n]*Co-Authored-By:.*$\n?", re.MULTILINE)
 
     def _separate_system_prompt(
@@ -709,17 +738,7 @@ invocation is the next thing you intend to do.
             # the llama.cpp server was evicted from the runner.  Re-raise
             # as StaleServerError so the CompletionService can re-acquire
             # a fresh server and retry.
-            error_body = str(e).lower()
-            if (
-                "404" in error_body or "not found" in error_body
-            ) and "server" in error_body:
-                import re
-
-                m = re.search(r"server\s+([a-f0-9]+)", str(e), re.IGNORECASE)
-                server_id = m.group(1) if m else "unknown"
-                from graph.errors import StaleServerError
-
-                raise StaleServerError(server_id, e) from e
+            self._maybe_raise_stale_server(e)
 
             return ChatResponse(
                 done=True,
@@ -865,4 +884,13 @@ invocation is the next thing you intend to do.
                 e,
                 message_count=get_message_count(message_input),
             )
+            # Detect stale server handles the same way run() does: a 404
+            # "Server X not found" means the runner evicted (or was
+            # OOMKilled and restarted, dropping) the server our handle
+            # points at.  Without this the structured/grammar path wrapped
+            # every such 404 in a bare RuntimeError, so the stale handle was
+            # unrecoverable and the turn surfaced as "Chat Agent failed".
+            # Re-raise as StaleServerError so the CompletionService can
+            # re-acquire a fresh server and retry transparently.
+            self._maybe_raise_stale_server(e)
             raise RuntimeError(f"Structured agent execution failed: {e}") from e

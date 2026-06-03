@@ -372,6 +372,90 @@ class TestAgentRunStructured:
         assert call_count[0] == 2
 
 
+class TestStaleServerDetection:
+    """A 404 'Server <id> not found' must convert to StaleServerError so the
+    CompletionService can transparently re-acquire a fresh server.
+
+    Regression: the structured/grammar path (run_structured) wrapped every
+    such 404 in a bare RuntimeError, leaving the stale handle unrecoverable
+    and surfacing the failure as 'Chat Agent failed'.  Both run() and
+    run_structured() must now raise StaleServerError on a stale-handle 404.
+    """
+
+    @staticmethod
+    def _stale_404(server_id: str = "e728eac96b6f") -> APIStatusError:
+        return _make_api_status_error(
+            404, f"Error code: 404 - {{'detail': 'Server {server_id} not found'}}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_run_raises_stale_server_on_404(self):
+        from graph.errors import StaleServerError
+
+        agent = _make_base_agent()
+        mock_lc_agent = AsyncMock()
+        mock_lc_agent.ainvoke.side_effect = self._stale_404("e728eac96b6f")
+        agent._get_or_create_agent = AsyncMock(return_value=mock_lc_agent)
+
+        with pytest.raises(StaleServerError) as exc_info:
+            await agent.run("Hi there")
+
+        assert exc_info.value.server_id == "e728eac96b6f"
+        # 404 is not in the transient set — no retry, immediate raise.
+        assert mock_lc_agent.ainvoke.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_run_structured_raises_stale_server_on_404(self):
+        from pydantic import BaseModel as PydanticModel
+        from graph.errors import StaleServerError
+
+        class Greeting(PydanticModel):
+            name: str
+
+        agent = _make_base_agent()
+        mock_lc_agent = AsyncMock()
+        mock_lc_agent.ainvoke.side_effect = self._stale_404("7b87809e26bf")
+        agent._get_or_create_agent = AsyncMock(return_value=mock_lc_agent)
+
+        with pytest.raises(StaleServerError) as exc_info:
+            await agent.run_structured("Say hi", grammar=Greeting)
+
+        assert exc_info.value.server_id == "7b87809e26bf"
+        assert mock_lc_agent.ainvoke.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_run_structured_non_stale_error_still_runtimeerror(self):
+        """A genuine non-stale failure must still raise the wrapped RuntimeError."""
+        from pydantic import BaseModel as PydanticModel
+
+        class Greeting(PydanticModel):
+            name: str
+
+        agent = _make_base_agent()
+        mock_lc_agent = AsyncMock()
+        mock_lc_agent.ainvoke.side_effect = RuntimeError("model crash")
+        agent._get_or_create_agent = AsyncMock(return_value=mock_lc_agent)
+
+        with pytest.raises(RuntimeError, match="Structured agent execution failed"):
+            await agent.run_structured("Say hi", grammar=Greeting)
+
+    @pytest.mark.asyncio
+    async def test_run_non_stale_404_without_server_word_not_stale(self):
+        """A 404 that is not a 'server not found' (e.g. unknown llama.cpp
+        sub-path) must NOT be misclassified as a stale handle."""
+        agent = _make_base_agent()
+        mock_lc_agent = AsyncMock()
+        mock_lc_agent.ainvoke.side_effect = _make_api_status_error(
+            404, "Error code: 404 - {'detail': 'Not Found'}"
+        )
+        agent._get_or_create_agent = AsyncMock(return_value=mock_lc_agent)
+
+        # run() returns an error ChatResponse rather than raising StaleServerError.
+        response = await agent.run("Hi there")
+        assert response.done is True
+        assert mock_lc_agent.ainvoke.call_count == 1
+
+
 class TestToolIntentMarkerGating:
     """The [TOOL_INTENT:] instruction must be emitted whenever tools are
     available for the request — including the dynamic-tool case where
