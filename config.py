@@ -152,6 +152,14 @@ PRIORITY_QUEUE_MAX_WAIT_MAX_SEC = int(
 # ── Completion / Retry ─────────────────────────────────────────────────
 RUNNER_RETRIES = int(os.environ.get("RUNNER_RETRIES", "2"))
 RUNNER_RETRY_BACKOFF_BASE = int(os.environ.get("RUNNER_RETRY_BACKOFF_BASE", "1"))
+# Per-turn transient-error retry budget in the agent run loops
+# (agents/base.py run / run_structured).  Transient = connection error or
+# 502/503/504.  Default 11 preserves the historical behaviour; expose it so
+# it can be tuned DOWN — a turn whose client has already disconnected used
+# to keep retrying for minutes (backoff caps at 60s × ~11 attempts).  The
+# loops also break early on a client-disconnect predicate, but a lower cap
+# is a cheap additional guard.
+AGENT_MAX_RETRY_ATTEMPTS = int(os.environ.get("AGENT_MAX_RETRY_ATTEMPTS", "11"))
 # Stale server recovery retry count.
 # When a llama.cpp server handle is evicted by the runner, the service
 # releases the stale handle, refreshes the model map, and retries the

@@ -728,6 +728,16 @@ class WorkflowExecutor:
 
         except asyncio.CancelledError:
             self.logger.warning("Workflow cancelled (client disconnect)")
+            # Drop any queued work for this session so a cancelled turn
+            # doesn't keep waiting on / holding a runner slot.
+            try:
+                from services.priority_queue import priority_queue
+
+                await priority_queue.cancel_by_session_id(session_id)
+            except Exception:
+                self.logger.debug(
+                    "cancel_by_session_id failed on cancel", exc_info=True
+                )
             raise
 
         except Exception as e:

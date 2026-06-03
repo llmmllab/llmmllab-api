@@ -8,6 +8,8 @@ import logging
 import re
 from typing import (
     Any,
+    Awaitable,
+    Callable,
     Optional,
     Self,
     List,
@@ -47,6 +49,26 @@ asyncio_logger = logging.getLogger("asyncio")
 # Set the logging level to WARNING or higher (e.g., ERROR, CRITICAL)
 # This will prevent INFO and DEBUG messages from being displayed when run_sync is used.
 asyncio_logger.setLevel(logging.WARNING)
+
+
+async def _client_gone(
+    disconnected: Optional[Callable[[], Awaitable[bool]]],
+) -> bool:
+    """Return True if a client-liveness predicate reports the client left.
+
+    Used by the agent retry loops to abort promptly instead of retrying a
+    turn for minutes (backoff caps at 60s × the attempt budget) after the
+    HTTP client already disconnected — the retry-after-disconnect failure
+    mode (e.g. session acd66c8a…).  A None predicate (the default) or a
+    predicate that itself errors is treated as "still connected" so the
+    behaviour is unchanged when no predicate is threaded through.
+    """
+    if disconnected is None:
+        return False
+    try:
+        return bool(await disconnected())
+    except Exception:
+        return False
 
 
 def get_message_count(messages: MessageInput) -> int:
@@ -576,6 +598,7 @@ invocation is the next thing you intend to do.
         grammar: Optional[type[BaseModel]] = None,
         middleware: Optional[List[AgentMiddleware]] = None,
         metadata: Optional[NodeMetadata] = None,
+        disconnected: Optional[Callable[[], Awaitable[bool]]] = None,
     ) -> ChatResponse:
         """
         Run agent execution with node metadata injection.
@@ -669,9 +692,20 @@ invocation is the next thing you intend to do.
                     return True
                 return False
 
+            import asyncio as _asyncio
+
             result = None
-            max_attempts = 11
+            max_attempts = config.AGENT_MAX_RETRY_ATTEMPTS
             for attempt in range(max_attempts):
+                # Abort before (re-)dispatching if the client already left —
+                # no point spending a fresh attempt (and a runner slot) on a
+                # turn nobody is reading.
+                if await _client_gone(disconnected):
+                    self.logger.warning(
+                        "Client disconnected — aborting agent run before "
+                        f"attempt {attempt + 1}/{max_attempts}"
+                    )
+                    raise _asyncio.CancelledError("client disconnected")
                 try:
                     result = await agent.ainvoke({"messages": normalized_messages})  # type: ignore
                     break
@@ -680,6 +714,16 @@ invocation is the next thing you intend to do.
                         raise
                     last_error = e
                     if attempt < max_attempts - 1:
+                        # Abort instead of sleeping out a long backoff if the
+                        # client has since disconnected.
+                        if await _client_gone(disconnected):
+                            self.logger.warning(
+                                "Client disconnected — aborting agent run "
+                                "retry backoff"
+                            )
+                            raise _asyncio.CancelledError(
+                                "client disconnected"
+                            ) from e
                         # Exponential backoff capped at 60s
                         backoff = min(2 ** (attempt + 1), 60)
                         self.logger.warning(
@@ -687,8 +731,6 @@ invocation is the next thing you intend to do.
                             f"(attempt {attempt + 1}/{max_attempts})",
                             extra={"transient_error_detail": str(e)},
                         )
-                        import asyncio as _asyncio
-
                         await _asyncio.sleep(backoff)
                     else:
                         raise
@@ -761,6 +803,7 @@ invocation is the next thing you intend to do.
         tools: Optional[List[BaseTool]] = None,
         middleware: Optional[List[AgentMiddleware]] = None,
         metadata: Optional[NodeMetadata] = None,
+        disconnected: Optional[Callable[[], Awaitable[bool]]] = None,
     ) -> T:
         """
         Run agent execution with node metadata injection.
@@ -830,10 +873,19 @@ invocation is the next thing you intend to do.
                     return True
                 return False
 
+            import asyncio as _asyncio
+
             last_error = None
-            max_attempts = 11
+            max_attempts = config.AGENT_MAX_RETRY_ATTEMPTS
             result = None
             for attempt in range(max_attempts):
+                # Abort before (re-)dispatching if the client already left.
+                if await _client_gone(disconnected):
+                    self.logger.warning(
+                        "Client disconnected — aborting structured run before "
+                        f"attempt {attempt + 1}/{max_attempts}"
+                    )
+                    raise _asyncio.CancelledError("client disconnected")
                 try:
                     result = await agent.ainvoke({"messages": normalized_messages})  # type: ignore
                     break
@@ -842,14 +894,20 @@ invocation is the next thing you intend to do.
                         raise
                     last_error = e
                     if attempt < max_attempts - 1:
+                        if await _client_gone(disconnected):
+                            self.logger.warning(
+                                "Client disconnected — aborting structured "
+                                "run retry backoff"
+                            )
+                            raise _asyncio.CancelledError(
+                                "client disconnected"
+                            ) from e
                         backoff = min(2 ** (attempt + 1), 60)
                         self.logger.warning(
                             f"Transient error ({type(e).__name__}), retrying in {backoff}s "
                             f"(attempt {attempt + 1}/{max_attempts})",
                             extra={"transient_error_detail": str(e)},
                         )
-                        import asyncio as _asyncio
-
                         await _asyncio.sleep(backoff)
                     else:
                         raise

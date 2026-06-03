@@ -619,6 +619,18 @@ async def stream_message(
 
     except asyncio.CancelledError:
         logger.warning("Client disconnected — stream_message cancelled")
+        # Drop any work still queued for this session so a turn whose
+        # client has left doesn't keep occupying / waiting on a runner
+        # slot (the retry-after-disconnect failure mode).
+        if session_id:
+            try:
+                from services.priority_queue import priority_queue
+
+                await priority_queue.cancel_by_session_id(session_id)
+            except Exception:
+                logger.debug(
+                    "cancel_by_session_id failed on disconnect", exc_info=True
+                )
         return
 
     # Use the accumulator for final state

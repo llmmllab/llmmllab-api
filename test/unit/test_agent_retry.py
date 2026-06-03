@@ -487,3 +487,179 @@ class TestToolIntentMarkerGating:
         )
         sp, _ = agent._separate_system_prompt([])
         assert "[TOOL_INTENT:" in sp
+
+
+# ── Client-disconnect abort (retry-after-disconnect fix) ──────────────────
+
+class TestAgentRetryDisconnectAbort:
+    """The retry loop must abort promptly when the client has disconnected,
+    instead of retrying a dead turn for minutes (session acd66c8a…).
+
+    A ``disconnected`` predicate is threaded into run()/run_structured();
+    when it returns True the loop raises asyncio.CancelledError (which the
+    streaming handlers already treat as 'client disconnected').  Default
+    None preserves the original behaviour.
+    """
+
+    @pytest.mark.asyncio
+    async def test_disconnect_aborts_before_retry(self):
+        """Transient error + client gone → CancelledError, no further retry."""
+        import asyncio
+
+        agent = _make_base_agent()
+        call_count = [0]
+
+        async def always_503(*a, **kw):
+            call_count[0] += 1
+            raise _make_api_status_error(503, "All inference slots are busy")
+
+        mock_lc_agent = AsyncMock()
+        mock_lc_agent.ainvoke = always_503
+        agent._get_or_create_agent = AsyncMock(return_value=mock_lc_agent)
+
+        # Client is gone from the start.
+        async def gone() -> bool:
+            return True
+
+        with patch("asyncio.sleep", new_callable=AsyncMock) as msleep:
+            with pytest.raises(asyncio.CancelledError):
+                await agent.run("Hi there", disconnected=gone)
+
+        # Aborted before the very first dispatch (predicate checked at top).
+        assert call_count[0] == 0
+        # Never slept out a backoff.
+        msleep.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_disconnect_mid_flight_aborts_in_backoff(self):
+        """Connected for the first attempt, disconnects before the backoff:
+        the loop must abort rather than sleep + retry."""
+        import asyncio
+
+        agent = _make_base_agent()
+        call_count = [0]
+        connected = [True]
+
+        async def flaky(*a, **kw):
+            call_count[0] += 1
+            connected[0] = False  # client leaves after the first failure
+            raise _make_api_status_error(503, "busy")
+
+        mock_lc_agent = AsyncMock()
+        mock_lc_agent.ainvoke = flaky
+        agent._get_or_create_agent = AsyncMock(return_value=mock_lc_agent)
+
+        async def gone() -> bool:
+            return not connected[0]
+
+        with patch("asyncio.sleep", new_callable=AsyncMock) as msleep:
+            with pytest.raises(asyncio.CancelledError):
+                await agent.run("Hi there", disconnected=gone)
+
+        # Exactly one dispatch happened, then the disconnect check aborted
+        # before any backoff sleep.
+        assert call_count[0] == 1
+        msleep.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_predicate_preserves_retry(self):
+        """disconnected=None (default) → original retry behaviour."""
+        agent = _make_base_agent()
+        call_count = [0]
+
+        async def flaky(*a, **kw):
+            call_count[0] += 1
+            if call_count[0] < 3:
+                raise _make_api_status_error(503, "busy")
+            return MagicMock(content="OK", role="ai")
+
+        mock_lc_agent = AsyncMock()
+        mock_lc_agent.ainvoke = flaky
+        agent._get_or_create_agent = AsyncMock(return_value=mock_lc_agent)
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            response = await agent.run("Hi there")  # no predicate
+
+        assert response.done is True
+        assert call_count[0] == 3
+
+    @pytest.mark.asyncio
+    async def test_connected_predicate_does_not_abort(self):
+        """A predicate that always reports 'still connected' must not change
+        the successful-retry path."""
+        agent = _make_base_agent()
+        call_count = [0]
+
+        async def flaky(*a, **kw):
+            call_count[0] += 1
+            if call_count[0] < 2:
+                raise _make_api_status_error(503, "busy")
+            return MagicMock(content="OK", role="ai")
+
+        mock_lc_agent = AsyncMock()
+        mock_lc_agent.ainvoke = flaky
+        agent._get_or_create_agent = AsyncMock(return_value=mock_lc_agent)
+
+        async def still_here() -> bool:
+            return False
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            response = await agent.run("Hi there", disconnected=still_here)
+
+        assert response.done is True
+        assert call_count[0] == 2
+
+    @pytest.mark.asyncio
+    async def test_run_structured_disconnect_aborts(self):
+        import asyncio
+        from pydantic import BaseModel as PydanticModel
+
+        class Greeting(PydanticModel):
+            name: str
+
+        agent = _make_base_agent()
+        call_count = [0]
+
+        async def always_503(*a, **kw):
+            call_count[0] += 1
+            raise _make_api_status_error(503, "busy")
+
+        mock_lc_agent = AsyncMock()
+        mock_lc_agent.ainvoke = always_503
+        agent._get_or_create_agent = AsyncMock(return_value=mock_lc_agent)
+
+        async def gone() -> bool:
+            return True
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            with pytest.raises(asyncio.CancelledError):
+                await agent.run_structured(
+                    "Say hi", grammar=Greeting, disconnected=gone
+                )
+        assert call_count[0] == 0
+
+
+class TestAgentMaxAttemptsConfigurable:
+    """AGENT_MAX_RETRY_ATTEMPTS tunes the retry budget."""
+
+    @pytest.mark.asyncio
+    async def test_lower_cap_reduces_attempts(self):
+        import config
+
+        agent = _make_base_agent()
+        mock_lc_agent = AsyncMock()
+        mock_lc_agent.ainvoke.side_effect = APIConnectionError(
+            message="fail", request=MagicMock()
+        )
+        agent._get_or_create_agent = AsyncMock(return_value=mock_lc_agent)
+
+        original = config.AGENT_MAX_RETRY_ATTEMPTS
+        config.AGENT_MAX_RETRY_ATTEMPTS = 3
+        try:
+            with patch("asyncio.sleep", new_callable=AsyncMock):
+                response = await agent.run("Hi there")
+        finally:
+            config.AGENT_MAX_RETRY_ATTEMPTS = original
+
+        assert response.done is True
+        assert mock_lc_agent.ainvoke.call_count == 3
