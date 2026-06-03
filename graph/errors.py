@@ -64,6 +64,34 @@ class StreamingError(ComposerError):
     pass
 
 
+class ColdStartError(ComposerError):
+    """A model server is still loading (cold start) — retry after a wait.
+
+    Raised when ``acquire_server`` gets HTTP 503 "Runner busy starting the
+    model …" from a runner whose ``/v1/server/create`` is mid-load.  A fresh
+    llama.cpp server (big quantised GGUF + mmproj) takes ~45-90 s to become
+    ready; while it loads the runner answers 503.  This is *transient* — a
+    short wait then retry succeeds — so callers (see
+    ``services.retry_policies.stream_with_connection_retry``) should sleep a
+    cold-start interval and re-acquire rather than surface the 503 to the
+    client.
+
+    Distinct from :class:`StaleServerError` (a 404 for an already-acquired,
+    now-evicted handle): a ColdStartError means we never got a handle because
+    the server is still coming up.
+    """
+
+    def __init__(
+        self, model_id: str, original_error: Optional[Exception] = None
+    ):
+        self.model_id = model_id
+        self.original_error = original_error
+        message = f"Model {model_id} server is still loading (cold start)"
+        if original_error:
+            message += f": {original_error}"
+        super().__init__(message, {"model_id": model_id})
+
+
 class StaleServerError(ComposerError):
     """Server handle is stale — the llama.cpp server was evicted.
 

@@ -35,6 +35,7 @@ from models.message import Message, MessageRole, MessageContent, MessageContentT
 from models.tool_call import ToolCall
 from models.chat_response import ChatResponse
 from graph.state import ServerToolEvent
+from graph.errors import ColdStartError
 from utils.logging import llmmllogger
 
 logger = llmmllogger.bind(component="anthropic_messages_router")
@@ -1009,6 +1010,25 @@ async def createMessage(
                 source=req_source,
                 session_id=req_session_id,
             )
+        except ColdStartError as e:
+            # The model server was still loading after the internal
+            # cold-start retry budget (config.COLD_START_RETRIES ×
+            # COLD_START_BACKOFF_SEC) was exhausted.  We already waited
+            # internally, so this is the rare genuinely-slow cold start;
+            # surface a clean 503 + Retry-After so the client backs off.
+            logger.warning(
+                "Cold-start retries exhausted in run_completion — surfacing 503",
+                extra={"model": body.model, "error": str(e)},
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Runner busy starting the model. This usually means a "
+                    "model server is still loading (~45-90s on cold start). "
+                    "Please retry in 30-60 seconds."
+                ),
+                headers={"Retry-After": "30"},
+            ) from e
         except Exception as e:
             error_msg = str(e).lower()
             if any(
