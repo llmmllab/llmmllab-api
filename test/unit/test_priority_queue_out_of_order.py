@@ -68,17 +68,21 @@ async def test_out_of_order_three_items_dequeue_returns_correct_meta():
 
 @pytest.mark.asyncio
 async def test_out_of_order_with_blocked_items():
-    """Out-of-order dequeue skips blocked items and releases eligible ones."""
-    call_results = [False, True]
-    call_count = [0]
+    """Skips blocked items and releases eligible ones.
 
-    async def step_callback(metadata):
-        idx = call_count[0]
-        call_count[0] += 1
-        return call_results[idx] if idx < len(call_results) else True
+    Uses a model-keyed callback (model-b is at capacity → blocked,
+    model-c has a free slot → eligible).  This is order-independent so it
+    holds regardless of whether admission happens at enqueue time (idle
+    model released immediately) or at dequeue — what matters is that the
+    blocked model stays blocked and the eligible one is released.
+    """
+
+    async def model_keyed_callback(metadata):
+        # model-b is saturated; everything else has capacity.
+        return metadata.model_id != "model-b"
 
     q = AsyncPriorityQueue(max_size=10, timeout_sec=5.0)
-    q.set_can_proceed_callback(AsyncMock(side_effect=step_callback))
+    q.set_can_proceed_callback(AsyncMock(side_effect=model_keyed_callback))
 
     meta_a = RequestPriorityMetadata(
         source=RequestSource.USER, priority=Priority.HIGH, model_id="model-a"
@@ -98,17 +102,24 @@ async def test_out_of_order_with_blocked_items():
     await asyncio.sleep(0.01)
 
     item_a, evt_a = await task_a
+    # C (idle model) is admitted as soon as it's enqueued — it no longer
+    # waits for A's turn to finish.
+    assert task_c.done(), "C should be released (model-c idle)"
+    assert not task_b.done(), "B should still be blocked (model-b saturated)"
+
     result = await q.dequeue(item_a)
     assert result is meta_a
     await asyncio.sleep(0.01)
     assert not task_b.done(), "B should still be blocked"
-    assert task_c.done(), "C should be released"
 
-    item_b, evt_b = await task_b
     item_c, evt_c = await task_c
-
-    await q.dequeue(item_b)
     await q.dequeue(item_c)
+
+    task_b.cancel()
+    try:
+        await task_b
+    except asyncio.CancelledError:
+        pass
     await q.close()
 
 

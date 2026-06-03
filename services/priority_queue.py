@@ -93,7 +93,18 @@ class AsyncPriorityQueue:
             Callable[[RequestPriorityMetadata], Awaitable[bool]]
         ] = None
         self._recheck_task: Optional[asyncio.Task] = None
-        self._recheck_interval = 2.0
+        # Background recheck poll interval. Tunable via
+        # PRIORITY_QUEUE_RECHECK_SEC so the safety-net poll can be tightened
+        # (or loosened) without a code change. Enqueue now releases eligible
+        # idle-model items immediately, so this poll is purely a backstop.
+        import os as _os
+
+        try:
+            self._recheck_interval = float(
+                _os.environ.get("PRIORITY_QUEUE_RECHECK_SEC", "2.0")
+            )
+        except (TypeError, ValueError):
+            self._recheck_interval = 2.0
         self._session_last_served: dict[str, float] = {}
         self._seen_models: set[str] = set()
         self._seen_sources: set[str] = set()
@@ -147,10 +158,48 @@ class AsyncPriorityQueue:
             # If this is the only item in the queue, it's at the front and
             # can proceed immediately — there's no prior request whose
             # dequeue() would set its event.
-            if len(self._queue) == 1:
+            single = len(self._queue) == 1
+            if single:
                 item.event.set()
                 if self._on_release:
                     self._on_release(metadata)
+
+            # Collect pending items for an eligibility pass (below, outside
+            # the lock). When the queue is NOT a singleton, the newly
+            # enqueued item must not have to wait for a *prior* turn's
+            # dequeue() (which only fires after that whole turn finishes,
+            # minutes for a 27B) nor for the periodic recheck poll: if its
+            # model's server is idle and _can_proceed says go, release it
+            # now. Cross-model priority filtering is preserved by
+            # _release_eligible / _has_higher_priority_waiting, so a busy
+            # 27B turn no longer starves an idle-4B request. (Empty here
+            # when single — that case already self-released above.)
+            # Only run the eligibility pass when a resource callback is
+            # wired. Without one, _release_eligible would unconditionally
+            # release every pending item at once, breaking the legacy
+            # serial-handoff semantics (dequeue() releases the next item);
+            # the resource-aware path is the one that needs immediate
+            # cross-model admission.
+            pending: list[tuple[int, RequestPriorityMetadata]] = (
+                []
+                if single or self._can_proceed is None
+                else [
+                    (i, m.metadata)
+                    for i, m in enumerate(self._queue)
+                    if not m.event.is_set() and not m.completed
+                ]
+            )
+
+        # Release any newly-eligible items for idle models immediately,
+        # rather than waiting on a prior turn's dequeue() or the recheck
+        # poll. Runs the SAME eligibility/priority logic dequeue() uses.
+        if pending:
+            released_all = await self._release_eligible(pending)
+            for meta in released_all:
+                if self._on_release:
+                    self._on_release(meta)
+                if meta.session_id:
+                    self._session_last_served[meta.session_id] = time.monotonic()
 
         # Start aging task
         asyncio.create_task(self._age_item(item, metadata))
