@@ -1711,6 +1711,93 @@ class TestSelectRunnerRules:
         assert chosen == "http://r2:8000"
 
     @pytest.mark.asyncio
+    async def test_marginal_cold_start_defers_to_warm_free_slot_peer(self):
+        """Regression: the VRAM-pressure 500.
+
+        r2 is empty with *just barely* enough VRAM to fit the model
+        (passes the can-fit check) but NOT comfortably (< 1.25×).  r1 has a
+        warm idle server with a free KV slot.  A marginal fresh create on r2
+        is exactly the path that used to OOM/500 and trip the breaker, so the
+        selector must prefer r1's warm free slot instead of cold-starting r2.
+        """
+        client = self._client()
+        client._model_parallel = {
+            ("http://r1:8000", "m1"): 2,
+            ("http://r2:8000", "m1"): 2,
+        }
+        # Model footprint 10 GB; free VRAM 12 GB => fits (>=10) but NOT
+        # comfortable (12 < 1.25*10 = 12.5).
+        client._model_size_bytes = {
+            ("http://r1:8000", "m1"): 10 * 1024 * 1024 * 1024,
+            ("http://r2:8000", "m1"): 10 * 1024 * 1024 * 1024,
+        }
+
+        def _health_for(free_mb):
+            h = MagicMock(status_code=200)
+            h.json.return_value = {
+                "status": "ok",
+                "gpu": {"0": {"free_mb": free_mb}},
+                "models": [{"id": "m1", "name": "m1", "task": "TextToText"}],
+            }
+            return h
+
+        async def fake_get(url, **kw):
+            if url.endswith("/health"):
+                return _health_for(12 * 1024)  # 12 GB free everywhere
+            if "r1" in url and "/v1/servers" in url:
+                # r1 warm idle server, one free slot (1 of 2 used == idle-ish)
+                return self._servers_resp([
+                    {"server_id": "s1", "model_id": "m1",
+                     "healthy": True, "idle_since": None, "use_count": 0}
+                ])
+            if "r2" in url and "/v1/servers" in url:
+                return self._servers_resp([])  # empty, would cold-start
+            return MagicMock(status_code=404)
+        client._client = _mock_client(get=AsyncMock(side_effect=fake_get))
+        chosen = await client._select_runner("m1")
+        # Marginal cold-start on r2 deferred → warm free slot on r1.
+        assert chosen == "http://r1:8000"
+
+    @pytest.mark.asyncio
+    async def test_comfortable_cold_start_still_preferred_over_warm(self):
+        """Sanity: when the empty peer has COMFORTABLE headroom (>= 1.25×),
+        the cold-start is still preferred over a warm peer (unchanged policy).
+        """
+        client = self._client()
+        client._model_parallel = {
+            ("http://r1:8000", "m1"): 2,
+            ("http://r2:8000", "m1"): 2,
+        }
+        client._model_size_bytes = {
+            ("http://r1:8000", "m1"): 8 * 1024 * 1024 * 1024,
+            ("http://r2:8000", "m1"): 8 * 1024 * 1024 * 1024,
+        }
+
+        def _health_for(free_mb):
+            h = MagicMock(status_code=200)
+            h.json.return_value = {
+                "status": "ok",
+                "gpu": {"0": {"free_mb": free_mb}},
+                "models": [{"id": "m1", "name": "m1", "task": "TextToText"}],
+            }
+            return h
+
+        async def fake_get(url, **kw):
+            if url.endswith("/health"):
+                return _health_for(16 * 1024)  # 16 GB free >= 1.25*8 = 10
+            if "r1" in url and "/v1/servers" in url:
+                return self._servers_resp([
+                    {"server_id": "s1", "model_id": "m1",
+                     "healthy": True, "idle_since": None, "use_count": 0}
+                ])
+            if "r2" in url and "/v1/servers" in url:
+                return self._servers_resp([])
+            return MagicMock(status_code=404)
+        client._client = _mock_client(get=AsyncMock(side_effect=fake_get))
+        chosen = await client._select_runner("m1")
+        assert chosen == "http://r2:8000"
+
+    @pytest.mark.asyncio
     async def test_warm_free_slot_when_no_cold_start_headroom(self):
         """Both runners have the model loaded (no empty peer to cold-start
         on), but r2's server has a free KV slot while r1's is full.  The
