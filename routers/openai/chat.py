@@ -1,9 +1,9 @@
 import asyncio
 import json
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import datetime
-from typing import Any, Dict, Literal, TypeAlias, Union
+from typing import Any, Dict, Literal, Optional, TypeAlias, Union
 from wsgiref import headers
 
 from fastapi import APIRouter, HTTPException, Request
@@ -341,6 +341,7 @@ async def stream_chat_completion(
     max_queue_wait: float | None = None,
     source: RequestSource | None = None,
     session_id: str | None = None,
+    disconnected: Optional[Callable[[], Awaitable[bool]]] = None,
 ) -> AsyncIterator[str]:
     """Stream composer events as OpenAI SSE chat completion chunks.
 
@@ -386,6 +387,7 @@ async def stream_chat_completion(
             max_queue_wait=max_queue_wait,
             source=source,
             session_id=session_id,
+            disconnected=disconnected,
         ):
             # Skip ServerToolEvents for OpenAI-compatible clients
 
@@ -629,6 +631,13 @@ async def createChatCompletion(
         if tool_choice:
             stream_kwargs["tool_choice"] = tool_choice
 
+        # Client-disconnect predicate: forwarded to the agent's retry loop so
+        # an in-flight run aborts promptly once the HTTP client hangs up,
+        # rather than re-dispatching to the runner during long backoff/acquire
+        # waits (same zombie-session class the Anthropic path guards against).
+        async def _disconnected() -> bool:
+            return await request.is_disconnected()
+
         return StreamingResponse(
             stream_chat_completion(
                 user_id,
@@ -639,6 +648,7 @@ async def createChatCompletion(
                 max_queue_wait=max_queue_wait,
                 source=req_source,
                 session_id=req_session_id,
+                disconnected=_disconnected,
                 **stream_kwargs,
             ),
             media_type="text/event-stream",

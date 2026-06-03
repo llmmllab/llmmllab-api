@@ -20,7 +20,7 @@ retry on cancellation.
 
 import asyncio
 from collections.abc import AsyncIterator
-from typing import Awaitable, Callable, Union
+from typing import Awaitable, Callable, Optional, Union
 
 from graph.state import ServerToolEvent
 from httpx import ConnectError, RemoteProtocolError
@@ -75,6 +75,7 @@ async def stream_with_connection_retry(
     refresh_model_map: Callable[[], Awaitable[None]],
     cold_start_retries: int | None = None,
     cold_start_backoff: float | None = None,
+    disconnected: Optional[Callable[[], Awaitable[bool]]] = None,
 ) -> AsyncIterator[Union[ChatResponse, ServerToolEvent]]:
     """Run ``inner`` with retry on connection-level and cold-start errors.
 
@@ -98,6 +99,11 @@ async def stream_with_connection_retry(
 
     The two budgets are counted separately so a slow cold start doesn't burn
     the connection-error retries, and vice versa.
+
+    ``disconnected`` is the optional client-liveness predicate; it is forwarded
+    to ``inner`` (``_build_and_run``) so the agent's own retry loop can abort
+    promptly when the streaming client has hung up.  ``None`` (default) is a
+    no-op.
 
     ``asyncio.CancelledError`` is never retried — it always re-raises
     immediately.
@@ -129,6 +135,7 @@ async def stream_with_connection_retry(
                 tool_choice,
                 server_tool_names,
                 model_parameters,
+                disconnected=disconnected,
             ):
                 yield event
             return

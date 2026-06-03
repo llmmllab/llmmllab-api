@@ -1,8 +1,8 @@
 import asyncio
 import json
 import uuid
-from collections.abc import AsyncIterator
-from typing import Dict, Union, Any
+from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import Dict, Optional, Union, Any
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -390,6 +390,7 @@ async def stream_message(
     source: RequestSource | None = None,
     session_id: str | None = None,
     server_tools_enabled: bool | None = None,
+    disconnected: Optional[Callable[[], Awaitable[bool]]] = None,
 ) -> AsyncIterator[str]:
     """Stream composer events as Anthropic SSE message chunks.
 
@@ -481,6 +482,7 @@ async def stream_message(
             max_queue_wait=max_queue_wait,
             source=source,
             session_id=session_id,
+            disconnected=disconnected,
         ):
             # ---- ServerToolEvent → emit as standard text content blocks ----
             if isinstance(event, ServerToolEvent):
@@ -986,6 +988,17 @@ async def createMessage(
         server_tools_enabled = _server_tools_enabled_from_header(request)
 
         if body.stream:
+            # Client-disconnect predicate threaded down to the agent's retry
+            # loop.  When the IDE client closes the connection mid-turn,
+            # ``request.is_disconnected()`` flips True; the agent then raises
+            # CancelledError before its next re-dispatch / backoff instead of
+            # re-prefilling the giant IDE prompt on the 27B runner forever
+            # (the zombie-IDE-session incident — sessions 5dbc086d, 0e8d6dc1,
+            # 15ec8952).  ``stream_message``'s own CancelledError handler then
+            # drops the session's queued work via ``cancel_by_session_id``.
+            async def _disconnected() -> bool:
+                return await request.is_disconnected()
+
             return StreamingResponse(
                 stream_message(
                     user_id,
@@ -998,6 +1011,7 @@ async def createMessage(
                     source=req_source,
                     session_id=req_session_id,
                     server_tools_enabled=server_tools_enabled,
+                    disconnected=_disconnected,
                 ),
                 media_type="text/event-stream",
                 headers={

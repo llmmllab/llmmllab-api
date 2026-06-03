@@ -91,7 +91,7 @@ class TestStaleServerRecovery:
         async def mock_create_initial_state(*a, **kw):
             return {}
 
-        async def mock_run_workflow(state, wf, wt):
+        async def mock_run_workflow(state, wf, wt, disconnected=None):
             yield mock_chat_response
 
         with patch.object(
@@ -137,7 +137,7 @@ class TestStaleServerRecovery:
         async def mock_create_initial_state(*a, **kw):
             return {}
 
-        async def mock_run_workflow(state, wf, wt):
+        async def mock_run_workflow(state, wf, wt, disconnected=None):
             nonlocal call_count
             if call_count == 1:
                 raise StaleServerError(server_id="srv-stale")
@@ -192,7 +192,7 @@ class TestStaleServerRecovery:
         async def mock_create_initial_state(*a, **kw):
             return {}
 
-        async def mock_run_workflow(state, wf, wt):
+        async def mock_run_workflow(state, wf, wt, disconnected=None):
             raise StaleServerError(server_id="srv-stale")
             yield  # make it an async generator
 
@@ -240,7 +240,7 @@ class TestStaleServerRecovery:
         async def mock_create_initial_state(*a, **kw):
             return {}
 
-        async def mock_run_workflow(state, wf, wt):
+        async def mock_run_workflow(state, wf, wt, disconnected=None):
             raise StaleServerError(server_id="srv-stale")
             yield  # make it an async generator
 
@@ -295,7 +295,7 @@ class TestStaleServerRecovery:
         async def mock_create_initial_state(*a, **kw):
             return {}
 
-        async def mock_run_workflow(state, wf, wt):
+        async def mock_run_workflow(state, wf, wt, disconnected=None):
             nonlocal call_count
             if call_count == 1:
                 raise StaleServerError(server_id="srv-stale")
@@ -347,7 +347,7 @@ class TestStaleServerRecovery:
         async def mock_create_initial_state(*a, **kw):
             return {}
 
-        async def mock_run_workflow(state, wf, wt):
+        async def mock_run_workflow(state, wf, wt, disconnected=None):
             nonlocal call_count
             if call_count == 1:
                 raise StaleServerError(server_id="srv-stale")
@@ -397,7 +397,7 @@ class TestStaleServerRecovery:
         async def mock_create_initial_state(*a, **kw):
             return {}
 
-        async def mock_run_workflow(state, wf, wt):
+        async def mock_run_workflow(state, wf, wt, disconnected=None):
             raise ConnectionError("network down")
             yield  # make it an async generator
 

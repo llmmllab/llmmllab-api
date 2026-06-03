@@ -15,9 +15,9 @@ in Anthropic/OpenAI format, raw JSON for llmmllab).
 
 import asyncio
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from typing import Union
+from typing import Optional, Union
 
 from composer_init import (
     compose_workflow,
@@ -185,11 +185,19 @@ class CompletionService:
         initial_state,
         workflow,
         workflow_type: WorkFlowType,
+        disconnected: Optional[Callable[[], Awaitable[bool]]] = None,
     ) -> AsyncIterator[Union[ChatResponse, ServerToolEvent]]:
-        """Execute a composed workflow and yield its events."""
+        """Execute a composed workflow and yield its events.
+
+        ``disconnected`` is the optional client-liveness predicate threaded
+        from the streaming router; it is forwarded to ``execute_workflow`` →
+        the agent node so the in-flight run aborts on client disconnect.
+        """
         start = time.monotonic()
         finished = False
-        async for event in execute_workflow(initial_state, workflow):
+        async for event in execute_workflow(
+            initial_state, workflow, disconnected=disconnected
+        ):
             yield event
             if not finished and isinstance(event, ChatResponse) and event.done:
                 finished = True
@@ -214,6 +222,7 @@ class CompletionService:
         server_tool_names: set[str] | None = None,
         model_parameters: ModelParameters | None = None,
         _retry_count: int = 0,
+        disconnected: Optional[Callable[[], Awaitable[bool]]] = None,
     ) -> AsyncIterator[Union[ChatResponse, ServerToolEvent]]:
         """Build a composer workflow and yield its events.
 
@@ -246,7 +255,7 @@ class CompletionService:
                 user_id, conversation_id, builder, messages
             )
             async for event in CompletionService._run_workflow(
-                initial_state, workflow, workflow_type
+                initial_state, workflow, workflow_type, disconnected=disconnected
             ):
                 yield event
         except asyncio.CancelledError:
@@ -322,6 +331,7 @@ class CompletionService:
                 server_tool_names,
                 model_parameters,
                 _retry_count=_retry_count + 1,
+                disconnected=disconnected,
             ):
                 yield event
 
@@ -337,6 +347,7 @@ class CompletionService:
         tool_choice: str | None = None,
         server_tool_names: set[str] | None = None,
         model_parameters: ModelParameters | None = None,
+        disconnected: Optional[Callable[[], Awaitable[bool]]] = None,
     ) -> AsyncIterator[Union[ChatResponse, ServerToolEvent]]:
         """Build and run with automatic server handle refresh on connection failure.
 
@@ -372,6 +383,7 @@ class CompletionService:
             max_retries=max_retries,
             backoff_base=RUNNER_RETRY_BACKOFF_BASE,
             refresh_model_map=_refresh_model_map,
+            disconnected=disconnected,
         ):
             yield event
 
@@ -447,6 +459,7 @@ class CompletionService:
         max_queue_wait: float | None = None,
         source: RequestSource | None = None,
         session_id: str | None = None,
+        disconnected: Optional[Callable[[], Awaitable[bool]]] = None,
     ) -> AsyncIterator[tuple[Union[ChatResponse, ServerToolEvent], StreamAccumulator]]:
         """Execute a workflow and yield ``(event, accumulator)`` pairs.
 
@@ -459,6 +472,23 @@ class CompletionService:
         those secondary passes.
         """
         acc = StreamAccumulator()
+
+        # Pre-bind the client-disconnect predicate onto _build_and_run so it
+        # rides through EVERY re-dispatch path — not just the primary pass,
+        # but the continuation / nudge / empty-retry helpers below, which each
+        # take a ``build_and_run`` callable and re-run the workflow.  This is
+        # what makes a zombie IDE session stop dead the moment its client
+        # leaves, instead of grinding through a continuation/retry cascade on
+        # the 27B runner.  With disconnected=None (non-streaming callers) the
+        # partial is a transparent no-op.
+        if disconnected is not None:
+            from functools import partial
+
+            run_fn = partial(
+                CompletionService._build_and_run, disconnected=disconnected
+            )
+        else:
+            run_fn = CompletionService._build_and_run
 
         try:
             async with CompletionService._enqueue_and_wait(
@@ -481,6 +511,7 @@ class CompletionService:
                     tool_choice=tool_choice,
                     server_tool_names=server_tool_names,
                     model_parameters=model_parameters,
+                    disconnected=disconnected,
                 ):
                     if isinstance(event, ServerToolEvent):
                         yield event, acc
@@ -502,7 +533,7 @@ class CompletionService:
                     and not acc.has_tool_calls
                 ):
                     async for event, acc in maybe_continue_on_truncation(
-                        CompletionService._build_and_run,
+                        run_fn,
                         acc,
                         user_id,
                         messages,
@@ -551,7 +582,7 @@ class CompletionService:
                     acc.final_tool_calls = _valid_calls
                     acc.has_tool_calls = bool(_valid_calls)
                     async for event, acc in maybe_continue_on_hallucinated_tools(
-                        CompletionService._build_and_run,
+                        run_fn,
                         acc,
                         user_id,
                         messages,
@@ -639,7 +670,7 @@ class CompletionService:
                     )
                 ):
                     async for event, acc in maybe_continue_on_missing_tool_call(
-                        CompletionService._build_and_run,
+                        run_fn,
                         acc,
                         user_id,
                         messages,
@@ -701,7 +732,7 @@ class CompletionService:
                             return await runner_client.revalidate_runner_handles()
 
                         async for event, acc in maybe_retry_on_empty(
-                            CompletionService._build_and_run,
+                            run_fn,
                             acc,
                             user_id,
                             messages,

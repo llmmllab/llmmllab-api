@@ -21,7 +21,7 @@ Architectural Role:
 - Maintains Protocol-based decoupling requirements
 """
 
-from typing import AsyncIterator, List, Optional, Type, Union
+from typing import AsyncIterator, Awaitable, Callable, List, Optional, Type, Union
 import uuid
 from pydantic import BaseModel
 from models import ChatResponse, Message
@@ -158,6 +158,7 @@ async def create_initial_state(
 async def execute_workflow(
     initial_state: BaseModel,
     workflow: CompiledStateGraph,
+    disconnected: Optional[Callable[[], Awaitable[bool]]] = None,
 ) -> AsyncIterator[Union[ChatResponse, ServerToolEvent]]:
     """
     Execute a compiled workflow with the given initial state.
@@ -165,13 +166,19 @@ async def execute_workflow(
     Args:
         workflow: CompiledStateGraph from compose_workflow()
         initial_state: WorkflowState from create_initial_state()
-        stream: Whether to stream events or return final result
+        disconnected: Optional ``async () -> bool`` client-liveness predicate
+            threaded down to the agent node so the in-flight run aborts when
+            the streaming HTTP client disconnects.  Defaults to ``None``
+            (non-streaming callers), leaving execution unchanged.
 
     Yields:
         Dict containing workflow events (tokens, state updates, etc.)
     """
     async for event in stream_workflow(
-        initial_state, workflow, thread_id=str(uuid.uuid4())
+        initial_state,
+        workflow,
+        thread_id=str(uuid.uuid4()),
+        disconnected=disconnected,
     ):
         yield event
 

@@ -605,7 +605,7 @@ class TestCompletionServiceModelParametersExecution:
         async def fake_create_initial_state(*a, **kw):
             return {}
 
-        async def fake_run_workflow(state, wf, wt):
+        async def fake_run_workflow(state, wf, wt, disconnected=None):
             yield mock_chat_response
 
         with patch.object(CompletionService, "build_workflow", fake_build_workflow), \
@@ -639,7 +639,7 @@ class TestCompletionServiceModelParametersExecution:
         async def fake_create_initial_state(*a, **kw):
             return {}
 
-        async def fake_run_workflow(state, wf, wt):
+        async def fake_run_workflow(state, wf, wt, disconnected=None):
             yield mock_chat_response
 
         with patch.object(CompletionService, "build_workflow", fake_build_workflow), \
@@ -704,7 +704,7 @@ class TestCompletionServiceModelParametersExecution:
         async def fake_create_initial_state(*a, **kw):
             return {}
 
-        async def fake_run_workflow(state, wf, wt):
+        async def fake_run_workflow(state, wf, wt, disconnected=None):
             resp = mock_chat_response.model_copy(update={"done": True})
             yield resp
 
@@ -744,7 +744,7 @@ class TestCompletionServiceModelParametersExecution:
         async def fake_create_initial_state(*a, **kw):
             return {}
 
-        async def fake_run_workflow(state, wf, wt):
+        async def fake_run_workflow(state, wf, wt, disconnected=None):
             resp = mock_chat_response.model_copy(update={"done": True})
             yield resp
 

@@ -11,6 +11,8 @@ import uuid
 from typing import (
     Any,
     AsyncIterator,
+    Awaitable,
+    Callable,
     Dict,
     List,
     Optional,
@@ -267,6 +269,7 @@ class WorkflowExecutor:
         initial_state: BaseModel,
         config: Optional[RunnableConfig] = None,
         thread_id: Optional[str] = None,
+        disconnected: Optional[Callable[[], Awaitable[bool]]] = None,
     ) -> AsyncIterator[Union[ChatResponse, ServerToolEvent]]:
         """
         Execute a compiled workflow with streaming output.
@@ -279,6 +282,13 @@ class WorkflowExecutor:
             initial_state: Initial state for workflow execution
             config: Optional RunnableConfig
             thread_id: Thread ID for checkpointing (used if config is None)
+            disconnected: Optional ``async () -> bool`` client-liveness
+                predicate.  When supplied (streaming endpoints), it is placed
+                in ``RunnableConfig.configurable["disconnected"]`` so LangGraph
+                delivers it to the agent node, which forwards it into the
+                agent's retry loop to abort promptly on client disconnect.
+                ``None`` (the default) leaves the config untouched — zero
+                behaviour change for non-streaming / internal callers.
 
         Yields:
             ChatResponse: Stream events from workflow execution
@@ -327,6 +337,20 @@ class WorkflowExecutor:
                 )
             if config is None and thread_id is not None:
                 config = self.create_thread_config(thread_id)
+
+            # Carry the client-disconnect predicate to the agent node via the
+            # runnable config's ``configurable`` bag.  This is the only place
+            # the callback can ride alongside the (serialized) workflow state
+            # without LangGraph trying to copy/serialize it as part of the
+            # graph state — ``configurable`` is passed through verbatim to the
+            # node callables that declare a ``config`` parameter.
+            if disconnected is not None:
+                if config is None:
+                    config = {"configurable": {}}
+                else:
+                    config = dict(config)
+                    config["configurable"] = dict(config.get("configurable") or {})
+                config["configurable"]["disconnected"] = disconnected
 
             debug_writer = _RawTokenWriter(session_id, state_dict)
 
@@ -891,6 +915,7 @@ async def stream_workflow(
     config: Optional[RunnableConfig] = None,
     logger: Optional[Any] = None,
     context: str = "workflow_stream",
+    disconnected: Optional[Callable[[], Awaitable[bool]]] = None,
 ) -> AsyncIterator[Union[ChatResponse, ServerToolEvent]]:
     """
     Convenience function for streaming workflow execution.
@@ -901,6 +926,8 @@ async def stream_workflow(
         config: Optional RunnableConfig
         logger: Optional logger instance
         context: Context name for metadata
+        disconnected: Optional ``async () -> bool`` client-liveness predicate
+            forwarded to the agent node (see ``WorkflowExecutor.stream_workflow``).
     Yields:
         ChatResponse or ServerToolEvent: Stream events from workflow execution
     """
@@ -910,5 +937,6 @@ async def stream_workflow(
         initial_state=initial_state,
         config=config,
         thread_id=thread_id,
+        disconnected=disconnected,
     ):
         yield event
