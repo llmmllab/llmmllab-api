@@ -193,6 +193,25 @@ RUNNER_UNHEALTHY_WINDOW_SEC = float(
 # (transient network blips between the api and runner Service).
 RUNNER_ACQUIRE_RETRIES = int(os.environ.get("RUNNER_ACQUIRE_RETRIES", "2"))
 
+# ── Cold-start (model-loading 503) retry ────────────────────────────────
+# A FRESH model server takes ~45-90 s to load on cold start (big quantised
+# GGUF + mmproj).  While it's loading, the runner's /v1/server/create
+# returns HTTP 503 "Runner busy starting the model …", which acquire_server
+# surfaces as a RuntimeError ("No healthy runner available … Last error:
+# …503…").  That is *transient* — a short wait then retry succeeds — but it
+# is neither a connection error nor a stale-handle 404, so the existing
+# retry layers ignored it and the 503 bubbled all the way to the client
+# (the agent turn failed).
+#
+# COLD_START_RETRIES bounds the number of extra attempts; COLD_START_BACKOFF_SEC
+# is the (fixed) wait between them.  The wait is intentionally LONGER than the
+# generic connection-error backoff because model load is ~45-90 s: 4 retries ×
+# 20 s ≈ 80 s of patience covers a typical cold start without hanging a caller
+# indefinitely.  Set COLD_START_RETRIES=0 to restore the old surface-immediately
+# behaviour.
+COLD_START_RETRIES = int(os.environ.get("COLD_START_RETRIES", "4"))
+COLD_START_BACKOFF_SEC = float(os.environ.get("COLD_START_BACKOFF_SEC", "20.0"))
+
 # ── Tracing (middleware/tracing.py) ────────────────────────────────────
 # OTLP gRPC endpoint for OpenTelemetry trace export.  Points at the
 # in-cluster Tempo service by default; override to "" to disable

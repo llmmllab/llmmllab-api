@@ -446,6 +446,40 @@ class RunnerClient:
 
         self._active_handles.clear()
 
+    # Substrings the runner / api use to signal "a model server is still
+    # loading" on a 503.  Matching is case-insensitive.  Kept broad so we
+    # catch both the runner's create-time 503 and the api's own
+    # cold-start 503 body, regardless of which one fires first.
+    _COLD_START_MARKERS = (
+        "runner busy",
+        "still loading",
+        "model server is still loading",
+        "busy starting the model",
+        "starting the model",
+    )
+
+    @classmethod
+    def _is_cold_start_error(cls, exc: Exception) -> bool:
+        """True if *exc* is a 503 that indicates a model is still loading.
+
+        ``acquire_server`` POSTs to ``/v1/server/create``; when the target
+        model's llama.cpp server is mid-cold-start the runner answers HTTP
+        503 with a "Runner busy starting the model …" body, which
+        ``raise_for_status`` turns into an ``httpx.HTTPStatusError``.  That
+        is transient (a short wait + retry succeeds), so we tag it as a
+        cold start rather than a hard failure.  Matches on BOTH the 503
+        status and a loading marker in the body so a generic 503 (e.g. all
+        slots busy) isn't misclassified.
+        """
+        resp = getattr(exc, "response", None)
+        if resp is None or getattr(resp, "status_code", None) != 503:
+            return False
+        try:
+            body = resp.text.lower()
+        except Exception:
+            body = ""
+        return any(marker in body for marker in cls._COLD_START_MARKERS)
+
     @staticmethod
     def _is_stale_server_error(response: httpx.Response) -> bool:
         """Check if a 404 response indicates a stale server handle.
@@ -1532,6 +1566,13 @@ class RunnerClient:
 
         last_error = None
         skipped_circuit_breaker = []
+        # Set when a runner answered /v1/server/create with a cold-start 503
+        # ("still loading").  We don't trip the circuit on these (the runner
+        # is healthy, just busy loading the model), and if EVERY endpoint we
+        # try is in this state we raise ColdStartError so the upper retry
+        # layer waits a cold-start interval and re-acquires rather than
+        # surfacing a 503 to the client.
+        cold_start_seen = False
         for endpoint in ordered:
             # Skip runners with open circuit breaker
             if self._is_circuit_open(endpoint):
@@ -1612,6 +1653,20 @@ class RunnerClient:
 
                 except Exception as e:
                     last_error = str(e)
+
+                    # Cold-start 503: the runner is healthy but the model's
+                    # server is still loading (~45-90 s).  Do NOT trip the
+                    # circuit breaker — the runner can serve us once the load
+                    # finishes.  Record it and move to the next endpoint; if
+                    # all endpoints are loading we raise ColdStartError below.
+                    if self._is_cold_start_error(e):
+                        cold_start_seen = True
+                        logger.info(
+                            f"Runner {endpoint} is cold-starting model "
+                            f"{model_id} (503 still loading), trying next runner",
+                        )
+                        break  # next endpoint; no circuit trip
+
                     is_conn_err = self._is_connection_error(e)
 
                     # Any acquire failure (connection error, HTTP error, etc.)
@@ -1628,6 +1683,15 @@ class RunnerClient:
                         )
                     self._trip_circuit_and_cleanup(endpoint)
                     break  # move to next endpoint
+
+        # A model still loading on a runner is a transient cold start, not a
+        # hard failure — raise ColdStartError so the upper retry layer waits
+        # a cold-start interval and re-acquires (the server should be ready
+        # by then) instead of surfacing a 503 to the client.
+        if cold_start_seen:
+            from graph.errors import ColdStartError
+
+            raise ColdStartError(model_id)
 
         # Build a meaningful last_error when all endpoints were skipped
         if last_error is None and skipped_circuit_breaker:

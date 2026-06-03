@@ -174,6 +174,142 @@ class TestRunnerClientAcquire:
         assert handle.server_id == "ghi789"
 
 
+class TestRunnerClientColdStart:
+    """A model still loading on the runner (503 'Runner busy starting the
+    model …') is a transient cold start, not a hard failure.
+
+    acquire_server must:
+      * NOT trip the circuit breaker for the cold-starting endpoint, and
+      * raise ColdStartError (not a generic RuntimeError) when every
+        candidate endpoint is mid-load, so the upper retry layer waits and
+        re-acquires instead of surfacing a 503 to the client.
+    """
+
+    @staticmethod
+    def _cold_start_503() -> httpx.HTTPStatusError:
+        """An HTTPStatusError shaped like the runner's cold-start 503."""
+        resp = MagicMock()
+        resp.status_code = 503
+        resp.text = (
+            "Runner busy starting the model. This usually means a "
+            "model server is still loading (~45-90s on cold start)."
+        )
+        return httpx.HTTPStatusError(
+            "503 Service Unavailable", request=MagicMock(), response=resp
+        )
+
+    def test_is_cold_start_error_matches_loading_503(self):
+        assert RunnerClient._is_cold_start_error(self._cold_start_503()) is True
+
+    def test_is_cold_start_error_ignores_generic_503(self):
+        resp = MagicMock()
+        resp.status_code = 503
+        resp.text = "All inference slots are busy"
+        err = httpx.HTTPStatusError(
+            "503", request=MagicMock(), response=resp
+        )
+        assert RunnerClient._is_cold_start_error(err) is False
+
+    def test_is_cold_start_error_ignores_non_503(self):
+        resp = MagicMock()
+        resp.status_code = 500
+        resp.text = "model still loading"  # marker present but wrong status
+        err = httpx.HTTPStatusError(
+            "500", request=MagicMock(), response=resp
+        )
+        assert RunnerClient._is_cold_start_error(err) is False
+
+    @pytest.mark.asyncio
+    async def test_acquire_raises_cold_start_error_when_all_loading(self):
+        """Every runner mid-load → ColdStartError, circuit NOT tripped."""
+        from graph.errors import ColdStartError
+
+        mock_health_response = MagicMock()
+        mock_health_response.status_code = 200
+        mock_health_response.json.return_value = {
+            "status": "ok",
+            "gpu": {"available_vram_bytes": 12000000000},
+            "active_servers": 0,
+            "models": ["llama-3-8b"],
+        }
+
+        def raise_cold_start():
+            raise self._cold_start_503()
+
+        def mock_post_factory():
+            async def mock_post(url, **kw):
+                resp = MagicMock()
+                resp.status_code = 503
+                resp.raise_for_status = MagicMock(side_effect=raise_cold_start)
+                return resp
+
+            return mock_post
+
+        mock = _mock_client(
+            get=AsyncMock(return_value=mock_health_response),
+            post=AsyncMock(side_effect=mock_post_factory()),
+        )
+
+        client = RunnerClient(
+            endpoints=["http://runner1:8000", "http://runner2:8001"]
+        )
+        client._client = mock
+        with pytest.raises(ColdStartError) as exc_info:
+            await client.acquire_server(
+                "llama-3-8b", task=ModelTask.TEXTTOTEXT, config_override={}
+            )
+        assert exc_info.value.model_id == "llama-3-8b"
+        # Cold start must NOT trip the circuit breaker — the runner is
+        # healthy, just busy loading.
+        assert client._acquire_failures == {}
+
+    @pytest.mark.asyncio
+    async def test_acquire_succeeds_on_peer_when_one_cold_starting(self):
+        """First runner cold-starting, second ready → handle from second."""
+        mock_health_response = MagicMock()
+        mock_health_response.status_code = 200
+        mock_health_response.json.return_value = {
+            "status": "ok",
+            "gpu": {"available_vram_bytes": 12000000000},
+            "active_servers": 0,
+            "models": ["llama-3-8b"],
+        }
+
+        call_count = [0]
+
+        async def mock_post(url, **kw):
+            call_count[0] += 1
+            resp = MagicMock()
+            if "runner1" in url:
+                resp.status_code = 503
+                resp.raise_for_status = MagicMock(
+                    side_effect=lambda: (_ for _ in ()).throw(self._cold_start_503())
+                )
+                return resp
+            resp.status_code = 201
+            resp.json.return_value = {
+                "server_id": "warm1",
+                "base_url": "http://runner2:8001/v1/server/warm1",
+                "model": "llama-3-8b",
+            }
+            resp.raise_for_status = MagicMock()
+            return resp
+
+        mock = _mock_client(
+            get=AsyncMock(return_value=mock_health_response),
+            post=AsyncMock(side_effect=mock_post),
+        )
+
+        client = RunnerClient(
+            endpoints=["http://runner1:8000", "http://runner2:8001"]
+        )
+        client._client = mock
+        handle = await client.acquire_server(
+            "llama-3-8b", task=ModelTask.TEXTTOTEXT, config_override={}
+        )
+        assert handle.server_id == "warm1"
+
+
 class TestRunnerClientRelease:
 
     @pytest.mark.asyncio
