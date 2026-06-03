@@ -1212,6 +1212,21 @@ class RunnerClient:
             if c["srv"] is not None and c["slots_free"] > 0
         ]
 
+        # How many distinct endpoints can actually host this model?  The
+        # #285 "prefer a fresh comfortable dedicated server over a warm peer"
+        # policy only makes sense when there's MORE THAN ONE such endpoint —
+        # cold-starting on an empty peer fans the load out across runners.
+        # For a SINGLE-endpoint model (e.g. Qwen3_6_27B — the lone big
+        # runner), a "fresh" server can't fan out anywhere: it lands on the
+        # very same runner that already holds a warm server, doubling the
+        # model's VRAM footprint on one box and 507'ing on the second load.
+        # That is the single-endpoint duplicate-27B cold-start the zombie IDE
+        # sessions kept triggering (warm server thrashed by LRU eviction +
+        # re-prefill, then a duplicate spun up beside it).  So the cold-start
+        # *preference* below is gated on having multiple candidate endpoints;
+        # a single-endpoint model with a warm free slot always reuses it.
+        multi_endpoint = len({c["ep"] for c in candidates}) > 1
+
         # --- Rule 1: prefer a FRESH server when a runner can COMFORTABLY
         # fit one --------------------------------------------------------
         # New session (no sticky matched).  Among runners that have NO
@@ -1232,6 +1247,30 @@ class RunnerClient:
         # peer to fall back to.  Unknown model size (size 0) is treated as
         # comfortable, preserving the "prefer a fresh dedicated server when
         # there's space" policy for the common case.
+        # Single-endpoint short-circuit (Fix: single-endpoint duplicate 27B).
+        # When only one endpoint hosts the model and it already has a warm
+        # server with a free KV slot, ALWAYS reuse it — never cold-start.  A
+        # second server for the same model on the same (and only) runner can't
+        # fan the session out anywhere; it just doubles the VRAM footprint on
+        # one box and 507s on the second load, while LRU-evicting/re-prefilling
+        # the first.  This is the duplicate-27B thrash the zombie IDE sessions
+        # produced.  The #285 "prefer a fresh comfortable dedicated server"
+        # policy is intentionally left intact for MULTI-endpoint models, where
+        # a fresh server lands on a *different* runner and genuinely fans out
+        # the load — those fall through to rule 1 below.
+        if warm and not multi_endpoint:
+            warm.sort(
+                key=lambda c: (-c["slots_free"], c["total_servers"], -c["vram"])
+            )
+            picked = warm[0]["ep"]
+            logger.info(
+                "select_runner: single-endpoint model with warm free slot "
+                "— reusing it instead of a duplicate cold-start (a duplicate "
+                "can't fan out on the sole runner and just 507s on VRAM)",
+                extra={"endpoint": picked, "slots_free": warm[0]["slots_free"]},
+            )
+            return picked
+
         cold = [c for c in candidates if c["can_cold_start"]]
         if cold:
             cold.sort(key=lambda c: (c["total_servers"], -c["vram"]))
