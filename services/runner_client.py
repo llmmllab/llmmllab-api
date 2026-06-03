@@ -1193,21 +1193,58 @@ class RunnerClient:
             logger.info("select_runner: no candidates → None")
             return None
 
-        # --- Rule 1: prefer a FRESH server when a runner can fit one ---
+        # Pre-compute the warm-with-free-slot cohort once: rule 1 consults it
+        # to decide whether a *tight* cold-start should defer to a warm peer,
+        # and rule 2 reuses it.
+        warm = [
+            c for c in candidates
+            if c["srv"] is not None and c["slots_free"] > 0
+        ]
+
+        # --- Rule 1: prefer a FRESH server when a runner can COMFORTABLY
+        # fit one --------------------------------------------------------
         # New session (no sticky matched).  Among runners that have NO
         # server loaded for this model AND enough free VRAM to start one,
         # cold-start a dedicated server: the session gets its own full
         # slot complement with zero contention.  Pick the least-loaded
         # runner — fewest TOTAL active servers — then most free VRAM.
+        #
+        # BUT: a cold-start whose VRAM headroom is only *marginal* is exactly
+        # the case that used to 500 — the api's size estimate said "fits" but
+        # the real allocation (KV now on VRAM, MoE split across cards) didn't,
+        # so /v1/server/create OOM'd and tripped the circuit breaker.  When a
+        # warm peer with a free KV slot already exists, attaching there is
+        # strictly safer than a marginal fresh load (warm weights, a slot
+        # that's known to fit, runs concurrently).  So we only take the
+        # cold-start when its headroom is *comfortable* (>= COLD_START_VRAM_
+        # COMFORT_FACTOR × the model's footprint) OR there's no warm free-slot
+        # peer to fall back to.  Unknown model size (size 0) is treated as
+        # comfortable, preserving the "prefer a fresh dedicated server when
+        # there's space" policy for the common case.
         cold = [c for c in candidates if c["can_cold_start"]]
         if cold:
             cold.sort(key=lambda c: (c["total_servers"], -c["vram"]))
-            picked = cold[0]["ep"]
-            logger.info(
-                "select_runner: returning rule1 (cold-start fresh server)",
-                extra={"endpoint": picked},
-            )
-            return picked
+            best_cold = cold[0]
+            if warm and not self._cold_start_headroom_comfortable(
+                best_cold["ep"], model_id, best_cold["vram"]
+            ):
+                logger.info(
+                    "select_runner: cold-start headroom marginal + warm "
+                    "free-slot peer available — deferring to rule 2 to "
+                    "avoid a VRAM-tight fresh create",
+                    extra={
+                        "cold_ep": best_cold["ep"],
+                        "cold_vram": best_cold["vram"],
+                    },
+                )
+                # fall through to rule 2 (warm) below
+            else:
+                picked = best_cold["ep"]
+                logger.info(
+                    "select_runner: returning rule1 (cold-start fresh server)",
+                    extra={"endpoint": picked},
+                )
+                return picked
 
         # --- Rule 2: attach to a warm server with a free KV slot -------
         # No runner can cold-start (VRAM is full, or the model is already
@@ -1215,11 +1252,8 @@ class RunnerClient:
         # has a free slot (use_count < parallel): warm weights + shared
         # prefix cache, and the new session runs concurrently on its own
         # slot rather than queuing.  Prefer the most free slots, then the
-        # least-loaded runner, then most free VRAM.
-        warm = [
-            c for c in candidates
-            if c["srv"] is not None and c["slots_free"] > 0
-        ]
+        # least-loaded runner, then most free VRAM.  (``warm`` was computed
+        # above so rule 1 could consult it.)
         if warm:
             warm.sort(
                 key=lambda c: (-c["slots_free"], c["total_servers"], -c["vram"])
@@ -1264,6 +1298,32 @@ class RunnerClient:
         except (TypeError, ValueError):
             use_count = 0
         return max(0, parallel - use_count)
+
+    # A cold-start is "comfortable" only when free VRAM is at least this
+    # multiple of the model's estimated footprint.  Below this, the api-side
+    # estimate is too close to the real allocation (KV cache now resident on
+    # VRAM per runner #50, MoE tensor-split across cards per #51) to trust —
+    # a fresh create at marginal headroom is the path that used to OOM/500.
+    # When a warm free-slot peer exists, ``_select_runner`` prefers it over a
+    # cold-start that isn't comfortable by this factor.
+    COLD_START_VRAM_COMFORT_FACTOR = 1.25
+
+    def _cold_start_headroom_comfortable(
+        self, endpoint: str, model_id: str, vram: int
+    ) -> bool:
+        """True iff a fresh server for ``model_id`` would fit on ``endpoint``
+        with comfortable VRAM headroom (not just barely).
+
+        Used by ``_select_runner`` to decide whether a cold-start is safe to
+        prefer over an existing warm server with a free slot.  Unknown model
+        size (estimate 0) is treated as comfortable so the preferred
+        "cold-start a dedicated server when there's space" policy still holds
+        for models whose footprint the runner didn't report.
+        """
+        size = self._model_size_bytes.get((endpoint, model_id)) or 0
+        if size <= 0:
+            return True
+        return vram >= size * self.COLD_START_VRAM_COMFORT_FACTOR
 
     def _can_cold_start(
         self, endpoint: str, model_id: str, vram: int, srv: Optional[dict]
