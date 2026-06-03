@@ -1144,22 +1144,32 @@ class RunnerClient:
                 1 for h in self._active_handles
                 if h.runner_host == endpoint and h.model_id == model_id
             )
-            my_server = await self._find_loaded_server(endpoint, model_id)
+            my_server, lookup_confirmed = await self._find_loaded_server_status(
+                endpoint, model_id
+            )
             try:
                 total_servers = int(health.get("active_servers") or 0)
             except (TypeError, ValueError):
                 total_servers = 0
+            # Only allow a cold-start when we CONFIRMED no server exists for
+            # this model here.  If the /v1/servers listing failed (or a
+            # server is still starting), ``my_server`` is None but
+            # ``lookup_confirmed`` is False — treat that as "a server may
+            # exist, don't duplicate it".  Cold-starting on an unknown
+            # state is what spawned duplicate 27B servers and 507'd on VRAM.
+            can_cold_start = lookup_confirmed and self._can_cold_start(
+                endpoint, model_id, vram, my_server
+            )
             candidates.append(
                 {
                     "ep": endpoint,
                     "vram": vram,
                     "here_count": here_count,
                     "srv": my_server,
+                    "lookup_confirmed": lookup_confirmed,
                     "total_servers": total_servers,
                     "slots_free": self._slots_free(endpoint, model_id, my_server),
-                    "can_cold_start": self._can_cold_start(
-                        endpoint, model_id, vram, my_server
-                    ),
+                    "can_cold_start": can_cold_start,
                 }
             )
 
@@ -1174,6 +1184,7 @@ class RunnerClient:
                         "here_count": c["here_count"],
                         "total_servers": c["total_servers"],
                         "slots_free": c["slots_free"],
+                        "lookup_confirmed": c["lookup_confirmed"],
                         "can_cold_start": c["can_cold_start"],
                         "srv": (
                             None if c["srv"] is None
@@ -1345,16 +1356,28 @@ class RunnerClient:
             return True
         return vram >= (size + 128 * 1024 * 1024)
 
-    async def _find_loaded_server(
+    async def _find_loaded_server_status(
         self, endpoint: str, model_id: str
-    ) -> Optional[dict]:
-        """Return the loaded llama-server entry for ``model_id`` on
-        ``endpoint``, or None if no server is loaded for that model.
+    ) -> tuple[Optional[dict], bool]:
+        """Look up the loaded llama-server for ``model_id`` on ``endpoint``,
+        returning ``(server_or_None, confirmed)``.
 
-        Used by ``_select_runner`` to apply the parallel-spawn and
-        warm-idle reuse rules above.  Reads from ``/v1/servers`` on
-        the runner; failures (network, parse) are non-fatal and just
-        return None so selection falls through to ranked.
+        ``confirmed`` distinguishes a *trustworthy* answer from a guess:
+
+        * ``(srv, True)``  — /v1/servers responded 200 and a healthy (or
+          ``starting``) server for this model is present.
+        * ``(None, True)`` — /v1/servers responded 200 and CONFIRMED no
+          server for this model exists.  A cold-start is safe.
+        * ``(None, False)`` — the listing FAILED (network error, non-200,
+          parse error).  We do NOT know whether a server exists; the
+          caller must treat this as "a server may exist" and must NOT
+          cold-start on the strength of it.  A transient /v1/servers miss
+          green-lighting a duplicate cold-start was the duplicate-27B-server
+          / 507-no-VRAM failure mode.
+
+        A ``starting`` server (model loading, ``healthy`` not yet true) is
+        reported as PRESENT — duplicating a cold-start onto a runner that's
+        already spinning one up is exactly what we must avoid.
         """
         try:
             client = self._get_client()
@@ -1362,16 +1385,37 @@ class RunnerClient:
                 f"{endpoint}/v1/servers", timeout=_HEALTH_TIMEOUT
             )
             if resp.status_code != 200:
-                return None
+                return None, False  # unknown — don't trust as "absent"
             data = resp.json()
             for srv in data.get("servers", []):
                 if not isinstance(srv, dict):
                     continue
-                if srv.get("model_id") == model_id and srv.get("healthy", True):
-                    return srv
-            return None
+                if srv.get("model_id") != model_id:
+                    continue
+                # A healthy server, OR one still starting, counts as
+                # present: in both cases another cold-start here would
+                # duplicate it.
+                if srv.get("healthy", True) or srv.get("starting"):
+                    return srv, True
+            return None, True  # confirmed absent — cold-start is safe
         except Exception:
-            return None
+            return None, False  # unknown — don't trust as "absent"
+
+    async def _find_loaded_server(
+        self, endpoint: str, model_id: str
+    ) -> Optional[dict]:
+        """Return the loaded llama-server entry for ``model_id`` on
+        ``endpoint``, or None if no server is loaded for that model.
+
+        Thin wrapper over :meth:`_find_loaded_server_status` that drops the
+        ``confirmed`` flag — preserves the historical ``Optional[dict]``
+        contract for callers that only need the server handle (sticky /
+        slot-reuse paths).  Selection's cold-start gate uses the status
+        variant directly so a transient listing miss can't be mistaken for
+        "no server loaded".
+        """
+        srv, _confirmed = await self._find_loaded_server_status(endpoint, model_id)
+        return srv
 
     async def _runner_has_saved_session(
         self, endpoint: str, session_id: str, model_id: str
