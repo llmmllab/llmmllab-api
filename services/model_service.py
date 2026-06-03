@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from models import Model
+from models import Model, ModelTask
 from utils.logging import llmmllogger
 
 logger = llmmllogger.bind(component="model_service")
@@ -77,6 +77,26 @@ class ModelService:
                 )
                 return fallback
 
+            # No per-user default — fall back to the GLOBAL default
+            # (the model marked `default: true` in .models.yaml). Without this,
+            # we'd warn "no default_model configured" and return the unavailable
+            # name on every request from a user with no per-user default (e.g.
+            # Claude Code, which sends `claude-opus-4-8`), even though a global
+            # default IS configured. Only graph/workflows/base.py had this
+            # fallback before, so direct callers (anthropic/openai routers)
+            # could fail; consolidate it here.
+            global_default = await self._global_default_model()
+            if global_default:
+                logger.info(
+                    "Requested model not available, falling back to global default",
+                    extra={
+                        "user_id": user_id,
+                        "requested": requested_model,
+                        "fallback": global_default,
+                    },
+                )
+                return global_default
+
             # No fallback configured — return original so downstream can error
             # Detect truncated/corrupted model names (ending with underscore)
             if requested_model and requested_model.endswith('_'):
@@ -94,10 +114,13 @@ class ModelService:
             )
             return requested_model
 
-        # No model specified — use user's default_model
+        # No model specified — use user's default_model, then the global default
         fallback = await self._user_default_model(user_id)
         if fallback:
             return fallback
+        global_default = await self._global_default_model()
+        if global_default:
+            return global_default
 
         # Nothing to fall back to — return empty so downstream errors
         logger.warning(
@@ -156,6 +179,20 @@ class ModelService:
                 f"Failed to load user config for default_model lookup: {e}"
             )
 
+        return None
+
+    async def _global_default_model(self) -> Optional[str]:
+        """The global text-to-text default — the model marked ``default: true``
+        in ``.models.yaml`` (via the runner's ``/v1/models/default``). This is a
+        deployment-wide default, distinct from the per-user ``default_model``."""
+        try:
+            from services.runner_client import runner_client
+
+            model = await runner_client.default_model_by_task(ModelTask.TEXTTOTEXT)
+            if model and getattr(model, "id", None):
+                return model.id
+        except Exception as e:
+            logger.warning(f"Failed to resolve global default model: {e}")
         return None
 
     def invalidate_cache(self) -> None:
