@@ -104,7 +104,9 @@ make sync-watch     # Watch mode: sync code to k8s node on changes
 
 Copy `.env.example` to `.env` and set the required values. See `config.py` for defaults.
 
-### Database
+All variables below are read through `config.py` unless noted otherwise.
+
+### Database (including maintenance)
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -115,9 +117,9 @@ Copy `.env.example` to `.env` and set the required values. See `config.py` for d
 | `DB_NAME` | `llmmllab` | Database name |
 | `DB_SSLMODE` | `disable` | SSL mode (`disable`, `require`, etc.) |
 | `DB_CONNECTION_STRING` | *(auto-built from above)* | Full connection string; overrides individual DB vars if set |
-| `DB_MAINTENANCE_INTERVAL_HOURS` | `24` | Hours between automated DB maintenance runs (VACUUM ANALYZE) |
-| `DB_MAINTENANCE_INITIAL_DELAY_SECONDS` | `300` | Seconds to wait before the first maintenance run |
-| `DB_REINDEX_ON_MAINTENANCE` | `false` | Whether to run `REINDEX` during maintenance (`true`/`false`) |
+| `DB_MAINTENANCE_INTERVAL_HOURS` | `24` | Hours between automated DB maintenance runs (VACUUM ANALYZE + sequence align) |
+| `DB_MAINTENANCE_INITIAL_DELAY_SECONDS` | `300` | Seconds to wait before the first maintenance run after pod startup |
+| `DB_REINDEX_ON_MAINTENANCE` | `false` | Whether to run `REINDEX CONCURRENTLY` during maintenance — off by default as it can trip stale-OID plan errors under live TimescaleDB traffic |
 
 ### Redis (Optional)
 
@@ -160,7 +162,27 @@ Copy `.env.example` to `.env` and set the required values. See `config.py` for d
 | `RUNNER_UNHEALTHY_WINDOW_SEC` | `60.0` | Seconds a runner stays unhealthy after tripping circuit breaker |
 | `RUNNER_ACQUIRE_RETRIES` | `2` | Per-endpoint retries during server acquisition |
 | `MODEL_CACHE_REFRESH_SEC` | `60` | Seconds between model list cache refreshes |
-| `STALE_SERVER_RETRIES` | `1` | Retries on stale server handle (set `0` to disable) |
+| `STALE_SERVER_RETRIES` | `2` | Retries on stale server handle (set `0` to disable) |
+| `CACHE_TIMEOUT_MIN` | `10` | Minutes before an idle loaded server is considered "abandoned" (safe to commandeer). Should match the runner's value. |
+
+### Cold-Start Retry
+
+When a fresh model server cold-starts, the runner returns HTTP 503 while loading (~45–90 s). These knobs control how long the api waits and retries:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `COLD_START_RETRIES` | `4` | Extra retry attempts for cold-start 503s (set `0` to disable) |
+| `COLD_START_BACKOFF_SEC` | `20.0` | Fixed wait (seconds) between cold-start retries; 4 × 20 ≈ 80 s covers a typical load |
+
+### Server-Side Tools
+
+Controls execution of tools like `web_search` / `web_fetch` on the server side:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SERVER_SIDE_TOOLS_ENABLED` | `true` | Master switch for server-side tool execution (`true`/`false`). Per-request override via `X-Server-Side-Tools: false` header (Anthropic). |
+| `MCP_WEB_TOOLS_URL` | `http://mcp-server-web.llmmllab.svc.cluster.local:8000` | MCP server URL for `web_search` / `web_fetch`. Set to empty to fall back to inline SearxNG + Playwright. |
+| `SERVER_TOOL_MAX_ITERATIONS` | `4` | Hard cap on Agent ↔ ServerToolNode loops per completion; hitting the cap routes the graph to END. |
 
 ### Priority Queue
 
@@ -184,7 +206,7 @@ Copy `.env.example` to `.env` and set the required values. See `config.py` for d
 | `HF_TOKEN` | *(empty)* | HuggingFace token for model downloads |
 | `SEARX_HOST` | *(empty)* | SearXNG instance URL for web search tool |
 
-### Images
+### Storage / Images
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -192,6 +214,7 @@ Copy `.env.example` to `.env` and set the required values. See `config.py` for d
 | `IMAGE_RETENTION_HOURS` | `24` | Hours to retain generated images before cleanup |
 | `CONFIG_DIR` | `/app/config` | Directory for runtime config files |
 | `HF_HOME` | `/root/.cache/huggingface` | HuggingFace cache directory |
+| `IMG_SERVER_AUTO_SHUTDOWN` | `true` | Tear down sd-server / qwen-image servers after each request rather than holding them warm. Image servers are 4–12 GB resident; set `false` for benchmarking or batched generation. |
 
 ### Vision Token Accounting
 
@@ -204,51 +227,35 @@ the runner refuses requests that have grown beyond `n_ctx`. The
 Qwen2/3-VL formula `⌈W / patch⌉ × ⌈H / patch⌉` after resizing the long
 edge down to a cap.
 
-| Variable | Description |
-|----------|-------------|
-| `IMAGE_TOKENS_DEFAULT` | Per-image fallback when dimensions can't be decoded (HTTP URLs, missing PIL, malformed base64). Default: `1500` |
-| `VISION_PATCH_PX` | Vision-tower patch size in pixels. Qwen-VL family is 28. Default: `28` |
-| `VISION_MAX_LONG_EDGE_PX` | Max long-edge the vision tower processes before patchification. Default: `1280` |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `IMAGE_TOKENS_DEFAULT` | `1500` | Per-image fallback when dimensions can't be decoded (HTTP URLs, missing PIL, malformed base64) |
+| `VISION_PATCH_PX` | `28` | Vision-tower patch size in pixels (Qwen-VL family default) |
+| `VISION_MAX_LONG_EDGE_PX` | `1280` | Max long-edge the vision tower processes before patchification |
 
 ### Raw Token Debug
 
 When enabled, writes every raw model token (no stripping/modification) plus all user messages to `<RAW_TOKEN_DEBUG_DIR>/<session_id>.tokens`. Useful for diagnosing premature stops and context overflow patterns.
 
-| Variable | Description |
-|----------|-------------|
-| `RAW_TOKEN_DEBUG` | Enable raw-token debug logging. When `true`, each workflow's full message history and unmodified streaming tokens are appended to a per-session file under `RAW_TOKEN_DEBUG_DIR`. Default: `false` |
-| `RAW_TOKEN_DEBUG_DIR` | Output directory for debug token files. Default: `/tmp/llmmllab_debug` |
-
-### Image Server Lifecycle
-
-| Variable | Description |
-|----------|-------------|
-| `IMG_SERVER_AUTO_SHUTDOWN` | Tear down sd-server / qwen-image servers after each request rather than holding them warm. Default: `true` (image servers are 4-12 GB resident; for interactive workflows the cold-start cost is worth the freed VRAM). Set to `false` for benchmarking or batched generation. |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RAW_TOKEN_DEBUG` | `false` | Enable raw-token debug logging (`true`/`false`) |
+| `RAW_TOKEN_DEBUG_DIR` | `/tmp/llmmllab_debug` | Output directory for debug token files |
 
 ### Tracing
 
-| Variable | Description |
-|----------|-------------|
-| `TEMPO_ENDPOINT` | OTLP gRPC endpoint for OpenTelemetry trace export. Default: `http://tempo.llmmllab.svc.cluster.local:4317`. Empty disables tracing. |
-
-### Database Maintenance
-
-| Variable | Description |
-|----------|-------------|
-| `DB_MAINTENANCE_INTERVAL_HOURS` | How often the maintenance loop runs (VACUUM ANALYZE + sequence align). Default: `24` |
-| `DB_MAINTENANCE_INITIAL_DELAY_SECONDS` | Delay before the first maintenance run after pod startup (avoid racing warm-up traffic). Default: `300` |
-| `DB_REINDEX_ON_MAINTENANCE` | Opt-in REINDEX during maintenance. Default: `false` — REINDEX CONCURRENTLY can still trip stale-OID plan errors under live TimescaleDB traffic; enable in low-traffic environments only. |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TEMPO_ENDPOINT` | `http://tempo.llmmllab.svc.cluster.local:4317` | OTLP gRPC endpoint for OpenTelemetry trace export. Set to empty to disable tracing. |
 
 ### General
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PORT` | `9999` | Server port (passed via Makefile to uvicorn) |
-| `API_VERSION` | `v1` | API version prefix |
-| `LOG_LEVEL` | `WARNING` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`). Read directly by `utils/logging.py` because logging is bootstrapped before `config.py` loads. |
-| `LOG_FORMAT` | `console` | Log format (`console` for human-readable, `json` for structured). Same bootstrap-order constraint as `LOG_LEVEL`. |
-| `FORCE_COLOR` | `0` | Force ANSI colors in console log output even without TTY (`1` to enable) |
-| `TEMPO_ENDPOINT` | `http://tempo.llmmllab.svc.cluster.local:4317` | Jaeger/Tempo OTLP endpoint for distributed tracing |
+| `PORT` | *(Makefile)* | Server port, passed via Makefile to uvicorn (not read by config.py) |
+| `LOG_LEVEL` | `WARNING` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`). Read directly in `utils/logging.py` (bootstrapped before config.py). |
+| `LOG_FORMAT` | `console` | Log format (`console` human-readable, `json` structured). Same bootstrap-order constraint as `LOG_LEVEL`. |
+| `FORCE_COLOR` | `0` | Force ANSI colors in console log output even without TTY (`1` to enable). Read in `utils/logging.py`. |
 
 ### Container / Runner Environment
 
@@ -256,7 +263,7 @@ These variables are not consumed by the Python API directly but are set in the d
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CUDA_LAUNCH_BLOCKING` | `0` | Force synchronous CUDA kernel launches (`1` to enable, set by the API at startup) |
+| `CUDA_LAUNCH_BLOCKING` | `0` | Force synchronous CUDA kernel launches (`1` to enable) |
 | `CUDA_VISIBLE_DEVICES` | *(unset)* | GPU device IDs visible to the process |
 | `CUDA_DEVICE_ORDER` | `PCI_BUS_ID` | CUDA device ordering |
 | `PYTHONMALLOC` | `malloc` | Python memory allocator |
@@ -288,7 +295,7 @@ The api recovers transparently from runner process restarts:
 - `RunnerClient` tracks a per-endpoint `startup_epoch` returned by `GET /v1/status`. On `acquire_server` and opportunistically on 503 responses, it re-probes status. An epoch bump purges all active handles for that endpoint and invalidates the model map.
 - 404 responses against `/v1/server/<id>/...` for a known handle, and 404-shaped errors raised during LangGraph workflow execution, are converted into `StaleServerError`.
 - Empty SSE streams from chat completions trigger `revalidate_runner_handles()` (chat streams bypass the proxy that would otherwise see the 404 directly).
-- The completion service catches `StaleServerError`, invalidates the cached workflow for `(user_id, model_name)` via `composer_init.invalidate_workflow`, refreshes the model map, and retries with a fresh handle. Retries are capped by `STALE_SERVER_RETRIES` (default 1, set 0 to disable).
+- The completion service catches `StaleServerError`, invalidates the cached workflow for `(user_id, model_name)` via `composer_init.invalidate_workflow`, refreshes the model map, and retries with a fresh handle. Retries are capped by `STALE_SERVER_RETRIES` (default 2, set 0 to disable).
 - Empty-after-all-retries now closes the stream cleanly with no content. The api no longer injects a `[Model returned empty response...]` diagnostic into the assistant response — that text was being echoed back into history by clients and eventually exhausted output token budgets.
 
 ## Docker
