@@ -90,8 +90,6 @@ class ColdStartError(ComposerError):
         if original_error:
             message += f": {original_error}"
         super().__init__(message, {"model_id": model_id})
-
-
 class StaleServerError(ComposerError):
     """Server handle is stale — the llama.cpp server was evicted.
 
