@@ -24,6 +24,16 @@ TRUNCATION_CONTINUATION_PROMPT = (
     "If you were in the middle of text, continue the text."
 )
 
+SUMMARY_MARKER = "## !SUMMARY!"
+
+MISSING_SUMMARY_NUDGE = (
+    "Your response ended without a conclusion summary. "
+    "If you are finished, provide a brief summary of what you did and "
+    "any recommended next steps, formatted as:\n\n"
+    "## !SUMMARY!\n<your summary here>\n\n"
+    "If you are not finished, continue your work."
+)
+
 
 def hallucinated_tool_feedback(
     invalid_tool_names: list[str],

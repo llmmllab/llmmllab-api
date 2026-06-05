@@ -38,6 +38,8 @@ detailed logging throughout the startup and shutdown processes.
 import asyncio
 import os
 from contextlib import asynccontextmanager
+
+import patches.langchain_reasoning  # noqa: F401  (monkey-patch: surfaces reasoning_content)
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse

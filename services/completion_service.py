@@ -44,6 +44,7 @@ from services.continuation_logic import (
     maybe_continue_on_missing_tool_call_nonstream,
     maybe_continue_on_truncation,
     maybe_continue_on_truncation_nonstream,
+    maybe_nudge_on_missing_summary,
     maybe_retry_on_empty,
     maybe_retry_on_empty_nonstream,
 )
@@ -51,6 +52,7 @@ from services.response_handlers import (
     extract_client_tool_names,
     extract_text,
     looks_like_anticipated_tool_call,
+    looks_like_missing_summary,
     looks_like_premature_stop,
     partition_tool_calls_by_validity,
     set_result_response,
@@ -670,6 +672,41 @@ class CompletionService:
                     )
                 ):
                     async for event, acc in maybe_continue_on_missing_tool_call(
+                        run_fn,
+                        acc,
+                        user_id,
+                        messages,
+                        model_name,
+                        workflow_type,
+                        conversation_id,
+                        client_tools,
+                        server_tool_names,
+                        model_parameters,
+                    ):
+                        yield event, acc
+
+                # Summary-token heuristic: when the model finishes with
+                # content but no ## !SUMMARY! marker, nudge it to
+                # provide a conclusion.  Only fires for substantial
+                # responses (>200 chars) with tools bound — short Q&A
+                # answers pass through.
+                _missing_summary = looks_like_missing_summary(acc.final_content)
+                if (
+                    _CONTINUATION_ENABLED
+                    and acc.finish_reason == "stop"
+                    and acc.has_content
+                    and not acc.has_tool_calls
+                    and client_tools
+                    and _missing_summary
+                ):
+                    logger.info(
+                        "Summary marker absent — nudging model",
+                        extra={
+                            "content_len": len(acc.final_content or ""),
+                            "model": model_name,
+                        },
+                    )
+                    async for event, acc in maybe_nudge_on_missing_summary(
                         run_fn,
                         acc,
                         user_id,

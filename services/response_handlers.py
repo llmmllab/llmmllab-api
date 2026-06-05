@@ -289,6 +289,24 @@ def looks_like_premature_stop(
     return _last_turn_is_tool_result(messages)
 
 
+_SUMMARY_MIN_CONTENT_LEN = 200
+
+
+def looks_like_missing_summary(final_content: str | None) -> bool:
+    """True when a finish=stop response lacks the ``## !SUMMARY!`` marker.
+
+    Only flags responses long enough (> 200 chars) that a conclusion
+    summary would be expected.  Short answers to simple questions pass
+    through without a nudge.
+    """
+    from services.prompt_templates import SUMMARY_MARKER
+
+    text = (final_content or "").strip()
+    if not text or len(text) <= _SUMMARY_MIN_CONTENT_LEN:
+        return False
+    return SUMMARY_MARKER not in text
+
+
 def filter_response_tool_calls(
     response: ChatResponse | None,
     server_tool_names: set[str] | None,

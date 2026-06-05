@@ -309,28 +309,29 @@ class GraphBuilder(ABC):
             task=model_def.task,
         )
 
-        # When thinking is enabled, inject the reasoning-budget tags per
-        # request so llama.cpp actually enforces the budget.  llama-server
-        # auto-populates these from the chat parser when the format supports
-        # thinking, but Qwen3.6's GGUF currently resolves to chat_format=
-        # Content-only (no autoparser match) so the auto-population is
-        # skipped and the budget check at sampling.cpp:296 short-circuits to
-        # "no limit".  Forcing the tags + token count here makes the budget
-        # enforce regardless of whether the chat parser recognised them.
-        # See llama.cpp tools/server/server-task.cpp:493–510.
+        # When thinking is enabled, send reasoning_format=deepseek so
+        # llama.cpp activates its reasoning parser (works for both Qwen
+        # and Gemma-4).  Budget tags are model-specific: Qwen3.6 resolves
+        # to Content-only chat format (no auto-population), so we force
+        # <think>/</think> explicitly.  Gemma-4 has a dedicated PEG parser
+        # (common_chat_params_init_gemma4) that auto-populates tags from
+        # the template, so we omit them and let the server handle it.
+        # See llama.cpp tools/server/server-task.cpp:422–426 (per-request
+        # reasoning_format) and sampling.cpp:296 (budget enforcement).
         chat_openai_extras: dict = {}
-        if (
-            effective_params
-            and getattr(effective_params, "think", False)
-            and getattr(effective_params, "reasoning_budget", None)
-        ):
-            chat_openai_extras["model_kwargs"] = {
-                "extra_body": {
-                    "reasoning_budget_tokens": effective_params.reasoning_budget,
-                    "reasoning_budget_start_tag": "<think>",
-                    "reasoning_budget_end_tag": "</think>",
-                }
+        if effective_params and getattr(effective_params, "think", False):
+            extra_body: dict = {
+                "reasoning_format": "deepseek",
             }
+            if getattr(effective_params, "reasoning_budget", None):
+                extra_body["reasoning_budget_tokens"] = (
+                    effective_params.reasoning_budget
+                )
+                _is_gemma = "gemma" in (model_def.name or "").lower()
+                if not _is_gemma:
+                    extra_body["reasoning_budget_start_tag"] = "<think>"
+                    extra_body["reasoning_budget_end_tag"] = "</think>"
+            chat_openai_extras["model_kwargs"] = {"extra_body": extra_body}
 
         primary_model = ChatOpenAI(
             base_url=server_handle.base_url,

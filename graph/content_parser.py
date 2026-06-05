@@ -38,34 +38,48 @@ _BARE_JSON_TOOL_CALL_RE = re.compile(
 )
 
 
-_THINK_TAG_RE = re.compile(r"</?think>", re.IGNORECASE)
+_THINK_TAG_RE = re.compile(
+    r"</?think>"
+    r"|<\|channel>thought"
+    r"|<channel\|>",
+    re.IGNORECASE,
+)
+
+_THINK_CLOSE_TAGS = ("</think>", "<channel|>")
+_THINK_OPEN_PREFIXES = ("<think>", "<|channel>thought")
 
 
 def clean_think_tags(text: str) -> str:
-    """Remove all <think> and </think> tags from text."""
+    """Remove all thinking tags (Qwen <think> and Gemma-4 <|channel>thought) from text."""
     return _THINK_TAG_RE.sub("", text).strip()
 
 
 def strip_think_tags(text: str, think_closed: bool = False) -> Tuple[str, str, bool]:
     """
-    Split text on </think> boundary.
+    Split text on a thinking-close boundary.
+
+    Handles both Qwen ``</think>`` and Gemma-4 ``<channel|>`` close tags,
+    plus their corresponding open tags.
 
     Args:
-        text: Text that may contain <think> tags
+        text: Text that may contain thinking tags
         think_closed: Whether thinking section is already closed
 
     Returns:
         Tuple of (thinking_part, content_part, new_think_closed)
-        - If </think> found: returns (thinking content, rest after tag, True)
-        - If no </think> and not closed yet: returns (text, "", False)
-        - If no </think> and already closed: returns ("", text, True)
+        - If close tag found: returns (thinking content, rest after tag, True)
+        - If no close tag and not closed yet: returns (text, "", False)
+        - If no close tag and already closed: returns ("", text, True)
     """
-    if "</think>" in text:
-        before, after = text.split("</think>", 1)
-        before = before.lstrip()
-        if before.startswith("<think>"):
-            before = before[len("<think>") :]
-        return before.strip(), after.lstrip("\n"), True
+    for close_tag in _THINK_CLOSE_TAGS:
+        if close_tag in text:
+            before, after = text.split(close_tag, 1)
+            before = before.lstrip()
+            for open_prefix in _THINK_OPEN_PREFIXES:
+                if before.startswith(open_prefix):
+                    before = before[len(open_prefix):]
+                    break
+            return before.strip(), after.lstrip("\n"), True
     if not think_closed:
         return text, "", False
     return "", text, True

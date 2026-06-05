@@ -32,6 +32,7 @@ from models.tool_call import ToolCall
 from services.prompt_templates import (
     CONTINUATION_PROMPT,
     EMPTY_RESPONSE_NUDGE,
+    MISSING_SUMMARY_NUDGE,
     TRUNCATION_CONTINUATION_PROMPT,
     hallucinated_tool_feedback,
 )
@@ -345,6 +346,48 @@ async def maybe_continue_on_hallucinated_tools_nonstream(
     )
     if final is not None:
         set_result_response(result, final, server_tool_names)
+
+
+async def maybe_nudge_on_missing_summary(
+    build_and_run: BuildAndRunFn,
+    acc: StreamAccumulator,
+    user_id: str,
+    messages: list[Message],
+    model_name: str,
+    workflow_type,
+    conversation_id: int,
+    client_tools: list | None,
+    server_tool_names: set[str] | None,
+    model_parameters: ModelParameters | None = None,
+) -> AsyncIterator[tuple[Union[ChatResponse, ServerToolEvent], StreamAccumulator]]:
+    """Nudge the model when its response lacks the ``## !SUMMARY!`` marker."""
+    accumulated_text = acc.final_content or ""
+    logger.info(
+        "Model response missing summary marker — sending nudge",
+        extra={
+            "content_len": len(accumulated_text),
+            "content_tail": accumulated_text[-200:] if accumulated_text else "",
+        },
+    )
+    nudge_messages = build_followup_messages(
+        messages,
+        MISSING_SUMMARY_NUDGE,
+        assistant_text=accumulated_text,
+    )
+    async for event, acc in stream_secondary_pass(
+        build_and_run,
+        acc,
+        user_id,
+        nudge_messages,
+        model_name,
+        workflow_type,
+        conversation_id,
+        client_tools,
+        "auto",
+        server_tool_names,
+        model_parameters,
+    ):
+        yield event, acc
 
 
 async def maybe_retry_on_empty(
