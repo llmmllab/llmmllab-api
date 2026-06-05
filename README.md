@@ -192,6 +192,7 @@ Controls execution of tools like `web_search` / `web_fetch` on the server side:
 | `PRIORITY_QUEUE_MAX_SIZE` | `100` | Maximum queued requests |
 | `PRIORITY_QUEUE_TIMEOUT_SEC` | `300` | Max time a request waits in queue (seconds) |
 | `PRIORITY_QUEUE_AGE_THRESHOLD_SEC` | `60` | Seconds before a queued request is considered "aging" |
+| `PRIORITY_QUEUE_RECHECK_SEC` | `2.0` | Seconds between safety-net poll checks for resource-aware scheduling |
 | `PRIORITY_QUEUE_MAX_WAIT_MIN_SEC` | `1` | Minimum wait time before aging bump (seconds) |
 | `PRIORITY_QUEUE_MAX_WAIT_MAX_SEC` | `3600` | Maximum wait time before aging bump (seconds) |
 
@@ -200,6 +201,7 @@ Controls execution of tools like `web_search` / `web_fetch` on the server side:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CHAT_OPENAI_MAX_RETRIES` | `2` | Max retries for OpenAI-compatible chat completions |
+| `AGENT_MAX_RETRY_ATTEMPTS` | `11` | Max transient-error retries per agent turn (connection errors, 5xx). Set lower to fail-fast when clients disconnect. |
 | `ENABLE_TOOL_CONTINUATION` | `true` | Allow tool-call continuation in agent loops (`true`/`false`) |
 | `OPENAI_API_KEY` | *(empty)* | OpenAI API key (for external model calls) |
 | `ANTHROPIC_API_KEY` | *(empty)* | Anthropic API key |
