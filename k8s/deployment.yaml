@@ -152,5 +152,7 @@ spec:
               value: "0.85"
             - name: CONTEXT_MINIMUM_RATIO
               value: "0.80"
+            - name: MAX_CONTENT_LENGTH
+              value: "20000"
   strategy:
     type: Recreate
