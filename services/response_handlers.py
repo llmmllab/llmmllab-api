@@ -289,20 +289,18 @@ def looks_like_premature_stop(
     return _last_turn_is_tool_result(messages)
 
 
-_SUMMARY_MIN_CONTENT_LEN = 200
-
-
 def looks_like_missing_summary(final_content: str | None) -> bool:
     """True when a finish=stop response lacks the ``## !SUMMARY!`` marker.
 
-    Only flags responses long enough (> 200 chars) that a conclusion
-    summary would be expected.  Short answers to simple questions pass
-    through without a nudge.
+    No length gate — even short responses should conclude with the marker
+    when the model is in an agentic context (tools bound).  This also
+    catches hallucinated stubs like "OK, now I will" that slip past the
+    premature-stop check (which only fires ≤16 chars mid-tool-loop).
     """
     from services.prompt_templates import SUMMARY_MARKER
 
     text = (final_content or "").strip()
-    if not text or len(text) <= _SUMMARY_MIN_CONTENT_LEN:
+    if not text:
         return False
     return SUMMARY_MARKER not in text
 

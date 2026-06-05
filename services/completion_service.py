@@ -687,9 +687,9 @@ class CompletionService:
 
                 # Summary-token heuristic: when the model finishes with
                 # content but no ## !SUMMARY! marker, nudge it to
-                # provide a conclusion.  Only fires for substantial
-                # responses (>200 chars) with tools bound — short Q&A
-                # answers pass through.
+                # provide a conclusion.  Only fires when tools are
+                # bound (agentic context) — pure Q&A without tools
+                # is unaffected.
                 _missing_summary = looks_like_missing_summary(acc.final_content)
                 if (
                     _CONTINUATION_ENABLED
