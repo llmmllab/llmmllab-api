@@ -104,90 +104,119 @@ make sync-watch     # Watch mode: sync code to k8s node on changes
 
 Copy `.env.example` to `.env` and set the required values. See `config.py` for defaults.
 
-### Database
+All variables below are read through `config.py` unless noted otherwise.
 
-| Variable | Description |
-|----------|-------------|
-| `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `DB_SSLMODE` | PostgreSQL (TimescaleDB) connection |
-| `DB_CONNECTION_STRING` | Full connection string (overrides individual DB vars) |
+### Database (including maintenance)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DB_HOST` | `localhost` | PostgreSQL host |
+| `DB_PORT` | `5432` | PostgreSQL port |
+| `DB_USER` | `postgres` | PostgreSQL username |
+| `DB_PASSWORD` | *(empty)* | PostgreSQL password |
+| `DB_NAME` | `llmmllab` | Database name |
+| `DB_SSLMODE` | `disable` | SSL mode (`disable`, `require`, etc.) |
+| `DB_CONNECTION_STRING` | *(auto-built from above)* | Full connection string; overrides individual DB vars if set |
+| `DB_MAINTENANCE_INTERVAL_HOURS` | `24` | Hours between automated DB maintenance runs (VACUUM ANALYZE + sequence align) |
+| `DB_MAINTENANCE_INITIAL_DELAY_SECONDS` | `300` | Seconds to wait before the first maintenance run after pod startup |
+| `DB_REINDEX_ON_MAINTENANCE` | `false` | Whether to run `REINDEX CONCURRENTLY` during maintenance — off by default as it can trip stale-OID plan errors under live TimescaleDB traffic |
 
 ### Redis (Optional)
 
-| Variable | Description |
-|----------|-------------|
-| `REDIS_ENABLED` | Enable the multi-tier (memory + Redis + DB) user-config cache (default: `true`; set to `false`/`0`/`no`/`off` to opt out and run with memory + DB only). |
-| `REDIS_HOST`, `REDIS_PORT`, `REDIS_DB` | Redis connection |
-| `REDIS_PASSWORD` | Redis password (optional) |
-| `REDIS_CONVERSATION_TTL`, `REDIS_MESSAGE_TTL`, `REDIS_SUMMARY_TTL` | TTL in minutes for cached data |
-| `REDIS_POOL_SIZE`, `REDIS_MIN_IDLE_CONNECTIONS`, `REDIS_CONNECT_TIMEOUT` | Connection pool settings |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `REDIS_ENABLED` | `true` | Enable Redis caching (`true`/`false`) |
+| `REDIS_HOST` | `localhost` | Redis host |
+| `REDIS_PORT` | `6379` | Redis port |
+| `REDIS_DB` | `0` | Redis database number |
+| `REDIS_PASSWORD` | *(empty)* | Redis password |
+| `REDIS_CONVERSATION_TTL` | `360` | Conversation cache TTL (seconds) |
+| `REDIS_MESSAGE_TTL` | `180` | Message cache TTL (seconds) |
+| `REDIS_SUMMARY_TTL` | `720` | Summary cache TTL (seconds) |
+| `REDIS_POOL_SIZE` | `10` | Connection pool size |
+| `REDIS_MIN_IDLE_CONNECTIONS` | `2` | Minimum idle connections in pool |
+| `REDIS_CONNECT_TIMEOUT` | `5` | Connection timeout (seconds) |
 
 ### Authentication
 
-| Variable | Description |
-|----------|-------------|
-| `AUTH_ISSUER`, `AUTH_AUDIENCE`, `AUTH_JWKS_URI` | JWT auth via JWKS |
-| `AUTH_CLIENT_ID`, `AUTH_CLIENT_SECRET` | OAuth client credentials |
-| `TEST_USER_ID` | Seed a local dev user + API key on startup (saved to `.env.local`) |
-| `INTERNAL_API_KEY` | Internal service-to-service API key |
-| `INTERNAL_ALLOWED_IPS` | Comma-separated CIDR list for internal API access |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AUTH_ISSUER` | `https://auth.longstorymedia.com` | JWT issuer URL |
+| `AUTH_AUDIENCE` | `lsm-client` | Expected JWT audience claim |
+| `AUTH_JWKS_URI` | `https://auth.longstorymedia.com/keys` | JWKS endpoint for key discovery |
+| `AUTH_CLIENT_ID` | `lsm-client` | OAuth client ID |
+| `AUTH_CLIENT_SECRET` | *(empty)* | OAuth client secret |
+| `TEST_USER_ID` | *(empty)* | If set, seeds a local dev user + API key on startup (saved to `.env.local`) |
 
 ### Runner / Inference
 
-| Variable | Description |
-|----------|-------------|
-| `RUNNER_ENDPOINTS` | Comma-separated runner service URLs |
-| `RUNNER_RETRIES` | Runner acquisition retries (default: 2) |
-| `RUNNER_RETRY_BACKOFF_BASE` | Runner retry backoff base (default: 1) |
-| `RUNNER_HEALTH_TIMEOUT_SEC` | Health check timeout (default: 5.0) |
-| `RUNNER_FAST_TIMEOUT_SEC` | Fast request timeout (default: 10.0) |
-| `RUNNER_ACQUIRE_TIMEOUT_SEC` | Server acquisition timeout (default: 150.0) |
-| `RUNNER_MAX_ACQUIRE_FAILURES` | Circuit breaker threshold (default: 3) |
-| `RUNNER_UNHEALTHY_WINDOW_SEC` | Circuit breaker reset window (default: 60.0) |
-| `RUNNER_ACQUIRE_RETRIES` | Per-endpoint connection retries (default: 2) |
-| `MODEL_CACHE_REFRESH_SEC` | Model map refresh interval (default: 60) |
-| `CONTEXT_USAGE_SAFETY_MARGIN` | Fraction of `num_ctx` reserved for conversation input (default: 0.85) |
-| `CONTEXT_MINIMUM_RATIO` | Min ratio of actual to requested context before rejecting a server (default: 0.80) |
-| `STALE_SERVER_RETRIES` | Retries on stale server handle (default: 1, set 0 to disable) |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RUNNER_ENDPOINTS` | `http://localhost:9000` | Comma-separated runner service URLs |
+| `RUNNER_RETRIES` | `2` | Number of retries for runner requests |
+| `RUNNER_RETRY_BACKOFF_BASE` | `1` | Base seconds for exponential backoff between retries |
+| `RUNNER_HEALTH_TIMEOUT_SEC` | `5.0` | Timeout for runner health checks (seconds) |
+| `RUNNER_FAST_TIMEOUT_SEC` | `10.0` | Timeout for fast runner requests (status, release, etc.) |
+| `RUNNER_ACQUIRE_TIMEOUT_SEC` | `150.0` | Timeout for server acquisition (seconds) |
+| `RUNNER_MAX_ACQUIRE_FAILURES` | `3` | Failures before marking a runner unhealthy (circuit breaker) |
+| `RUNNER_UNHEALTHY_WINDOW_SEC` | `60.0` | Seconds a runner stays unhealthy after tripping circuit breaker |
+| `RUNNER_ACQUIRE_RETRIES` | `2` | Per-endpoint retries during server acquisition |
+| `MODEL_CACHE_REFRESH_SEC` | `60` | Seconds between model list cache refreshes |
+| `STALE_SERVER_RETRIES` | `2` | Retries on stale server handle (set `0` to disable) |
+| `CACHE_TIMEOUT_MIN` | `10` | Minutes before an idle loaded server is considered "abandoned" (safe to commandeer). Should match the runner's value. |
+
+### Cold-Start Retry
+
+When a fresh model server cold-starts, the runner returns HTTP 503 while loading (~45–90 s). These knobs control how long the api waits and retries:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `COLD_START_RETRIES` | `4` | Extra retry attempts for cold-start 503s (set `0` to disable) |
+| `COLD_START_BACKOFF_SEC` | `20.0` | Fixed wait (seconds) between cold-start retries; 4 × 20 ≈ 80 s covers a typical load |
+
+### Server-Side Tools
+
+Controls execution of tools like `web_search` / `web_fetch` on the server side:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SERVER_SIDE_TOOLS_ENABLED` | `true` | Master switch for server-side tool execution (`true`/`false`). Per-request override via `X-Server-Side-Tools: false` header (Anthropic). |
+| `MCP_WEB_TOOLS_URL` | `http://mcp-server-web.llmmllab.svc.cluster.local:8000` | MCP server URL for `web_search` / `web_fetch`. Set to empty to fall back to inline SearxNG + Playwright. |
+| `SERVER_TOOL_MAX_ITERATIONS` | `4` | Hard cap on Agent ↔ ServerToolNode loops per completion; hitting the cap routes the graph to END. |
 
 ### Priority Queue
 
-| Variable | Description |
-|----------|-------------|
-| `PRIORITY_QUEUE_ENABLED` | Enable request priority queue (default: true) |
-| `PRIORITY_QUEUE_MAX_SIZE` | Max queued requests (default: 100) |
-| `PRIORITY_QUEUE_TIMEOUT_SEC` | Queue timeout in seconds (default: 300) |
-| `PRIORITY_QUEUE_AGE_THRESHOLD_SEC` | Age threshold for priority bumping (default: 60) |
-| `PRIORITY_QUEUE_MAX_WAIT_MIN_SEC` | Min wait before priority bump (default: 1) |
-| `PRIORITY_QUEUE_MAX_WAIT_MAX_SEC` | Max wait before priority bump (default: 3600) |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PRIORITY_QUEUE_ENABLED` | `true` | Enable request priority queuing (`true`/`false`) |
+| `PRIORITY_QUEUE_MAX_SIZE` | `100` | Maximum queued requests |
+| `PRIORITY_QUEUE_TIMEOUT_SEC` | `300` | Max time a request waits in queue (seconds) |
+| `PRIORITY_QUEUE_AGE_THRESHOLD_SEC` | `60` | Seconds before a queued request is considered "aging" |
+| `PRIORITY_QUEUE_RECHECK_SEC` | `2.0` | Seconds between safety-net poll checks for resource-aware scheduling |
+| `PRIORITY_QUEUE_MAX_WAIT_MIN_SEC` | `1` | Minimum wait time before aging bump (seconds) |
+| `PRIORITY_QUEUE_MAX_WAIT_MAX_SEC` | `3600` | Maximum wait time before aging bump (seconds) |
 
 ### Chat / LLM
 
-| Variable | Description |
-|----------|-------------|
-| `CHAT_OPENAI_MAX_RETRIES` | Max retries for OpenAI-compatible chat completions (default: 2) |
-| `ENABLE_TOOL_CONTINUATION` | Force tool call if model describes but doesn't invoke (default: true) |
-| `OPENAI_API_KEY` | OpenAI API key (for remote models) |
-| `ANTHROPIC_API_KEY` | Anthropic API key (for remote models) |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CHAT_OPENAI_MAX_RETRIES` | `2` | Max retries for OpenAI-compatible chat completions |
+| `AGENT_MAX_RETRY_ATTEMPTS` | `11` | Max transient-error retries per agent turn (connection errors, 5xx). Set lower to fail-fast when clients disconnect. |
+| `ENABLE_TOOL_CONTINUATION` | `true` | Allow tool-call continuation in agent loops (`true`/`false`) |
+| `OPENAI_API_KEY` | *(empty)* | OpenAI API key (for external model calls) |
+| `ANTHROPIC_API_KEY` | *(empty)* | Anthropic API key |
+| `HF_TOKEN` | *(empty)* | HuggingFace token for model downloads |
+| `SEARX_HOST` | *(empty)* | SearXNG instance URL for web search tool |
 
-### Summarization
+### Storage / Images
 
-| Variable | Description |
-|----------|-------------|
-| `MESSAGES_BEFORE_SUMMARY` | Messages before triggering summary (default: 6) |
-| `SUMMARIES_BEFORE_CONSOLIDATION` | Summaries before consolidation (default: 3) |
-| `SUMMARY_MODEL` | Model used for summarization (default: qwen3:0.6b) |
-| `SUMMARY_SYSTEM_PROMPT` | System prompt for summarization |
-| `MAX_SUMMARY_LEVELS` | Max nested summary levels (default: 3) |
-| `SUMMARY_WEIGHT_COEFFICIENT` | Weight for summary importance (default: 1) |
-
-### Images
-
-| Variable | Description |
-|----------|-------------|
-| `IMAGE_GENERATION_ENABLED` | Enable image generation (default: true) |
-| `IMAGE_DIR` | Local image storage path |
-| `MAX_IMAGE_SIZE` | Max image dimension (default: 2048) |
-| `IMAGE_RETENTION_HOURS` | Image cleanup retention (default: 24) |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `IMAGE_DIR` | `/root/images` | Directory for generated images |
+| `IMAGE_RETENTION_HOURS` | `24` | Hours to retain generated images before cleanup |
+| `CONFIG_DIR` | `/app/config` | Directory for runtime config files |
+| `HF_HOME` | `/root/.cache/huggingface` | HuggingFace cache directory |
+| `IMG_SERVER_AUTO_SHUTDOWN` | `true` | Tear down sd-server / qwen-image servers after each request rather than holding them warm. Image servers are 4–12 GB resident; set `false` for benchmarking or batched generation. |
 
 ### Vision Token Accounting
 
@@ -200,53 +229,48 @@ the runner refuses requests that have grown beyond `n_ctx`. The
 Qwen2/3-VL formula `⌈W / patch⌉ × ⌈H / patch⌉` after resizing the long
 edge down to a cap.
 
-| Variable | Description |
-|----------|-------------|
-| `IMAGE_TOKENS_DEFAULT` | Per-image fallback when dimensions can't be decoded (HTTP URLs, missing PIL, malformed base64). Default: `1500` |
-| `VISION_PATCH_PX` | Vision-tower patch size in pixels. Qwen-VL family is 28. Default: `28` |
-| `VISION_MAX_LONG_EDGE_PX` | Max long-edge the vision tower processes before patchification. Default: `1280` |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `IMAGE_TOKENS_DEFAULT` | `1500` | Per-image fallback when dimensions can't be decoded (HTTP URLs, missing PIL, malformed base64) |
+| `VISION_PATCH_PX` | `28` | Vision-tower patch size in pixels (Qwen-VL family default) |
+| `VISION_MAX_LONG_EDGE_PX` | `1280` | Max long-edge the vision tower processes before patchification |
 
 ### Raw Token Debug
 
 When enabled, writes every raw model token (no stripping/modification) plus all user messages to `<RAW_TOKEN_DEBUG_DIR>/<session_id>.tokens`. Useful for diagnosing premature stops and context overflow patterns.
 
-| Variable | Description |
-|----------|-------------|
-| `RAW_TOKEN_DEBUG` | Enable raw-token debug logging. When `true`, each workflow's full message history and unmodified streaming tokens are appended to a per-session file under `RAW_TOKEN_DEBUG_DIR`. Default: `false` |
-| `RAW_TOKEN_DEBUG_DIR` | Output directory for debug token files. Default: `/tmp/llmmllab_debug` |
-
-### Image Server Lifecycle
-
-| Variable | Description |
-|----------|-------------|
-| `IMG_SERVER_AUTO_SHUTDOWN` | Tear down sd-server / qwen-image servers after each request rather than holding them warm. Default: `true` (image servers are 4-12 GB resident; for interactive workflows the cold-start cost is worth the freed VRAM). Set to `false` for benchmarking or batched generation. |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RAW_TOKEN_DEBUG` | `false` | Enable raw-token debug logging (`true`/`false`) |
+| `RAW_TOKEN_DEBUG_DIR` | `/tmp/llmmllab_debug` | Output directory for debug token files |
 
 ### Tracing
 
-| Variable | Description |
-|----------|-------------|
-| `TEMPO_ENDPOINT` | OTLP gRPC endpoint for OpenTelemetry trace export. Default: `http://tempo.llmmllab.svc.cluster.local:4317`. Empty disables tracing. |
-
-### Database Maintenance
-
-| Variable | Description |
-|----------|-------------|
-| `DB_MAINTENANCE_INTERVAL_HOURS` | How often the maintenance loop runs (VACUUM ANALYZE + sequence align). Default: `24` |
-| `DB_MAINTENANCE_INITIAL_DELAY_SECONDS` | Delay before the first maintenance run after pod startup (avoid racing warm-up traffic). Default: `300` |
-| `DB_REINDEX_ON_MAINTENANCE` | Opt-in REINDEX during maintenance. Default: `false` — REINDEX CONCURRENTLY can still trip stale-OID plan errors under live TimescaleDB traffic; enable in low-traffic environments only. |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TEMPO_ENDPOINT` | `http://tempo.llmmllab.svc.cluster.local:4317` | OTLP gRPC endpoint for OpenTelemetry trace export. Set to empty to disable tracing. |
 
 ### General
 
-| Variable | Description |
-|----------|-------------|
-| `PORT` | Server port (default: 8000) |
-| `API_VERSION` | API version prefix (default: v1) |
-| `LOG_LEVEL` | Logging verbosity (debug, info, warning, error). Read directly by `utils/logging.py` because logging is bootstrapped before `config.py` loads. |
-| `LOG_FORMAT` | Log format (console or json). Same bootstrap-order constraint as `LOG_LEVEL`. |
-| `FORCE_COLOR` | Force ANSI colors in console log output (default: `0`). Useful when log output is piped through a logger that strips terminal detection. |
-| `HF_TOKEN` | HuggingFace token for model downloads |
-| `SEARX_HOST` | SearXNG instance URL for web search |
-| `CUDA_VISIBLE_DEVICES` | GPU devices for inference |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | *(Makefile)* | Server port, passed via Makefile to uvicorn (not read by config.py) |
+| `LOG_LEVEL` | `WARNING` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`). Read directly in `utils/logging.py` (bootstrapped before config.py). |
+| `LOG_FORMAT` | `console` | Log format (`console` human-readable, `json` structured). Same bootstrap-order constraint as `LOG_LEVEL`. |
+| `FORCE_COLOR` | `0` | Force ANSI colors in console log output even without TTY (`1` to enable). Read in `utils/logging.py`. |
+
+### Container / Runner Environment
+
+These variables are not consumed by the Python API directly but are set in the deployment environment (e.g. `k8s/env.yaml`, `.env.example`) for the container and llama.cpp runner process.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CUDA_LAUNCH_BLOCKING` | `0` | Force synchronous CUDA kernel launches (`1` to enable) |
+| `CUDA_VISIBLE_DEVICES` | *(unset)* | GPU device IDs visible to the process |
+| `CUDA_DEVICE_ORDER` | `PCI_BUS_ID` | CUDA device ordering |
+| `PYTHONMALLOC` | `malloc` | Python memory allocator |
+| `MALLOC_ARENA_MAX` | `2` | glibc malloc arena limit (reduces memory fragmentation) |
+| `GGML_LOG_LEVEL` | `2` | GGML (llama.cpp backend) log verbosity |
 
 ## Project Structure
 
@@ -273,7 +297,7 @@ The api recovers transparently from runner process restarts:
 - `RunnerClient` tracks a per-endpoint `startup_epoch` returned by `GET /v1/status`. On `acquire_server` and opportunistically on 503 responses, it re-probes status. An epoch bump purges all active handles for that endpoint and invalidates the model map.
 - 404 responses against `/v1/server/<id>/...` for a known handle, and 404-shaped errors raised during LangGraph workflow execution, are converted into `StaleServerError`.
 - Empty SSE streams from chat completions trigger `revalidate_runner_handles()` (chat streams bypass the proxy that would otherwise see the 404 directly).
-- The completion service catches `StaleServerError`, invalidates the cached workflow for `(user_id, model_name)` via `composer_init.invalidate_workflow`, refreshes the model map, and retries with a fresh handle. Retries are capped by `STALE_SERVER_RETRIES` (default 1, set 0 to disable).
+- The completion service catches `StaleServerError`, invalidates the cached workflow for `(user_id, model_name)` via `composer_init.invalidate_workflow`, refreshes the model map, and retries with a fresh handle. Retries are capped by `STALE_SERVER_RETRIES` (default 2, set 0 to disable).
 - Empty-after-all-retries now closes the stream cleanly with no content. The api no longer injects a `[Model returned empty response...]` diagnostic into the assistant response — that text was being echoed back into history by clients and eventually exhausted output token budgets.
 
 ## Docker
