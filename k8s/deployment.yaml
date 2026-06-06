@@ -117,7 +117,7 @@ spec:
             - name: LOG_FORMAT
               value: "json"
             - name: RAW_TOKEN_DEBUG
-              value: "true"
+              value: "false"
             - name: RAW_TOKEN_DEBUG_DIR
               value: "/tmp/llmmllab_debug"
             - name: API_VERSION
