@@ -671,20 +671,23 @@ invocation is the next thing you intend to do.
             normalized_messages = messages_to_lc_messages(convo)
             self.logger.debug(f"Running agent with {len(normalized_messages)} messages")
 
-            # Retry transient errors (connection errors + 5xx status errors like 503)
-            # up to 10 times with exponential backoff.
+            # Retry transient server errors (5xx status like 502/503/504) up to
+            # 10 times with exponential backoff.
             # Early retries use short delays (2s, 4s, 8s); later retries
             # use longer delays (16s, 32s, 60s, 60s, 60s, 60s) to allow
             # time for the runner/API to recover.
-            # Non-transient errors propagate immediately.
-            from openai import APIConnectionError as _APIConnectionError
+            #
+            # Connection-level errors (APIConnectionError) are NOT retried here —
+            # they propagate immediately so the outer retry layer
+            # (stream_with_connection_retry in services/retry_policies.py)
+            # can catch them, refresh the model map, and re-acquire a fresh server
+            # handle. Retrying at this level with a stale handle wastes minutes
+            # hitting the same dead runner (#267).
             from openai import APIStatusError as _APIStatusError
 
             _TRANSIENT_STATUS_CODES = frozenset({502, 503, 504})
 
             def _is_transient_error(e: Exception) -> bool:
-                if isinstance(e, _APIConnectionError):
-                    return True
                 if (
                     isinstance(e, _APIStatusError)
                     and e.status_code in _TRANSIENT_STATUS_CODES
@@ -856,16 +859,15 @@ invocation is the next thing you intend to do.
             normalized_messages = messages_to_lc_messages(convo)
             self.logger.debug(f"Running agent with {len(normalized_messages)} messages")
 
-            # Retry transient errors (connection errors + 5xx status errors like 503)
-            # up to 10 times with exponential backoff.
-            from openai import APIConnectionError as _APIConnectionError
+            # Retry transient server errors (5xx status like 502/503/504) up to
+            # 10 times with exponential backoff.
+            # Connection-level errors propagate immediately so the outer retry layer
+            # can refresh handles (#267).
             from openai import APIStatusError as _APIStatusError
 
             _TRANSIENT_STATUS_CODES = frozenset({502, 503, 504})
 
             def _is_transient_error(e: Exception) -> bool:
-                if isinstance(e, _APIConnectionError):
-                    return True
                 if (
                     isinstance(e, _APIStatusError)
                     and e.status_code in _TRANSIENT_STATUS_CODES
@@ -874,6 +876,7 @@ invocation is the next thing you intend to do.
                 return False
 
             import asyncio as _asyncio
+
 
             last_error = None
             max_attempts = config.AGENT_MAX_RETRY_ATTEMPTS
