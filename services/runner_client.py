@@ -1836,6 +1836,17 @@ class RunnerClient:
 
             raise ColdStartError(model_id)
 
+        # If the model map is populated but this model is absent, the runners
+        # know about their models and simply don't have this one — give a clear
+        # error instead of the generic "no healthy runner" message.  When the
+        # model map is empty, runners are unreachable and the original message
+        # is more helpful.
+        if self._model_map and model_id not in self._model_map:
+            raise RuntimeError(
+                f"Model '{model_id}' is not available on any runner. "
+                f"Available models: {', '.join(sorted(self._model_map.keys()))}"
+            )
+
         # Build a meaningful last_error when all endpoints were skipped
         if last_error is None and skipped_circuit_breaker:
             last_error = (

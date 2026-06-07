@@ -1,13 +1,15 @@
 """
 Unit tests for agents/base.py — retry logic for transient API errors.
 
-The retry block in BaseAgent.run() catches:
-- openai.APIConnectionError (connection drops)
+The retry block in BaseAgent.run() catches only:
 - openai.APIStatusError with status 502/503/504 (server busy/gateway errors)
 
-and retries up to 10 times (11 total attempts) with exponential backoff capped at 60 s.
+Connection-level errors (``APIConnectionError``) are NOT retried at the agent
+level — they propagate to the outer ``stream_with_connection_retry`` layer which
+refreshes the model map and acquires a fresh server handle before retrying (#267).
 
-Non-transient errors (e.g. ValueError, 400 Bad Request) propagate immediately.
+Non-transient errors (e.g. ValueError, 400 Bad Request, APIConnectionError)
+propagate immediately.
 """
 
 import pytest
@@ -56,13 +58,40 @@ class TestAgentRetrySuccessFirstAttempt:
         mock_lc_agent.ainvoke.assert_called_once()
 
 
-# ── Retry on APIConnectionError ───────────────────────────────────────────
+# ── APIConnectionError propagates (not retried at agent level) ─────────────
 
 class TestAgentRetryConnectionError:
-    """Agent encounters APIConnectionError and retries."""
+    """APIConnectionError is NOT transient at the agent level.
+
+    Connection errors propagate immediately so the outer retry layer
+    (``stream_with_connection_retry``) can refresh the model map and re-acquire
+    a fresh server handle before retrying (#267).
+    """
 
     @pytest.mark.asyncio
-    async def test_retry_on_api_connection_error(self):
+    async def test_no_retry_on_api_connection_error(self):
+        """A single connection error -> error response, no retries."""
+        agent = _make_base_agent()
+        mock_lc_agent = AsyncMock()
+        mock_lc_agent.ainvoke.side_effect = APIConnectionError(
+            message="Connection refused", request=MagicMock()
+        )
+        agent._get_or_create_agent = AsyncMock(return_value=mock_lc_agent)
+
+        with patch("asyncio.sleep", new_callable=AsyncMock) as msleep:
+            response = await agent.run("Hi there")
+
+        assert response.done is True
+        text = response.message.content[0].text
+        assert "Connection refused" in text
+        # Only one attempt — no retries at the agent level for connection errors.
+        assert mock_lc_agent.ainvoke.call_count == 1
+        # No backoff sleep was scheduled.
+        msleep.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_connection_error_propagates_after_one_attempt(self):
+        """Even if ainvoke eventually succeeds, it never gets a second chance."""
         agent = _make_base_agent()
         call_count = [0]
 
@@ -76,33 +105,13 @@ class TestAgentRetryConnectionError:
         mock_lc_agent.ainvoke = flaky_ainvoke
         agent._get_or_create_agent = AsyncMock(return_value=mock_lc_agent)
 
-        with patch("asyncio.sleep", new_callable=AsyncMock):
-            response = await agent.run("Hi there")
+        response = await agent.run("Hi there")
 
         assert response.done is True
-        assert call_count[0] == 3
-
-    @pytest.mark.asyncio
-    async def test_retry_logs_warning(self, caplog):
-        """Each retry emits a WARNING log with attempt info."""
-        agent = _make_base_agent()
-        call_count = [0]
-
-        async def flaky_ainvoke(*a, **kw):
-            call_count[0] += 1
-            if call_count[0] < 2:
-                raise APIConnectionError(message="Connection refused", request=MagicMock())
-            return MagicMock(content="OK", role="ai")
-
-        mock_lc_agent = AsyncMock()
-        mock_lc_agent.ainvoke = flaky_ainvoke
-        agent._get_or_create_agent = AsyncMock(return_value=mock_lc_agent)
-
-        with patch("asyncio.sleep", new_callable=AsyncMock):
-            await agent.run("Hi there")
-
-        warning_messages = [r.msg for r in caplog.records if r.levelname == "WARNING"]
-        assert any("retrying" in str(m).lower() for m in warning_messages)
+        text = response.message.content[0].text
+        assert "Connection refused" in text
+        # Stopped after first failure — did not retry to reach success path.
+        assert call_count[0] == 1
 
 
 # ── Retry on 503 Service Unavailable ──────────────────────────────────────
@@ -226,8 +235,8 @@ class TestAgentRetryExhaustion:
     async def test_returns_error_response_after_max_attempts(self):
         agent = _make_base_agent()
         mock_lc_agent = AsyncMock()
-        mock_lc_agent.ainvoke.side_effect = APIConnectionError(
-            message="Connection refused", request=MagicMock()
+        mock_lc_agent.ainvoke.side_effect = _make_api_status_error(
+            503, "All inference slots are busy"
         )
         agent._get_or_create_agent = AsyncMock(return_value=mock_lc_agent)
 
@@ -236,7 +245,7 @@ class TestAgentRetryExhaustion:
 
         assert response.done is True
         text = response.message.content[0].text
-        assert "Connection refused" in text
+        assert "All inference slots are busy" in text
         assert mock_lc_agent.ainvoke.call_count == 11
 
     @pytest.mark.asyncio
@@ -262,6 +271,7 @@ class TestAgentRetryBackoffSchedule:
 
     @pytest.mark.asyncio
     async def test_backoff_values(self):
+        """Backoff uses transient 5xx errors (not connection errors)."""
         agent = _make_base_agent()
         sleep_calls = []
 
@@ -269,9 +279,7 @@ class TestAgentRetryBackoffSchedule:
             sleep_calls.append(delay)
 
         mock_lc_agent = AsyncMock()
-        mock_lc_agent.ainvoke.side_effect = APIConnectionError(
-            message="fail", request=MagicMock()
-        )
+        mock_lc_agent.ainvoke.side_effect = _make_api_status_error(503, "busy")
         agent._get_or_create_agent = AsyncMock(return_value=mock_lc_agent)
 
         with patch("asyncio.sleep", side_effect=fake_sleep):
@@ -503,7 +511,7 @@ class TestAgentRetryDisconnectAbort:
 
     @pytest.mark.asyncio
     async def test_disconnect_aborts_before_retry(self):
-        """Transient error + client gone → CancelledError, no further retry."""
+        """Transient error + client gone -> CancelledError, no further retry."""
         import asyncio
 
         agent = _make_base_agent()
@@ -563,7 +571,7 @@ class TestAgentRetryDisconnectAbort:
 
     @pytest.mark.asyncio
     async def test_no_predicate_preserves_retry(self):
-        """disconnected=None (default) → original retry behaviour."""
+        """disconnected=None (default) -> original retry behaviour."""
         agent = _make_base_agent()
         call_count = [0]
 
@@ -648,9 +656,7 @@ class TestAgentMaxAttemptsConfigurable:
 
         agent = _make_base_agent()
         mock_lc_agent = AsyncMock()
-        mock_lc_agent.ainvoke.side_effect = APIConnectionError(
-            message="fail", request=MagicMock()
-        )
+        mock_lc_agent.ainvoke.side_effect = _make_api_status_error(503, "busy")
         agent._get_or_create_agent = AsyncMock(return_value=mock_lc_agent)
 
         original = config.AGENT_MAX_RETRY_ATTEMPTS
@@ -662,4 +668,5 @@ class TestAgentMaxAttemptsConfigurable:
             config.AGENT_MAX_RETRY_ATTEMPTS = original
 
         assert response.done is True
+        # Use 5xx status (not APIConnectionError) as transient driver.
         assert mock_lc_agent.ainvoke.call_count == 3
