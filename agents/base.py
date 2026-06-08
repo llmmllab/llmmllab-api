@@ -173,10 +173,9 @@ class BaseAgent:
     async def _try_revalidate(self, server_id: str) -> int:
         """Probe the runner to purge cached handles for an evicted server.
 
-        Calls ``runner_client.refresh_model_map()`` which already hits each
-        runner's ``/v1/models`` endpoint — that is sufficient to flush stale
-        epoch maps.  Returns the number of endpoints reachable (i.e. purged
-        of stale references) across all runners.
+        Uses ``runner_client.revalidate_runner_handles()`` which probes each
+        runner's startup epoch and purges handles pointing at restarted pods.
+        Returns the count of handles purged across all runners.
 
         When a runner is unreachable this method logs at DEBUG level and
         returns ``0`` — it never raises.  A return value of ``0`` means
@@ -186,10 +185,7 @@ class BaseAgent:
         from services.runner_client import runner_client
 
         try:
-            # refresh_model_map() already probes every endpoint's /v1/models,
-            # which is the mechanism that flushes stale epoch maps.
-            await runner_client.refresh_model_map()
-            return len(getattr(runner_client, "_endpoints", []))
+            return await runner_client.revalidate_runner_handles()
         except Exception as probe_err:
             self.logger.debug(
                 f"Runner client unavailable during revalidation of server {server_id}: "
