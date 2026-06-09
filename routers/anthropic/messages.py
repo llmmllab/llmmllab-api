@@ -1147,7 +1147,39 @@ async def countTokens(
 
     try:
         internal_messages = messages_from_anthropic(body.messages, system=body.system)
-        raw_count = await TokenService.count_input_tokens(internal_messages, body.tools)
+
+        # Tokenize with the REAL llama.cpp (Qwen) tokenizer + the injected IDE
+        # system prompt, mirroring what createMessage actually sends. Without the
+        # server_url, count_input_tokens silently falls back to len(text)//3,
+        # which undercounts Qwen by ~20% (it tokenizes denser than 3 chars/token)
+        # and also omits IDE_PRIMARY_SYSTEM_PROMPT — so the client thought it had
+        # headroom and then overran the model's context (166977 reported vs >200k
+        # actual). Resolve the model's running server the same way createMessage
+        # does so the count matches the real prompt_eval_count.
+        model_name = body.model
+        resolved_model = await model_service.resolve_default_model(model_name, user_id)
+        if resolved_model:
+            model_name = resolved_model
+        server_url = None
+        try:
+            _, _, server_url = await CompletionService.build_workflow(
+                user_id=user_id,
+                model_name=model_name,
+                workflow_type=WorkFlowType.IDE,
+                client_tools=body.tools,
+            )
+        except Exception as e:
+            logger.warning(
+                f"count_tokens: could not resolve server for '{model_name}', "
+                f"falling back to estimate: {e}"
+            )
+
+        raw_count = await TokenService.count_input_tokens(
+            internal_messages,
+            body.tools,
+            server_url=server_url,
+            system_prompt=IDE_PRIMARY_SYSTEM_PROMPT,
+        )
         return CountTokensResponse(input_tokens=raw_count)
 
     except Exception as e:
