@@ -167,8 +167,7 @@ class BaseAgent:
     def _is_stale_server_error(self, error: Exception) -> bool:
         """Return ``True`` when *error* looks like a 404 stale server handle."""
         body = str(error).lower()
-        return ("server" in body and "not found" in body) or \
-               (body.startswith("404") and "server" in body)
+        return ("server" in body) and ("404" in body or "not found" in body)
 
     async def _try_revalidate(self, server_id: str) -> int:
         """Probe the runner to purge cached handles for an evicted server.
