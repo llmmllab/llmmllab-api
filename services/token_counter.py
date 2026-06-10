@@ -456,6 +456,19 @@ async def _count_templated_input_tokens(
             "templated count: /tokenize returned None for the rendered prompt, falling back"
         )
         return None
+    # DIAGNOSTIC (temporary): does /apply-template render the `tools` into the
+    # prompt? text_tokens ~= rendered_chars/~4. If n_oai_tools is large but
+    # text_tokens stays near the no-tools size, /apply-template ignored the tools
+    # (the model's /v1/chat/completions path renders them) — that's the ~50k gap.
+    logger.info(
+        "templated-count detail",
+        extra={
+            "n_tools_in": len(tools or []),
+            "n_oai_tools": len(oai_tools or []),
+            "rendered_chars": len(prompt),
+            "text_tokens": text_tokens,
+        },
+    )
     return text_tokens + _sum_image_tokens(messages)
 
 
