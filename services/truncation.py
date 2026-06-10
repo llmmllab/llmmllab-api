@@ -34,20 +34,20 @@ def is_context_overflow(
 
     In these cases, retrying with the same (or larger) context is futile.
     """
-    # Prefer a model-aware check when num_ctx is available.
+    # When the real window is known, the ONLY reliable overflow signal is
+    # exceeding it. An empty/short response that still fits inside the window is
+    # a transient stop (the model occasionally emits EOS early) and IS
+    # retryable — flagging it as overflow skipped the rescue-retry and
+    # dead-ended sessions that recovered fine on the very next attempt.
     if model_num_ctx is not None:
-        total_tokens = prompt_tokens + output_tokens
-        if total_tokens >= model_num_ctx:
-            return True
-        # If we're well below the context window, no overflow.
-        if total_tokens < CONTEXT_OVERFLOW_THRESHOLD:
-            return False
-    else:
-        if prompt_tokens < CONTEXT_OVERFLOW_THRESHOLD:
-            return False
+        return (prompt_tokens + output_tokens) >= model_num_ctx
+
+    # Window unknown: fall back to the prompt-size + empty-response heuristic.
+    if prompt_tokens < CONTEXT_OVERFLOW_THRESHOLD:
+        return False
     if output_tokens > 0:
         return False
-    # Empty response with a large prompt — almost certainly context overflow.
+    # Empty response with a large prompt — likely context overflow.
     # Also catches finish_reason == 'length' with zero output.
     return True
 

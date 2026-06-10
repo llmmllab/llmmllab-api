@@ -146,17 +146,40 @@ class CompletionService:
 
     @staticmethod
     async def _get_model_num_ctx(model_name: str) -> int | None:
-        """Look up the model's context window (num_ctx) from the runner cache.
+        """Look up the model's RUNTIME context window — the ``num_ctx`` the
+        llama.cpp server was actually launched with — from the runner cache.
+        This is the real KV-cache limit and the correct number for overflow
+        detection.
 
-        Returns the ``original_ctx`` value from the model details, or ``None``
-        if the model is not found or the value is unavailable.
+        Deliberately NOT ``details.original_ctx``: the runner reports that as a
+        bare default for several models (e.g. **2048** for Qwen3.6-27B), far
+        below any real working window. Comparing a 170k-token conversation
+        against 2048 made :func:`is_context_overflow` fire on every non-trivial
+        turn, so an empty/transient response skipped its rescue-retry and the
+        session dead-ended mid-conversation. (The bug stayed hidden while prompt
+        tokens were under-reported as ~0 — ``total < threshold`` short-circuited
+        to "no overflow"; once token counts became accurate, the bogus 2048
+        window started tripping immediately.)
+
+        Returns ``None`` when no trustworthy window is available, letting
+        ``is_context_overflow`` fall back to its prompt-size heuristic.
         """
         try:
             from services import model_service  # noqa: F811
 
             model = await model_service.get_model_by_id(model_name)
-            if model and model.details and model.details.original_ctx:
-                return model.details.original_ctx
+            if not model:
+                return None
+            params = getattr(model, "parameters", None)
+            num_ctx = getattr(params, "num_ctx", None) if params else None
+            if num_ctx and num_ctx > 0:
+                return int(num_ctx)
+            # Fall back to the advertised context only when it's plausibly a
+            # real window — a 2048-style default would re-introduce the bug.
+            details = getattr(model, "details", None)
+            original = getattr(details, "original_ctx", None) if details else None
+            if original and original > 8192:
+                return int(original)
         except Exception as e:
             logger.debug(f"Failed to look up model num_ctx for {model_name}: {e}")
         return None
