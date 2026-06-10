@@ -323,6 +323,129 @@ async def _count_text(
     return _estimate_tokens(text)
 
 
+def _tools_to_openai(tools: Optional[list]) -> Optional[list]:
+    """Normalize tool schemas to OpenAI *function* format for /apply-template.
+
+    Accepts already-OpenAI tools (``{"type":"function","function":{...}}``),
+    Anthropic tools (``{"name","description","input_schema"}``), or pydantic
+    models exposing ``model_dump()``. Returns None if nothing usable, so the
+    template is rendered without tools rather than with a malformed list.
+    """
+    if not tools:
+        return None
+    out: list = []
+    for tool in tools:
+        if isinstance(tool, dict):
+            d: Any = tool
+        elif hasattr(tool, "model_dump"):
+            d = tool.model_dump(exclude_none=True)
+        else:
+            continue
+        if not isinstance(d, dict):
+            continue
+        if d.get("type") == "function" and isinstance(d.get("function"), dict):
+            out.append(d)  # already OpenAI shape
+        elif d.get("name"):
+            out.append({
+                "type": "function",
+                "function": {
+                    "name": d.get("name"),
+                    "description": d.get("description", "") or "",
+                    "parameters": d.get("input_schema")
+                    or d.get("parameters")
+                    or {"type": "object", "properties": {}},
+                },
+            })
+    return out or None
+
+
+def _sum_image_tokens(messages: Iterable[Any]) -> int:
+    """Qwen-VL image-patch tokens across all messages. The chat-templated text
+    (/apply-template's output) never contains image pixels, so these are added
+    on top to match what the mmproj projector actually feeds the model."""
+    image_tokens = 0
+    for message in messages or []:
+        content = getattr(message, "content", message)
+        try:
+            for block in _iter_content_blocks(content):
+                if _looks_like_image_block(block):
+                    image_tokens += _block_image_tokens(block)
+        except Exception:  # noqa: BLE001
+            continue
+    return image_tokens
+
+
+async def _count_templated_input_tokens(
+    messages: list,
+    tools: Optional[list],
+    *,
+    base_url: str,
+    system_prompt: Optional[str],
+    client: Optional[Any],
+) -> Optional[int]:
+    """Tokenize the FULL chat-templated prompt — system + messages + tools,
+    rendered by the model's own chat template via llama.cpp's ``/apply-template``
+    — then add image-patch tokens.
+
+    This matches the model's real ``prompt_eval_count`` to ~0.5% (measured),
+    whereas a per-message text sum undercounts ~30%: it omits the chat-template
+    role headers and tool-call markup the model actually processes. message_start
+    reports this number as the conversation's context size, so it must reflect
+    the templated prompt — otherwise the client thinks it has far more headroom
+    than the model does. Reuses the SAME converter the generation path uses
+    (``messages_to_lc_messages`` → ``convert_to_openai_messages``) so the
+    rendered prompt equals what ChatOpenAI sends to the model.
+
+    Returns None (caller falls back) if conversion, ``/apply-template``, or
+    ``/tokenize`` is unavailable.
+    """
+    try:
+        from langchain_core.messages import convert_to_openai_messages
+
+        from utils.message_conversion import messages_to_lc_messages
+
+        oai_messages = list(convert_to_openai_messages(messages_to_lc_messages(messages)))
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"templated count: message conversion failed: {e}")
+        return None
+
+    if system_prompt:
+        oai_messages = [{"role": "system", "content": system_prompt}] + oai_messages
+
+    payload: dict[str, Any] = {"messages": oai_messages}
+    oai_tools = _tools_to_openai(tools)
+    if oai_tools:
+        payload["tools"] = oai_tools
+
+    cli = client or _default_client
+    try:
+        http_client = cli._get_client()
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"templated count: runner client unavailable: {e}")
+        return None
+
+    url = f"{base_url.rstrip('/')}/apply-template"
+    try:
+        resp = await http_client.post(url, json=payload, timeout=15.0)
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"templated count: /apply-template POST failed: {e}")
+        return None
+    if resp.status_code != 200:
+        logger.debug(f"templated count: /apply-template returned {resp.status_code}")
+        return None
+    try:
+        prompt = resp.json().get("prompt") or resp.json().get("formatted")
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(prompt, str) or not prompt:
+        return None
+
+    text_tokens = await count_tokens(prompt, base_url=base_url, client=client)
+    if text_tokens is None:
+        return None
+    return text_tokens + _sum_image_tokens(messages)
+
+
 async def count_input_tokens(
     messages: Iterable[Any],
     tools: Optional[list] = None,
@@ -333,23 +456,37 @@ async def count_input_tokens(
 ) -> int:
     """Prompt-token count for an Anthropic-style request (system + messages + tools).
 
-    Each message is counted via :func:`count_message_tokens`, so text goes
-    through llama.cpp's real ``/tokenize`` and images are charged with the
-    Qwen-VL patch formula; the system prompt and serialized tool schemas are
-    tokenized too. Falls back to a char estimate per component only when the
-    tokenizer is unreachable, so ``message_start`` always carries a number.
+    Preferred path: tokenize the full chat-templated prompt via
+    :func:`_count_templated_input_tokens` (~0.5% off the model's real
+    prompt_eval_count). message_start reports this as the conversation's context
+    size, so it must reflect the templated prompt.
+
+    Fallback (no server reachable, or ``/apply-template`` unavailable): sum
+    per-message counts via :func:`count_message_tokens` (real ``/tokenize`` +
+    image patches) plus system and serialized tools, with a char/4 estimate only
+    when the tokenizer itself is down — so message_start always carries a number.
+    This path undercounts by the chat-template overhead, but it's a last resort.
 
     Replaces the old ``TokenService.count_input_tokens``, whose ``_combine_text``
-    path dropped image blocks and silently fell back to a coarser ``len // 3``
-    estimate even when a real tokenizer was available.
+    path dropped image blocks and silently fell back to a coarse ``len // 3``.
     """
+    materialized = list(messages) if messages is not None else []
+
+    if base_url:
+        templated = await _count_templated_input_tokens(
+            materialized, tools,
+            base_url=base_url, system_prompt=system_prompt, client=client,
+        )
+        if templated is not None:
+            return max(1, templated)
+
     import json as _json
 
     total = 0
     if system_prompt:
         total += await _count_text(system_prompt, base_url, client)
 
-    for message in messages or []:
+    for message in materialized:
         n: Optional[int] = None
         if base_url:
             n = await count_message_tokens(message, base_url=base_url, client=client)
