@@ -443,6 +443,10 @@ async def stream_message(
         base_url=server_url,
         system_prompt=IDE_PRIMARY_SYSTEM_PROMPT,
     )
+    # Diagnostic: the message_start (pre-generation) count we report to the
+    # client. Compared against the real prompt_eval below to surface any gap on
+    # live traffic without synthetic probes.
+    _message_start_count = input_tokens
 
     yield _sse(
         "message_start",
@@ -756,6 +760,20 @@ async def stream_message(
             "stop_reason": stop_reason,
             "finish_reason": acc.finish_reason,
             "text_block_started": text_block_started,
+        },
+    )
+    # DIAGNOSTIC: message_start count (what the client displays) vs the model's
+    # real prompt_eval (input_tokens, updated from prompt_eval_count mid-stream).
+    # A persistent gap here is the "Claude Code shows 78k, logs say 97k" bug.
+    logger.info(
+        "token-count check",
+        extra={
+            "message_start_count": _message_start_count,
+            "real_prompt_eval": input_tokens,
+            "gap": (input_tokens or 0) - (_message_start_count or 0),
+            "tool_count": len(client_tools or []),
+            "n_messages": len(messages),
+            "output_tokens": output_tokens,
         },
     )
     yield _sse(
