@@ -406,7 +406,7 @@ async def _count_templated_input_tokens(
 
         oai_messages = list(convert_to_openai_messages(messages_to_lc_messages(messages)))
     except Exception as e:  # noqa: BLE001
-        logger.debug(f"templated count: message conversion failed: {e}")
+        logger.warning(f"templated count: message conversion failed, falling back: {e}")
         return None
 
     if system_prompt:
@@ -426,22 +426,35 @@ async def _count_templated_input_tokens(
 
     url = f"{base_url.rstrip('/')}/apply-template"
     try:
-        resp = await http_client.post(url, json=payload, timeout=15.0)
+        # Generous timeout: a full conversation renders a very large prompt
+        # (100k-200k tokens). At 27B/170k+, /apply-template + the tokenize below
+        # take well over the old 15s/5s; a timeout here silently fell back to the
+        # per-message UNDERCOUNT in production (meter read 129k for a 200k prompt,
+        # which also defeated overflow detection). Must not time out.
+        resp = await http_client.post(url, json=payload, timeout=120.0)
     except Exception as e:  # noqa: BLE001
-        logger.debug(f"templated count: /apply-template POST failed: {e}")
+        logger.warning(f"templated count: /apply-template POST failed, falling back: {e}")
         return None
     if resp.status_code != 200:
-        logger.debug(f"templated count: /apply-template returned {resp.status_code}")
+        logger.warning(
+            f"templated count: /apply-template returned {resp.status_code}, falling back"
+        )
         return None
     try:
         prompt = resp.json().get("prompt") or resp.json().get("formatted")
     except Exception:  # noqa: BLE001
         return None
     if not isinstance(prompt, str) or not prompt:
+        logger.warning("templated count: /apply-template returned no prompt, falling back")
         return None
 
-    text_tokens = await count_tokens(prompt, base_url=base_url, client=client)
+    # 120s, not the 5s default: tokenizing a 200k-token rendered prompt is far
+    # over 5s and was timing out -> None -> per-message undercount.
+    text_tokens = await count_tokens(prompt, base_url=base_url, client=client, timeout=120.0)
     if text_tokens is None:
+        logger.warning(
+            "templated count: /tokenize returned None for the rendered prompt, falling back"
+        )
         return None
     return text_tokens + _sum_image_tokens(messages)
 
@@ -479,6 +492,12 @@ async def count_input_tokens(
         )
         if templated is not None:
             return max(1, templated)
+        logger.warning(
+            "count_input_tokens: templated count unavailable — using the per-message "
+            "sum, which UNDERCOUNTS by the chat-template/tool-call overhead. "
+            "message_start will under-report context size (and overflow detection "
+            "uses it); see the 'templated count:' warning above for the cause."
+        )
 
     import json as _json
 
