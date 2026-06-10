@@ -404,7 +404,13 @@ async def stream_message(
     ``server_tools_enabled`` overrides ``config.SERVER_SIDE_TOOLS_ENABLED``
     for this request (driven by the ``X-Server-Side-Tools`` header).
     """
-    # Prepare tools via shared service
+    # Prepare tools via shared service. Keep the RAW client tools for token
+    # counting: prepare_tools reduces the set (server tools become lightweight
+    # defs / get moved to server_tool_names), but the model effectively sees the
+    # FULL tool surface (server tools are bound via the ServerToolNode), so the
+    # message_start count must use the full set or it under-reports by the tool
+    # overhead — the ~50k "logs vs Claude Code" gap on a 93-tool session.
+    _raw_client_tools = client_tools
     prepared = ToolService.prepare_tools(client_tools, enabled=server_tools_enabled)
     client_tools = prepared.client_tools
     server_tool_names = prepared.server_tool_names
@@ -447,10 +453,12 @@ async def stream_message(
         server_tool_names=server_tool_names or None,
     )
 
-    # Count tokens using the real llama.cpp tokenizer (image-aware)
+    # Count tokens using the real llama.cpp tokenizer (image-aware). Use the RAW
+    # tool set (see above) so the count reflects the full tool surface the model
+    # actually receives, not the reduced prepared set.
     input_tokens = await count_input_tokens(
         messages,
-        client_tools,
+        _raw_client_tools,
         base_url=server_url,
         system_prompt=IDE_PRIMARY_SYSTEM_PROMPT,
     )
