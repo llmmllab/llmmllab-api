@@ -364,13 +364,13 @@ The current date is {current_date}."""
         if self.tools or request_tools:
             system_prompt += """
 
-IMPORTANT:
-When you are about to use a tool, emit the literal marker
-`[TOOL_INTENT:<tool_name>]` on its own line in the same assistant turn,
-immediately followed by the actual tool call. Do not emit this marker
-when you are giving a final answer or just talking — only when a tool
-invocation is the next thing you intend to do.
+IMPORTANT!:
+When you are finished, provide a brief summary of what you did and
+any recommended next steps, formatted as:
 
+*-(o.o)-*
+<date and time>
+<your summary here>
 """
 
         # Strip injected commit trailers (Co-Authored-By) from system prompt
@@ -724,9 +724,7 @@ invocation is the next thing you intend to do.
                                 "Client disconnected — aborting agent run "
                                 "retry backoff"
                             )
-                            raise _asyncio.CancelledError(
-                                "client disconnected"
-                            ) from e
+                            raise _asyncio.CancelledError("client disconnected") from e
                         # Exponential backoff capped at 60s
                         backoff = min(2 ** (attempt + 1), 60)
                         self.logger.warning(
@@ -877,7 +875,6 @@ invocation is the next thing you intend to do.
 
             import asyncio as _asyncio
 
-
             last_error = None
             max_attempts = config.AGENT_MAX_RETRY_ATTEMPTS
             result = None
@@ -902,9 +899,7 @@ invocation is the next thing you intend to do.
                                 "Client disconnected — aborting structured "
                                 "run retry backoff"
                             )
-                            raise _asyncio.CancelledError(
-                                "client disconnected"
-                            ) from e
+                            raise _asyncio.CancelledError("client disconnected") from e
                         backoff = min(2 ** (attempt + 1), 60)
                         self.logger.warning(
                             f"Transient error ({type(e).__name__}), retrying in {backoff}s "

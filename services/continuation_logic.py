@@ -361,7 +361,7 @@ async def maybe_nudge_on_missing_summary(
     server_tool_names: set[str] | None,
     model_parameters: ModelParameters | None = None,
 ) -> AsyncIterator[tuple[Union[ChatResponse, ServerToolEvent], StreamAccumulator]]:
-    """Nudge the model when its response lacks the ``## !SUMMARY!`` marker."""
+    """Nudge the model when its response lacks the ``*-(o.o)-*`` marker."""
     accumulated_text = acc.final_content or ""
     logger.info(
         "Model response missing summary marker — sending nudge",
@@ -475,11 +475,7 @@ async def maybe_retry_on_empty(
         yield event, acc
 
     # Second pass: if still empty, try a different nudge
-    if (
-        not acc.has_content
-        and not acc.has_tool_calls
-        and not acc.final_content
-    ):
+    if not acc.has_content and not acc.has_tool_calls and not acc.final_content:
         if is_tool_turn:
             # Force a summary — the model had tool results but refused to
             # produce any output across two retries.
@@ -517,11 +513,7 @@ async def maybe_retry_on_empty(
 
     # All retries exhausted — mark as incomplete turn so the router can
     # emit a diagnostic finish reason for clients like OpenClaw.
-    if (
-        not acc.has_content
-        and not acc.has_tool_calls
-        and not acc.final_content
-    ):
+    if not acc.has_content and not acc.has_tool_calls and not acc.final_content:
         logger.warning(
             "Empty response retries exhausted — marking incomplete turn",
             extra={"model": model_name, "is_tool_turn": is_tool_turn},
@@ -588,9 +580,9 @@ async def maybe_continue_on_truncation_nonstream(
             *non_text_content,
         ]
         if response.eval_count and result.chat_response:
-            response.eval_count = (
-                result.chat_response.eval_count or 0
-            ) + int(response.eval_count)
+            response.eval_count = (result.chat_response.eval_count or 0) + int(
+                response.eval_count
+            )
         set_result_response(result, response, server_tool_names)
 
 

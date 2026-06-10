@@ -53,9 +53,7 @@ def build_followup_messages(
     followup_messages.append(
         Message(
             role=MessageRole.USER,
-            content=[
-                MessageContent(type=MessageContentType.TEXT, text=prompt)
-            ],
+            content=[MessageContent(type=MessageContentType.TEXT, text=prompt)],
         )
     )
     return followup_messages
@@ -265,9 +263,7 @@ def _last_turn_is_tool_result(messages: list | None) -> bool:
     return False
 
 
-def looks_like_premature_stop(
-    final_content: str | None, messages: list | None
-) -> bool:
+def looks_like_premature_stop(final_content: str | None, messages: list | None) -> bool:
     """True when a ``finish=stop`` turn looks like the model bailed mid-task.
 
     The degenerate failure mode (observed repeatedly on Qwen3.6-27B at
@@ -290,7 +286,7 @@ def looks_like_premature_stop(
 
 
 def looks_like_missing_summary(final_content: str | None) -> bool:
-    """True when a finish=stop response lacks the ``## !SUMMARY!`` marker.
+    """True when a finish=stop response lacks the ``*-(o.o)-*`` marker.
 
     No length gate — even short responses should conclude with the marker
     when the model is in an agentic context (tools bound).  This also

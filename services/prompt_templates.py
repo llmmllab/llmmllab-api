@@ -6,7 +6,6 @@ the model truncates or skips a tool call, the nudge prompt when retries fail,
 and the heuristics for detecting mid-sentence truncation.
 """
 
-
 CONTINUATION_PROMPT = (
     "You described using a tool but did not actually call one. "
     "Call the appropriate tool now. Do not describe what you will do — invoke the tool directly."
@@ -30,13 +29,13 @@ TRUNCATION_CONTINUATION_PROMPT = (
     "If you were in the middle of text, continue the text."
 )
 
-SUMMARY_MARKER = "## !SUMMARY!"
+SUMMARY_MARKER = "*-(o.o)-*"
 
 MISSING_SUMMARY_NUDGE = (
     "Your response ended without a conclusion summary. "
     "If you are finished, provide a brief summary of what you did and "
     "any recommended next steps, formatted as:\n\n"
-    "## !SUMMARY!\n<your summary here>\n\n"
+    "\n\n*-(o.o)-*\n<date and time>\n<your summary here>\n\n"
     "If you are not finished, continue your work."
 )
 
@@ -72,10 +71,11 @@ def hallucinated_tool_feedback(
         f"{', '.join(listed)}{suffix}.  Retry with a valid tool name."
     )
 
+
 # Threshold (in tokens) above which we consider the prompt "large".
 # When a large prompt produces an empty response, retrying is futile —
 # the context is likely exceeding the model's window.
 CONTEXT_OVERFLOW_THRESHOLD = 100_000
 
-SENTENCE_TERMINATORS = frozenset('.!?)\n`]}"\'>,:')
+SENTENCE_TERMINATORS = frozenset(".!?)\n`]}\"'>,:")
 TRUNCATION_MIN_LEN = 40

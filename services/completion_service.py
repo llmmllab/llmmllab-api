@@ -68,7 +68,12 @@ from services.session_tracking import (
 from services.truncation import is_context_overflow, is_truncated
 from utils.logging import llmmllogger
 
-__all__ = ["CompletionService", "CompletionResult", "StreamAccumulator", "cancel_session"]
+__all__ = [
+    "CompletionService",
+    "CompletionResult",
+    "StreamAccumulator",
+    "cancel_session",
+]
 
 logger = llmmllogger.bind(component="completion_service")
 
@@ -320,6 +325,7 @@ class CompletionService:
             # call would return the same stale CompiledStateGraph and the
             # retry would re-raise StaleServerError forever.
             from composer_init import invalidate_workflow as _invalidate_workflow
+
             await _invalidate_workflow(user_id, model_name)
             await runner_client.refresh_model_map()
             async for event in CompletionService._build_and_run(
@@ -626,10 +632,17 @@ class CompletionService:
                 # and were missed by the original gate.
                 if _CONTINUATION_ENABLED and client_tools:
                     _classification = (
-                        "marker_yes_call_yes" if _declared_intent and acc.has_tool_calls
-                        else "marker_yes_call_no" if _declared_intent
-                        else "marker_no_call_yes" if acc.has_tool_calls
-                        else f"marker_no_call_no_finish_{acc.finish_reason or 'unknown'}"
+                        "marker_yes_call_yes"
+                        if _declared_intent and acc.has_tool_calls
+                        else (
+                            "marker_yes_call_no"
+                            if _declared_intent
+                            else (
+                                "marker_no_call_yes"
+                                if acc.has_tool_calls
+                                else f"marker_no_call_no_finish_{acc.finish_reason or 'unknown'}"
+                            )
+                        )
                     )
                     logger.info(
                         "Tool-intent classification",
@@ -686,7 +699,7 @@ class CompletionService:
                         yield event, acc
 
                 # Summary-token heuristic: when the model finishes with
-                # content but no ## !SUMMARY! marker, nudge it to
+                # content but no *-(o.o)-* marker, nudge it to
                 # provide a conclusion.  Only fires when tools are
                 # bound (agentic context) — pure Q&A without tools
                 # is unaffected.
@@ -738,7 +751,9 @@ class CompletionService:
                     # branch was gated by ``finish_reason != "stop"``,
                     # which silently skipped the retry for the most
                     # common case.
-                    model_num_ctx = await CompletionService._get_model_num_ctx(model_name)
+                    model_num_ctx = await CompletionService._get_model_num_ctx(
+                        model_name
+                    )
                     if is_context_overflow(
                         acc.input_tokens,
                         acc.finish_reason,
@@ -942,8 +957,7 @@ class CompletionService:
                 _ns_anticipated = looks_like_anticipated_tool_call(_nonstream_text)
                 _ns_premature = looks_like_premature_stop(_nonstream_text, messages)
                 _ns_finish = (
-                    result.chat_response.finish_reason
-                    if result.chat_response else None
+                    result.chat_response.finish_reason if result.chat_response else None
                 )
 
             # Same broadened gate as the streaming path — log every
@@ -951,10 +965,17 @@ class CompletionService:
             # produced content or just tool calls.
             if _CONTINUATION_ENABLED and client_tools:
                 _ns_classification = (
-                    "marker_yes_call_yes" if _nonstream_declared_intent and result.has_tool_calls
-                    else "marker_yes_call_no" if _nonstream_declared_intent
-                    else "marker_no_call_yes" if result.has_tool_calls
-                    else f"marker_no_call_no_finish_{_ns_finish or 'unknown'}"
+                    "marker_yes_call_yes"
+                    if _nonstream_declared_intent and result.has_tool_calls
+                    else (
+                        "marker_yes_call_no"
+                        if _nonstream_declared_intent
+                        else (
+                            "marker_no_call_yes"
+                            if result.has_tool_calls
+                            else f"marker_no_call_no_finish_{_ns_finish or 'unknown'}"
+                        )
+                    )
                 )
                 logger.info(
                     "Tool-intent classification (non-stream)",
@@ -1008,9 +1029,7 @@ class CompletionService:
                 # ``finish_reason != "stop"`` guard suppressed the
                 # retry on the dominant empty-turn failure mode where
                 # the model emits EOS with no content or tool calls.
-                primary_prompt_tokens = int(
-                    result.chat_response.prompt_eval_count or 0
-                )
+                primary_prompt_tokens = int(result.chat_response.prompt_eval_count or 0)
                 primary_output_tokens = int(result.chat_response.eval_count or 0)
                 primary_finish_reason = result.chat_response.finish_reason or ""
                 model_num_ctx = await CompletionService._get_model_num_ctx(model_name)
