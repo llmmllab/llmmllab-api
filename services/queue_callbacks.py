@@ -58,16 +58,24 @@ async def _can_proceed(metadata) -> bool:
     from models.request_priority_metadata import RequestSource
 
     if metadata.source in (RequestSource.SCHEDULED, RequestSource.SYSTEM):
-        parallel = await _get_parallel_for_model(metadata.model_id)
-        scheduled_cap = max(1, parallel - 1)
-        if _active_counts[metadata.model_id] >= scheduled_cap:
-            return False
+        # Gate scheduled/system work on the REAL idle-slot state, not a fixed
+        # reserve. The old `scheduled_cap = parallel - 1` reserved a slot for
+        # users UNCONDITIONALLY — so a cron request blocked (and aged in the
+        # queue) even when the server was idle and no user was waiting, wasting
+        # capacity. Users don't need that reserve: USER requests are always
+        # admitted (below) and the runner's per-session slot LRU pins each user
+        # session to a slot regardless. check_slot_availability is the correct
+        # gate — it admits when a slot is actually idle (or a runner has VRAM to
+        # start a server) and self-limits to the real slot count, so scheduled
+        # work uses idle servers instead of waiting on a phantom reserve.
+        # (_active_counts is still tracked in _on_release/_on_complete for
+        # observability but no longer gates admission.)
         try:
             return await runner_client.check_slot_availability(metadata.model_id)
         except Exception:
             return True
 
-    # USER source: always admit
+    # USER source: always admit (slot LRU + HIGH priority protect interactive turns).
     return True
 
 
