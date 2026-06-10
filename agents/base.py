@@ -363,9 +363,13 @@ The current date is {current_date}."""
         # dynamic-tool callers actually receive the instruction.
         if self.tools or request_tools:
             system_prompt += """
+When you are about to use a tool, emit the literal marker
+`[TOOL_INTENT:<tool_name>]` on its own line in the same assistant turn,
+immediately followed by the actual tool call. Do not emit this marker
+when you are giving a final answer or just talking — only when a tool
+invocation is the next thing you intend to do.
 
-IMPORTANT!:
-When you are finished, provide a brief summary of what you did and
+When you are completely finished, provide a brief summary of what you did and
 any recommended next steps, formatted as:
 
 *-(o.o)-*
