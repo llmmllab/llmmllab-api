@@ -656,11 +656,21 @@ class WorkflowExecutor:
                             reason = "tool_call"
                         model_finish_reason = reason
 
-                        # Extract token usage from LangChain response metadata
+                        # Extract token usage from LangChain response metadata.
+                        # token_usage is usually present (non-streaming) but can be
+                        # an empty-or-zero dict in streaming, where the real counts
+                        # arrive via usage_metadata (captured above). Never let a
+                        # zero here clobber a real count already captured — take a
+                        # token_usage value only when it's actually populated, so
+                        # whichever source has the real number wins regardless of order.
                         token_usage = md.get("token_usage") or {}
                         if token_usage:
-                            prompt_eval_count = int(token_usage.get("prompt_tokens", 0))
-                            eval_count = int(token_usage.get("completion_tokens", 0))
+                            _pt = int(token_usage.get("prompt_tokens", 0) or 0)
+                            _ct = int(token_usage.get("completion_tokens", 0) or 0)
+                            if _pt:
+                                prompt_eval_count = _pt
+                            if _ct:
+                                eval_count = _ct
 
                         self.logger.debug(
                             "Model generation completed",
