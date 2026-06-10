@@ -3,6 +3,7 @@ Base Agent class providing common functionality for all workflow agents.
 Provides node metadata injection, logging setup, and common error handling patterns.
 """
 
+import asyncio
 import datetime
 import logging
 import re
@@ -69,6 +70,58 @@ async def _client_gone(
         return bool(await disconnected())
     except Exception:
         return False
+
+
+async def _ainvoke_or_abort(
+    agent: Any,
+    payload: dict,
+    disconnected: Optional[Callable[[], Awaitable[bool]]],
+    logger,
+    poll: float = 1.0,
+) -> Any:
+    """Await ``agent.ainvoke(payload)`` but cancel it the moment the client
+    leaves (``disconnected()`` flips True).
+
+    Why this exists: Starlette (ASGI spec_version >= 2.4, our uvicorn) does NOT
+    cancel the SSE generator while no tokens are being yielded, so a client
+    disconnect during a silent prefill / long generation phase is never noticed
+    — the runner keeps generating to completion (an orphaned GPU turn). The
+    retry-loop ``_client_gone`` checks only cover the seams before/between
+    attempts, never the single in-flight ainvoke. Polling the (already-plumbed)
+    liveness predicate and cancelling the in-flight task makes CancelledError
+    propagate through create_agent into ChatOpenAI's httpx read, which closes
+    the api->runner connection; the runner proxy then closes the upstream so
+    llama.cpp aborts the slot.
+
+    With no predicate (every non-streaming / internal caller) this is a plain
+    ``await agent.ainvoke(payload)`` — byte-for-byte the previous behaviour, so
+    only the streaming path that actually has the bug changes.
+    """
+    if disconnected is None:
+        return await agent.ainvoke(payload)
+
+    task = asyncio.ensure_future(agent.ainvoke(payload))
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=poll)
+            if task in done:
+                return task.result()
+            if await _client_gone(disconnected):
+                logger.warning(
+                    "Client disconnected mid-generation — cancelling in-flight "
+                    "generation so the runner stops (avoids an orphaned GPU turn)"
+                )
+                task.cancel()
+                try:
+                    await task
+                except BaseException:  # noqa: BLE001 — swallow the cancelled task's unwind
+                    pass
+                raise asyncio.CancelledError("client disconnected mid-generation")
+    finally:
+        # If we're unwinding for any other reason (outer cancel, error), make
+        # sure the in-flight generation doesn't outlive us.
+        if not task.done():
+            task.cancel()
 
 
 def get_message_count(messages: MessageInput) -> int:
@@ -714,7 +767,9 @@ any recommended next steps, formatted as:
                     )
                     raise _asyncio.CancelledError("client disconnected")
                 try:
-                    result = await agent.ainvoke({"messages": normalized_messages})  # type: ignore
+                    result = await _ainvoke_or_abort(
+                        agent, {"messages": normalized_messages}, disconnected, self.logger
+                    )  # type: ignore
                     break
                 except Exception as e:
                     if not _is_transient_error(e):
@@ -891,7 +946,9 @@ any recommended next steps, formatted as:
                     )
                     raise _asyncio.CancelledError("client disconnected")
                 try:
-                    result = await agent.ainvoke({"messages": normalized_messages})  # type: ignore
+                    result = await _ainvoke_or_abort(
+                        agent, {"messages": normalized_messages}, disconnected, self.logger
+                    )  # type: ignore
                     break
                 except Exception as e:
                     if not _is_transient_error(e):
