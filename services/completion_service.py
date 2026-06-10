@@ -66,7 +66,7 @@ from services.session_tracking import (
     unregister_session_task,
 )
 from services.truncation import is_context_overflow, is_truncated
-from utils.logging import llmmllogger
+from utils.logging import llmmllogger, set_model_ctx, set_session_id_ctx
 
 __all__ = [
     "CompletionService",
@@ -856,6 +856,15 @@ class CompletionService:
         Handles continuation, empty-response retry, and nudge logic
         identically to the streaming path.
         """
+        # Bind session id + model to the log/runner context in the non-stream
+        # execution scope (the streaming path does the same in stream_message).
+        # The middleware's contextvar doesn't reliably reach here, so the
+        # executor, runner X-Session-ID, and logs/metrics would otherwise show
+        # "none" or a divergent id. Request-scoped task → no reset needed.
+        if session_id:
+            set_session_id_ctx(session_id)
+        set_model_ctx(model_name)
+
         result = CompletionResult()
 
         async with CompletionService._enqueue_and_wait(

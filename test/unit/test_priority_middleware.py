@@ -245,7 +245,10 @@ class TestDispatchBodyFallback:
         assert req.state.request_priority_metadata.model_id == "Qwen3_6_27B"
 
     @pytest.mark.asyncio
-    async def test_header_session_id_takes_precedence_over_body(self):
+    async def test_prompt_cache_key_takes_precedence_over_header(self):
+        # Canonical session id is the prompt_cache_key (pck:), now PREFERRED over
+        # any *-session-id header so logs, metrics, and the runner all key on one
+        # stable id (Claude Code sends both, with different values).
         from middleware.priority import PriorityMiddleware
 
         body = b'{"model": "Qwen3_6_27B", "prompt_cache_key": "sess-body"}'
@@ -254,6 +257,31 @@ class TestDispatchBodyFallback:
         req.headers = {
             "content-type": "application/json",
             "X-Request-Priority": "low",
+            "X-OpenClaw-Session-ID": "sess-header",
+        }
+        req.body = AsyncMock(return_value=body)
+        req.state = MagicMock(spec=["user_id"])
+        req.state.user_id = None
+
+        response = MagicMock()
+        response.headers = {}
+        call_next = AsyncMock(return_value=response)
+
+        middleware = PriorityMiddleware(app=MagicMock())
+        await middleware.dispatch(req, call_next)
+
+        assert req.state.request_priority_metadata.session_id == "pck:sess-body"
+
+    @pytest.mark.asyncio
+    async def test_header_session_id_used_when_no_prompt_cache_key(self):
+        # No prompt_cache_key in the body -> fall back to the *-session-id header.
+        from middleware.priority import PriorityMiddleware
+
+        body = b'{"model": "Qwen3_6_27B"}'
+        req = MagicMock()
+        req.url.path = "/v1/chat/completions"
+        req.headers = {
+            "content-type": "application/json",
             "X-OpenClaw-Session-ID": "sess-header",
         }
         req.body = AsyncMock(return_value=body)

@@ -167,7 +167,14 @@ class PriorityMiddleware(BaseHTTPMiddleware):
         # slot-LRU namespaces between the two identification mechanisms.
         body_fields = await _extract_body_fields(request)
         if body_fields:
-            if not metadata.session_id and body_fields.session_id:
+            if body_fields.session_id:
+                # Canonical session id = the prompt_cache_key (pck:). PREFER it
+                # over any *-session-id header so logs, metrics, and the runner
+                # all key on ONE stable id. Claude Code sends BOTH a session
+                # header and a (different) prompt_cache_key, which previously
+                # split one conversation across two ids (header in api logs,
+                # pck: at the runner). The header remains the fallback when no
+                # prompt_cache_key is present.
                 metadata.session_id = f"pck:{body_fields.session_id}"
                 logger.debug(
                     "session_id derived from prompt_cache_key body field",

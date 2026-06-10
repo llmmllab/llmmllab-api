@@ -36,6 +36,30 @@ def _add_session_id_to_logs(_, __, event_dict):
     return event_dict
 
 
+_model_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "model_id", default=None
+)
+
+
+def set_model_ctx(model_id: str | None) -> contextvars.Token[str | None]:
+    return _model_ctx.set(model_id)
+
+
+def reset_model_ctx(token: contextvars.Token[str | None]) -> None:
+    _model_ctx.reset(token)
+
+
+def _add_model_to_logs(_, __, event_dict):
+    # Stamp the request's model on every log line so dashboards can filter by
+    # model without each call site having to pass it. Don't clobber an explicit
+    # per-call model field.
+    if not event_dict.get("model") and not event_dict.get("model_id"):
+        m = _model_ctx.get()
+        if m:
+            event_dict["model"] = m
+    return event_dict
+
+
 def serialize_event_data(
     data: Any, max_depth: int = 10, current_depth: int = 0, indent: int = 2
 ) -> str:
@@ -163,6 +187,7 @@ class LlmmlLogger:
             structlog.processors.StackInfoRenderer(),
             structlog.processors.UnicodeDecoder(),
             _add_session_id_to_logs,
+            _add_model_to_logs,
         ]
 
         # Select renderer based on LOG_FORMAT

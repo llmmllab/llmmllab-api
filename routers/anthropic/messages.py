@@ -36,7 +36,7 @@ from models.tool_call import ToolCall
 from models.chat_response import ChatResponse
 from graph.state import ServerToolEvent
 from graph.errors import ColdStartError
-from utils.logging import llmmllogger
+from utils.logging import llmmllogger, set_model_ctx, set_session_id_ctx
 
 logger = llmmllogger.bind(component="anthropic_messages_router")
 router = APIRouter(prefix="/messages", tags=["Messages"])
@@ -423,6 +423,17 @@ async def stream_message(
                 "resolved": resolved_model,
             },
         )
+
+    # Bind the canonical session id + resolved model to the log/runner context
+    # HERE (the streaming execution scope), not just in the middleware: Starlette
+    # BaseHTTPMiddleware doesn't reliably propagate its contextvar into this
+    # generator's task, so without this the executor, runner X-Session-ID, and
+    # logs/metrics fall back to "none" or a divergent id. Set-without-reset is
+    # intentional — this task is request-scoped and its context is discarded
+    # when the stream ends.
+    if session_id:
+        set_session_id_ctx(session_id)
+    set_model_ctx(model_name)
 
     # Build workflow first so we have a server for accurate token counting.
     # The workflow is cached, so stream_completion's internal build will
