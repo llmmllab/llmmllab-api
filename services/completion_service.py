@@ -102,9 +102,14 @@ from middleware.api_metrics import (  # noqa: E402
 # Configuration
 # ---------------------------------------------------------------------------
 
-from config import ENABLE_TOOL_CONTINUATION, STALE_SERVER_RETRIES
+from config import (
+    ENABLE_SUMMARY_NUDGE,
+    ENABLE_TOOL_CONTINUATION,
+    STALE_SERVER_RETRIES,
+)
 
 _CONTINUATION_ENABLED = ENABLE_TOOL_CONTINUATION
+_SUMMARY_NUDGE_ENABLED = ENABLE_SUMMARY_NUDGE
 
 
 async def _resolve_model(model_name: str, user_id: str) -> str:
@@ -728,7 +733,8 @@ class CompletionService:
                 # is unaffected.
                 _missing_summary = looks_like_missing_summary(acc.final_content)
                 if (
-                    _CONTINUATION_ENABLED
+                    _SUMMARY_NUDGE_ENABLED
+                    and _CONTINUATION_ENABLED
                     and acc.finish_reason == "stop"
                     and acc.has_content
                     and not acc.has_tool_calls

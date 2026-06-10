@@ -91,6 +91,16 @@ SEARX_HOST = os.environ.get("SEARX_HOST", "")
 ENABLE_TOOL_CONTINUATION = (
     os.environ.get("ENABLE_TOOL_CONTINUATION", "true").lower() == "true"
 )
+# The "missing summary marker" nudge re-dispatches a full extra generation on
+# essentially every agentic turn whose answer lacks the literal `*-(o.o)-*`
+# marker (looks_like_missing_summary has no length gate). That marker is consumed
+# ONLY by the nudge's own gate — nothing downstream parses it — so each nudge is
+# pure re-processing overhead (a major source of the "lots of re-prefill" the
+# operator observed). Default OFF; set ENABLE_SUMMARY_NUDGE=true to restore the
+# old behaviour if an agent flow comes to depend on the end-of-turn summary.
+ENABLE_SUMMARY_NUDGE = (
+    os.environ.get("ENABLE_SUMMARY_NUDGE", "false").lower() == "true"
+)
 
 # ── Chat / LLM ─────────────────────────────────────────────────────
 CHAT_OPENAI_MAX_RETRIES = int(os.environ.get("CHAT_OPENAI_MAX_RETRIES", "2"))
