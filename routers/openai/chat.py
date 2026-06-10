@@ -68,7 +68,7 @@ from models.chat_response import ChatResponse
 from utils.logging import llmmllogger
 
 OAIFinishReason: TypeAlias = Literal[
-    "stop", "length", "tool_calls", "content_filter", "function_call"
+    "stop", "length", "tool_calls", "content_filter", "function_call", "incomplete_turn"
 ]
 
 logger = llmmllogger.bind(component="openai_chat_router")
@@ -510,6 +510,8 @@ async def stream_chat_completion(
     # Final chunk with finish_reason
     if has_tool_calls:
         finish_reason: OAIFinishReason = "tool_calls"
+    elif acc.incomplete_turn:
+        finish_reason = "incomplete_turn"
     elif acc.finish_reason == "length":
         finish_reason = "length"
     else:

@@ -305,6 +305,38 @@ def looks_like_missing_summary(final_content: str | None) -> bool:
     return SUMMARY_MARKER not in text
 
 
+def last_message_has_tool_results(messages: list[Message] | None) -> bool:
+    """Check if the last message in the conversation contains tool results.
+
+    This is used to detect incomplete tool turns — when the model received
+    tool results but produced no response (stopped with finish_reason="stop"
+    and zero content).  Re-sending the same messages is futile since the
+    model already saw the tool results and chose to stop; a continuation
+    prompt is needed instead.
+
+    Only the very last message is checked.  If an assistant message follows
+    the tool results, the model already processed them — return False.
+    """
+    if not messages:
+        return False
+    msg = messages[-1]
+    role = getattr(msg, "role", None)
+    # Explicit tool role
+    if role == MessageRole.TOOL:
+        return True
+    # Check for tool_result content blocks (Anthropic folds tool results
+    # into user turns)
+    content = getattr(msg, "content", None)
+    if isinstance(content, list):
+        for part in content:
+            ptype = getattr(part, "type", None) or (
+                part.get("type") if isinstance(part, dict) else None
+            )
+            if ptype in (MessageContentType.TOOL_RESULT, "tool_result"):
+                return True
+    return False
+
+
 def filter_response_tool_calls(
     response: ChatResponse | None,
     server_tool_names: set[str] | None,

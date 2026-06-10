@@ -741,6 +741,8 @@ async def stream_message(
     if stop_reason is None:
         if acc.has_tool_calls:
             stop_reason = "tool_use"
+        elif acc.incomplete_turn:
+            stop_reason = "incomplete_turn"
         elif acc.finish_reason == "length":
             stop_reason = "max_tokens"
         else:
@@ -1110,6 +1112,8 @@ async def createMessage(
         stop_reason = stop_reason_map.get(
             result.chat_response.finish_reason, "end_turn"
         )
+        if getattr(result, "incomplete_turn", False):
+            stop_reason = "incomplete_turn"
 
         return anthropic_response_from_chat_response(
             result.chat_response, model=body.model, stop_reason=stop_reason

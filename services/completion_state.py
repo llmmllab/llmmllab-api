@@ -22,6 +22,7 @@ class CompletionResult:
     chat_response: Optional[ChatResponse] = None
     output_tokens: int = 0
     context_overflow: bool = False
+    incomplete_turn: bool = False
 
     @property
     def has_content(self) -> bool:
@@ -62,3 +63,4 @@ class StreamAccumulator:
     output_tokens: int = 0
     input_tokens: int = 0
     context_overflow: bool = False
+    incomplete_turn: bool = False

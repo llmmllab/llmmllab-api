@@ -13,9 +13,15 @@ CONTINUATION_PROMPT = (
 )
 
 EMPTY_RESPONSE_NUDGE = (
-    "Your response didn't produce any output. Did you mean to say something "
-    "or use a tool? If so, continue. Otherwise, simply respond with 'done' "
-    "and nothing else."
+    "Your response produced no output. Continue with a substantive response. "
+    "If you were working on something, complete it. If you need to use a tool, call it now."
+)
+
+INCOMPLETE_TOOL_TURN_PROMPT = (
+    "You received tool results but did not produce a response. "
+    "Continue your work using the tool results above. "
+    "Provide a substantive answer or call the next tool. "
+    "Do not respond with just 'done'."
 )
 
 TRUNCATION_CONTINUATION_PROMPT = (

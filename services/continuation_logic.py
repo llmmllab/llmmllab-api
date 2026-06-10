@@ -32,6 +32,7 @@ from models.tool_call import ToolCall
 from services.prompt_templates import (
     CONTINUATION_PROMPT,
     EMPTY_RESPONSE_NUDGE,
+    INCOMPLETE_TOOL_TURN_PROMPT,
     MISSING_SUMMARY_NUDGE,
     TRUNCATION_CONTINUATION_PROMPT,
     hallucinated_tool_feedback,
@@ -405,14 +406,23 @@ async def maybe_retry_on_empty(
     *,
     revalidate_runner_handles: Callable[[], Awaitable[int]],
 ) -> AsyncIterator[tuple[Union[ChatResponse, ServerToolEvent], StreamAccumulator]]:
-    """Retry on empty response and follow up with a nudge if still empty.
+    """Retry on empty response with tool-result-aware continuation.
 
     Before retrying, probes runner startup epochs via
     ``revalidate_runner_handles``.  If any runner was found to have restarted,
     raises ``StaleServerError`` so the upper retry layer rebuilds the
     workflow with a fresh handle.
+
+    When the empty response follows tool results (the model stopped after
+    receiving tool output), re-sending the same messages is futile — the
+    model already saw them and chose to stop.  Instead, inject a continuation
+    prompt (``INCOMPLETE_TOOL_TURN_PROMPT``) to force the model to continue.
+
+    After all retries are exhausted with zero content, marks the accumulator
+    as ``incomplete_turn`` so the router can emit a diagnostic finish reason.
     """
     from graph.errors import StaleServerError
+    from services.response_handlers import last_message_has_tool_results
 
     purged = await revalidate_runner_handles()
     if purged > 0:
@@ -428,16 +438,32 @@ async def maybe_retry_on_empty(
             f"runner restart detected via empty response ({purged} handles purged)"
         )
 
+    is_tool_turn = last_message_has_tool_results(messages)
+
     logger.warning(
-        "Model produced empty response — retrying with same messages",
-        extra={"model": model_name},
+        "Model produced empty response — retrying",
+        extra={
+            "model": model_name,
+            "is_tool_turn": is_tool_turn,
+        },
     )
     empty_response_retries_total.inc()
+
+    # First retry: if this is an incomplete tool turn, use a continuation
+    # prompt instead of re-sending identical messages.
+    if is_tool_turn:
+        retry_messages = build_followup_messages(
+            messages,
+            INCOMPLETE_TOOL_TURN_PROMPT,
+        )
+    else:
+        retry_messages = messages
+
     async for event, acc in stream_secondary_pass(
         build_and_run,
         acc,
         user_id,
-        messages,
+        retry_messages,
         model_name,
         workflow_type,
         conversation_id,
@@ -448,19 +474,32 @@ async def maybe_retry_on_empty(
     ):
         yield event, acc
 
+    # Second pass: if still empty, try a different nudge
     if (
         not acc.has_content
         and not acc.has_tool_calls
         and not acc.final_content
     ):
-        logger.warning(
-            "Retry also produced empty response — sending nudge prompt",
-            extra={"model": model_name},
-        )
-        nudge_messages = build_followup_messages(
-            messages,
-            EMPTY_RESPONSE_NUDGE,
-        )
+        if is_tool_turn:
+            # Force a summary — the model had tool results but refused to
+            # produce any output across two retries.
+            logger.warning(
+                "Incomplete tool turn — retry also empty, sending summary nudge",
+                extra={"model": model_name},
+            )
+            nudge_messages = build_followup_messages(
+                messages,
+                MISSING_SUMMARY_NUDGE,
+            )
+        else:
+            logger.warning(
+                "Retry also produced empty response — sending nudge prompt",
+                extra={"model": model_name},
+            )
+            nudge_messages = build_followup_messages(
+                messages,
+                EMPTY_RESPONSE_NUDGE,
+            )
         async for event, acc in stream_secondary_pass(
             build_and_run,
             acc,
@@ -475,6 +514,19 @@ async def maybe_retry_on_empty(
             model_parameters,
         ):
             yield event, acc
+
+    # All retries exhausted — mark as incomplete turn so the router can
+    # emit a diagnostic finish reason for clients like OpenClaw.
+    if (
+        not acc.has_content
+        and not acc.has_tool_calls
+        and not acc.final_content
+    ):
+        logger.warning(
+            "Empty response retries exhausted — marking incomplete turn",
+            extra={"model": model_name, "is_tool_turn": is_tool_turn},
+        )
+        acc.incomplete_turn = True
 
 
 # ---------------------------------------------------------------------------
@@ -599,16 +651,35 @@ async def maybe_retry_on_empty_nonstream(
     server_tool_names: set[str] | None,
     model_parameters: ModelParameters | None = None,
 ) -> None:
-    """Retry on empty response and follow up with a nudge if still empty."""
+    """Retry on empty response with tool-result-aware continuation.
+
+    When the empty response follows tool results, use a continuation prompt
+    instead of re-sending identical messages.  After all retries, mark as
+    ``incomplete_turn`` if still empty.
+    """
+    from services.response_handlers import last_message_has_tool_results
+
+    is_tool_turn = last_message_has_tool_results(messages)
+
     logger.warning(
         "Non-streaming: model produced empty response — retrying",
-        extra={"model": model_name},
+        extra={"model": model_name, "is_tool_turn": is_tool_turn},
     )
     empty_response_retries_total.inc()
+
+    # First retry: continuation prompt for tool turns, same messages otherwise
+    if is_tool_turn:
+        retry_messages = build_followup_messages(
+            messages,
+            INCOMPLETE_TOOL_TURN_PROMPT,
+        )
+    else:
+        retry_messages = messages
+
     response = await collect_response(
         build_and_run,
         user_id,
-        messages,
+        retry_messages,
         model_name,
         workflow_type,
         conversation_id,
@@ -621,14 +692,25 @@ async def maybe_retry_on_empty_nonstream(
         set_result_response(result, response, server_tool_names)
 
     if not result.has_content and not result.has_tool_calls:
-        logger.warning(
-            "Non-streaming: retry also empty — sending nudge prompt",
-            extra={"model": model_name},
-        )
-        nudge_messages = build_followup_messages(
-            messages,
-            EMPTY_RESPONSE_NUDGE,
-        )
+        # Second pass: summary nudge for tool turns, generic nudge otherwise
+        if is_tool_turn:
+            logger.warning(
+                "Non-streaming: incomplete tool turn — retry also empty, sending summary nudge",
+                extra={"model": model_name},
+            )
+            nudge_messages = build_followup_messages(
+                messages,
+                MISSING_SUMMARY_NUDGE,
+            )
+        else:
+            logger.warning(
+                "Non-streaming: retry also empty — sending nudge prompt",
+                extra={"model": model_name},
+            )
+            nudge_messages = build_followup_messages(
+                messages,
+                EMPTY_RESPONSE_NUDGE,
+            )
         response = await collect_response(
             build_and_run,
             user_id,
@@ -643,3 +725,11 @@ async def maybe_retry_on_empty_nonstream(
         )
         if response:
             set_result_response(result, response, server_tool_names)
+
+    # All retries exhausted — mark as incomplete turn
+    if not result.has_content and not result.has_tool_calls:
+        logger.warning(
+            "Non-streaming: empty response retries exhausted — marking incomplete turn",
+            extra={"model": model_name, "is_tool_turn": is_tool_turn},
+        )
+        result.incomplete_turn = True
