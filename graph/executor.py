@@ -363,6 +363,21 @@ class WorkflowExecutor:
                 event_type = event.get("event", "")
                 chunk = data.get("chunk")
                 output = data.get("output")
+                # Capture streaming token usage as soon as any chunk/output carries
+                # it. With stream_usage=True LangChain attaches usage to the message's
+                # usage_metadata, NOT response_metadata.token_usage (which stays empty
+                # in streaming) — without this prompt_eval_count is 0 and callers fall
+                # back to a ~20%-low /tokenize estimate, so clients under-count context
+                # and overrun the model. response_metadata.token_usage (if ever present,
+                # e.g. non-streaming) still wins via the finish block below.
+                _um = getattr(output, "usage_metadata", None)
+                if _um:
+                    _in = _um.get("input_tokens") if isinstance(_um, dict) else getattr(_um, "input_tokens", None)
+                    _out = _um.get("output_tokens") if isinstance(_um, dict) else getattr(_um, "output_tokens", None)
+                    if _in:
+                        prompt_eval_count = int(_in)
+                    if _out:
+                        eval_count = int(_out)
                 event_name = event.get("name", "")
                 run_id = event.get("run_id", "")
                 new_state = state
