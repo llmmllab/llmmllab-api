@@ -983,6 +983,18 @@ async def createMessage(
         req_session_id = (
             getattr(_priority_meta, "session_id", None) if _priority_meta else None
         )
+        # Canonical session id, derived reliably from the PARSED body here (the
+        # middleware's best-effort raw-body read fails on some requests, which
+        # split one conversation across two ids — header in api logs vs pck: at
+        # the runner). Prefer prompt_cache_key (pck:); fall back to the
+        # middleware/header id. Bind it on the contextvar HERE so request-handling
+        # logs use it too; stream_message / run_completion rebind it in their
+        # execution scope so the executor + runner X-Session-ID + metrics match.
+        if body.prompt_cache_key:
+            req_session_id = f"pck:{body.prompt_cache_key}"
+        if req_session_id:
+            set_session_id_ctx(req_session_id)
+        set_model_ctx(body.model)
 
         # Resolve model: fall back to user's default_model if unavailable
         resolved_model = await model_service.resolve_default_model(body.model, user_id)

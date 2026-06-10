@@ -43,6 +43,16 @@ class CreateMessageRequest(BaseModel):
     tools: Annotated[Optional[List[Tool]], Field(default=None)] = None
     tool_choice: Annotated[Optional[ToolChoice], Field(default=None)] = None
     thinking: Annotated[Optional[ThinkingConfig], Field(default=None)] = None
+    prompt_cache_key: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="Stable per-conversation key (Claude Code / OpenClaw send it). "
+            "Captured here (not dropped by extra='ignore') so the endpoint can derive the "
+            "canonical session id deterministically, instead of relying on the middleware's "
+            "best-effort raw-body read which fails on some requests.",
+        ),
+    ] = None
     temperature: Annotated[
         Optional[float],
         Field(
