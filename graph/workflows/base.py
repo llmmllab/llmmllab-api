@@ -106,17 +106,28 @@ async def _log_prompt_fingerprint(request) -> None:  # type: ignore[no-untyped-d
     )
 
 
-def _make_runner_http_client(timeout: float = 120.0):
+def _make_runner_http_client(timeout: float | None = None):
     """Build an ``httpx.AsyncClient`` with the session-id event hook +
     the prompt-fingerprint diagnostic hook.
+
+    The read/write timeout defaults to ``RUNNER_CHAT_TIMEOUT_SEC`` (30 min) —
+    for a streaming response that's the inactivity gap allowed before the first
+    token and between chunks, which must cover cold model load + a large prefill.
+    The old hard-coded 120s was the smallest cap on the generation path and cut
+    long cron turns well under their job budget. Connect stays short (the server
+    should accept promptly); only the generation wait is long.
 
     Lazy-import so test mocks that patch ``langchain_openai`` don't have
     to also patch httpx.
     """
     import httpx  # local import — httpx is already a runtime dep
 
+    from config import RUNNER_CHAT_TIMEOUT_SEC
+
+    read_timeout = RUNNER_CHAT_TIMEOUT_SEC if timeout is None else timeout
+
     return httpx.AsyncClient(
-        timeout=httpx.Timeout(timeout),
+        timeout=httpx.Timeout(read_timeout, connect=30.0),
         event_hooks={
             "request": [
                 _inject_session_id_header,

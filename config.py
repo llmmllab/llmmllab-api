@@ -187,6 +187,16 @@ RUNNER_FAST_TIMEOUT_SEC = float(
 RUNNER_ACQUIRE_TIMEOUT_SEC = float(
     os.environ.get("RUNNER_ACQUIRE_TIMEOUT_SEC", "150.0")
 )
+# Read timeout for the ChatOpenAI client that every agent turn uses to stream
+# from the runner. For streaming this is the INACTIVITY gap allowed before the
+# first token and between chunks — so it must cover cold model load + a large
+# prefill (a 27B model on a 170k-token context can take minutes before the
+# first token). The old hard-coded 120s here was the smallest cap on the whole
+# generation path and silently cut long cron turns well under their job budget.
+# Must stay <= the runner's PROXY_TIMEOUT or the runner cuts the stream first.
+RUNNER_CHAT_TIMEOUT_SEC = float(
+    os.environ.get("RUNNER_CHAT_TIMEOUT_SEC", "1800.0")
+)
 
 # Circuit-breaker thresholds for the runner pool.  After
 # ``RUNNER_MAX_ACQUIRE_FAILURES`` consecutive failures the endpoint
