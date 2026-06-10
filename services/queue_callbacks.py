@@ -20,24 +20,6 @@ from utils.logging import llmmllogger
 logger = llmmllogger.bind(component="queue_callbacks")
 
 _active_counts: dict[str, int] = defaultdict(int)
-_parallel_cache: dict[str, int] = {}
-
-
-async def _get_parallel_for_model(model_id: str) -> int:
-    """Get the parallel slot count for a model, cached."""
-    if model_id in _parallel_cache:
-        return _parallel_cache[model_id]
-    try:
-        models = await runner_client.list_models()
-        for m in models:
-            if m.model == model_id or m.name == model_id:
-                parallel = (m.parameters.parallel if m.parameters else None) or 4
-                _parallel_cache[model_id] = parallel
-                return parallel
-    except Exception:
-        pass
-    _parallel_cache[model_id] = 4
-    return 4
 
 
 async def _can_proceed(metadata) -> bool:

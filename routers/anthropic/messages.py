@@ -14,10 +14,10 @@ from models.request_priority_metadata import Priority, RequestSource
 from services import (
     CompletionService,
     StreamAccumulator,
-    TokenService,
     ToolService,
     model_service,
 )
+from services.token_counter import count_input_tokens
 from graph.workflows.factory import WorkFlowType
 from graph.workflows.ide.builder import IDE_PRIMARY_SYSTEM_PROMPT
 from models.anthropic.create_message_request import CreateMessageRequest
@@ -436,11 +436,11 @@ async def stream_message(
         server_tool_names=server_tool_names or None,
     )
 
-    # Count tokens using the real llama.cpp tokenizer
-    input_tokens = await TokenService.count_input_tokens(
+    # Count tokens using the real llama.cpp tokenizer (image-aware)
+    input_tokens = await count_input_tokens(
         messages,
         client_tools,
-        server_url=server_url,
+        base_url=server_url,
         system_prompt=IDE_PRIMARY_SYSTEM_PROMPT,
     )
 
@@ -1153,13 +1153,13 @@ async def countTokens(
         internal_messages = messages_from_anthropic(body.messages, system=body.system)
 
         # Tokenize with the REAL llama.cpp (Qwen) tokenizer + the injected IDE
-        # system prompt, mirroring what createMessage actually sends. Without the
-        # server_url, count_input_tokens silently falls back to len(text)//3,
-        # which undercounts Qwen by ~20% (it tokenizes denser than 3 chars/token)
-        # and also omits IDE_PRIMARY_SYSTEM_PROMPT — so the client thought it had
-        # headroom and then overran the model's context (166977 reported vs >200k
-        # actual). Resolve the model's running server the same way createMessage
-        # does so the count matches the real prompt_eval_count.
+        # system prompt, mirroring what createMessage actually sends. Without a
+        # base_url, count_input_tokens falls back to a coarse char estimate; with
+        # it, text goes through /tokenize and images are charged per Qwen-VL
+        # patches. Omitting IDE_PRIMARY_SYSTEM_PROMPT or the server made the client
+        # think it had headroom and then overrun the model's context (166977
+        # reported vs >200k actual). Resolve the model's running server the same
+        # way createMessage does so the count matches the real prompt_eval_count.
         model_name = body.model
         resolved_model = await model_service.resolve_default_model(model_name, user_id)
         if resolved_model:
@@ -1178,10 +1178,10 @@ async def countTokens(
                 f"falling back to estimate: {e}"
             )
 
-        raw_count = await TokenService.count_input_tokens(
+        raw_count = await count_input_tokens(
             internal_messages,
             body.tools,
-            server_url=server_url,
+            base_url=server_url,
             system_prompt=IDE_PRIMARY_SYSTEM_PROMPT,
         )
         return CountTokensResponse(input_tokens=raw_count)

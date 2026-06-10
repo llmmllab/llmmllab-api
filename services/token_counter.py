@@ -299,3 +299,81 @@ async def count_message_tokens(
         return None
 
     return text_tokens + image_tokens
+
+
+def _estimate_tokens(text: str) -> int:
+    """Last-resort char-based estimate, used ONLY when the real tokenizer is
+    unreachable. ~4 chars/token tracks mixed English/JSON far better than the
+    legacy ``len // 3`` (which over-counted dense payloads ~2x and tripped
+    false context-overflows — the very bug this module exists to kill)."""
+    if not text:
+        return 0
+    return max(1, len(text) // 4)
+
+
+async def _count_text(
+    text: str, base_url: Optional[str], client: Optional[Any] = None
+) -> int:
+    """Real ``/tokenize`` count for *text*, falling back to the char estimate
+    only when no server is reachable. Always returns a usable number."""
+    if text and base_url:
+        n = await count_tokens(text, base_url=base_url, client=client)
+        if n is not None:
+            return n
+    return _estimate_tokens(text)
+
+
+async def count_input_tokens(
+    messages: Iterable[Any],
+    tools: Optional[list] = None,
+    *,
+    base_url: Optional[str] = None,
+    system_prompt: Optional[str] = None,
+    client: Optional[Any] = None,
+) -> int:
+    """Prompt-token count for an Anthropic-style request (system + messages + tools).
+
+    Each message is counted via :func:`count_message_tokens`, so text goes
+    through llama.cpp's real ``/tokenize`` and images are charged with the
+    Qwen-VL patch formula; the system prompt and serialized tool schemas are
+    tokenized too. Falls back to a char estimate per component only when the
+    tokenizer is unreachable, so ``message_start`` always carries a number.
+
+    Replaces the old ``TokenService.count_input_tokens``, whose ``_combine_text``
+    path dropped image blocks and silently fell back to a coarser ``len // 3``
+    estimate even when a real tokenizer was available.
+    """
+    import json as _json
+
+    total = 0
+    if system_prompt:
+        total += await _count_text(system_prompt, base_url, client)
+
+    for message in messages or []:
+        n: Optional[int] = None
+        if base_url:
+            n = await count_message_tokens(message, base_url=base_url, client=client)
+        if n is None:
+            content = getattr(message, "content", message)
+            try:
+                text = extract_text_from_message(message)
+            except Exception:  # noqa: BLE001
+                text = _coerce_to_text(content)
+            n = _estimate_tokens(text)
+        total += n
+
+    if tools:
+        for tool in tools:
+            if isinstance(tool, dict):
+                td: Any = tool
+            elif hasattr(tool, "model_dump"):
+                td = tool.model_dump(exclude_none=True)
+            else:
+                td = tool
+            try:
+                serialized = _json.dumps(td, default=str)
+            except (TypeError, ValueError):
+                serialized = str(td)
+            total += await _count_text(serialized, base_url, client)
+
+    return max(1, total)

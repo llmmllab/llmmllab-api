@@ -596,7 +596,7 @@ class TestRouterDisconnectCancelsSession:
             "build_workflow",
             AsyncMock(return_value=(MagicMock(), MagicMock(), "http://r:8000")),
         ), patch.object(
-            messages_mod.TokenService,
+            messages_mod,
             "count_input_tokens",
             AsyncMock(return_value=10),
         ), patch.object(
