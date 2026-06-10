@@ -189,6 +189,50 @@ class RunnerClient:
         sid = _session_id_ctx.get()
         return {"X-Session-ID": sid} if sid else {}
 
+    async def base_url_for_model(self, model_id: str) -> Optional[str]:
+        """base_url of a WARM server already running *model_id*, or None.
+
+        Token counting (``/apply-template`` + ``/tokenize``) is STATELESS — it
+        never touches a slot's KV — so it can reach any warm server of the model
+        without acquiring one. This matters on workflow-cache hits: build_workflow
+        doesn't re-acquire, so ``builder.server_handle`` is None and the token
+        counter would get no base_url and silently fall back to a char/4 estimate
+        that UNDER-reports context by the chat-template + tool-definition overhead
+        (~30%). The per-request acquire/release refcount clears ``_active_handles``
+        between turns, but the llama-server stays warm on the runner, so we read
+        the runner's ``/v1/servers``. Prefer the model's pinned endpoint. Returns
+        None (caller keeps its fallback) if no warm server is found.
+        """
+        if not model_id:
+            return None
+        endpoints: list[str] = []
+        pinned = self._last_endpoint_for_model.get(model_id)
+        if pinned:
+            endpoints.append(pinned)
+        for ep in (self._model_map.get(model_id) or self._endpoints):
+            if ep not in endpoints:
+                endpoints.append(ep)
+        for ep in endpoints:
+            try:
+                resp = await self._get_client().get(
+                    f"{ep}/v1/servers",
+                    headers=self._session_headers(),
+                    timeout=2.0,
+                )
+                servers = resp.json().get("servers", [])
+            except Exception:  # noqa: BLE001
+                continue
+            for s in servers:
+                if (
+                    s.get("model_id") == model_id
+                    and s.get("healthy")
+                    and not s.get("starting")
+                    and s.get("server_id")
+                ):
+                    # Same base_url shape acquire_server builds (line ~1763).
+                    return f"{ep}/v1/server/{s['server_id']}"
+        return None
+
     # ------------------------------------------------------------------
     # Retry-After aware request proxying
     # ------------------------------------------------------------------

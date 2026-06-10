@@ -34,6 +34,19 @@ from utils.message_conversion import extract_text_from_message
 logger = llmmllogger.bind(component="token_counter")
 
 
+def _session_headers_for(cli: Any) -> dict:
+    """X-Session-ID header for token-counter calls, read from the runner client's
+    own contextvar helper. Without it the /tokenize + /apply-template traffic logs
+    as session_id=none on the runner — the bulk of the 'missing session id' lines,
+    since one count can fan out to many tokenize calls. Best-effort: returns {} if
+    the client doesn't expose _session_headers (e.g. a test double)."""
+    fn = getattr(cli, "_session_headers", None)
+    try:
+        return fn() if callable(fn) else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def _estimate_image_tokens(width: int, height: int) -> int:
     """Qwen-VL-style patch count given image dimensions.
 
@@ -227,6 +240,7 @@ async def count_tokens(
         response = await http_client.post(
             url,
             json={"content": text},
+            headers=_session_headers_for(cli),
             timeout=timeout,
         )
     except Exception as e:  # noqa: BLE001
@@ -431,7 +445,9 @@ async def _count_templated_input_tokens(
         # take well over the old 15s/5s; a timeout here silently fell back to the
         # per-message UNDERCOUNT in production (meter read 129k for a 200k prompt,
         # which also defeated overflow detection). Must not time out.
-        resp = await http_client.post(url, json=payload, timeout=120.0)
+        resp = await http_client.post(
+            url, json=payload, headers=_session_headers_for(cli), timeout=120.0
+        )
     except Exception as e:  # noqa: BLE001
         logger.warning(f"templated count: /apply-template POST failed, falling back: {e}")
         return None

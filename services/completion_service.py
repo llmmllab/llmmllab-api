@@ -213,6 +213,15 @@ class CompletionService:
         server_url = None
         if builder.server_handle:
             server_url = builder.server_handle.base_url
+        else:
+            # Workflow-cache hit: compose_workflow returned the cached graph
+            # without re-running the builder, so server_handle is None. Resolve a
+            # warm server's base_url for the model so token counting uses the
+            # accurate /apply-template path instead of silently under-reporting
+            # via the char/4 fallback on EVERY cached turn (the ~30% undercount —
+            # first turn counted right, every later turn read low).
+            from services.runner_client import runner_client
+            server_url = await runner_client.base_url_for_model(model_name)
         return workflow, builder, server_url
 
     @staticmethod
