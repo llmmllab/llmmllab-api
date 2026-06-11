@@ -809,6 +809,20 @@ class WorkflowExecutor:
                 # Already propagating, just let it through.
                 raise
 
+            # Context-window overflow (llama.cpp exceed_context_size_error):
+            # re-raise instead of swallowing into the "Sorry…" error event, so
+            # CompletionService._build_and_run can summarize older history and
+            # retry. Overflow is a PREFILL rejection — no tokens have been
+            # emitted yet — so propagating it can't truncate a partial answer.
+            from services.overflow_recovery import is_overflow_error
+
+            if is_overflow_error(e):
+                self.logger.warning(
+                    "Workflow hit context overflow — propagating for summarize+retry",
+                    extra={"error": str(e)[:200]},
+                )
+                raise
+
             looks_like_404 = (
                 getattr(e, "status_code", None) == 404
                 or getattr(getattr(e, "response", None), "status_code", None) == 404
