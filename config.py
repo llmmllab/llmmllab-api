@@ -91,15 +91,18 @@ SEARX_HOST = os.environ.get("SEARX_HOST", "")
 ENABLE_TOOL_CONTINUATION = (
     os.environ.get("ENABLE_TOOL_CONTINUATION", "true").lower() == "true"
 )
-# The "missing summary marker" nudge re-dispatches a full extra generation on
-# essentially every agentic turn whose answer lacks the literal `*-(o.o)-*`
-# marker (looks_like_missing_summary has no length gate). That marker is consumed
-# ONLY by the nudge's own gate — nothing downstream parses it — so each nudge is
-# pure re-processing overhead (a major source of the "lots of re-prefill" the
-# operator observed). Default OFF; set ENABLE_SUMMARY_NUDGE=true to restore the
-# old behaviour if an agent flow comes to depend on the end-of-turn summary.
+# Whenever the model sends finish_reason=stop in an agentic context, the api
+# verifies the response ends with the `*-(o.o)-*` summary marker. The marker is
+# the model's own signal that it deliberately concluded the turn; its absence
+# means the stop is suspect (the model may have bailed mid-task), so the api
+# nudges it to either summarize-and-conclude or keep working. This is a
+# correctness gate against premature endings, NOT the source of the "re-prefill
+# every turn" the operator saw earlier — that was a prefix cache-miss
+# (server_url=None on cache hit), fixed separately. The nudge's secondary pass
+# reuses the cached prefix, so its cost is a short generation, not a full
+# re-prefill. Default ON; set ENABLE_SUMMARY_NUDGE=false to disable.
 ENABLE_SUMMARY_NUDGE = (
-    os.environ.get("ENABLE_SUMMARY_NUDGE", "false").lower() == "true"
+    os.environ.get("ENABLE_SUMMARY_NUDGE", "true").lower() == "true"
 )
 
 # ── Reactive context-overflow recovery ────────────────────────────────
