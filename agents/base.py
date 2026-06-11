@@ -842,6 +842,16 @@ any recommended next steps, formatted as:
             # a fresh server and retry.
             self._maybe_raise_stale_server(e)
 
+            # Re-raise context-window overflow (exceed_context_size_error) so
+            # the executor + CompletionService._build_and_run can summarize
+            # older history and retry. Swallowing it into an error ChatResponse
+            # here (as below) is what defeated the whole overflow-recovery
+            # chain — the exception never reached the recovery handler.
+            from services.overflow_recovery import is_overflow_error
+
+            if is_overflow_error(e):
+                raise
+
             return ChatResponse(
                 done=True,
                 message=Message(
