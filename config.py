@@ -102,6 +102,21 @@ ENABLE_SUMMARY_NUDGE = (
     os.environ.get("ENABLE_SUMMARY_NUDGE", "false").lower() == "true"
 )
 
+# ── Reactive context-overflow recovery ────────────────────────────────
+# When llama.cpp rejects a prompt as larger than its KV window
+# (exceed_context_size_error — usually a slight token-count undercount), the api
+# summarizes the OLDER portion of the conversation via SummarizationMiddleware
+# (on the same model) and retries, instead of failing the request. See
+# services/overflow_recovery.py + CompletionService._build_and_run.
+#   OVERFLOW_SUMMARY_RETRIES:     how many summarize-and-retry attempts (0 = off).
+#   OVERFLOW_SUMMARY_KEEP_PERCENT: percent of RECENT context to keep; the rest
+#       (the older/"back" part) is consolidated into the summary. Keep this high
+#       enough that the summarized half still fits the window (default 50).
+OVERFLOW_SUMMARY_RETRIES = int(os.environ.get("OVERFLOW_SUMMARY_RETRIES", "1"))
+OVERFLOW_SUMMARY_KEEP_PERCENT = int(
+    os.environ.get("OVERFLOW_SUMMARY_KEEP_PERCENT", "50")
+)
+
 # ── Chat / LLM ─────────────────────────────────────────────────────
 CHAT_OPENAI_MAX_RETRIES = int(os.environ.get("CHAT_OPENAI_MAX_RETRIES", "2"))
 

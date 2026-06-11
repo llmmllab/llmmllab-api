@@ -266,6 +266,7 @@ class CompletionService:
         server_tool_names: set[str] | None = None,
         model_parameters: ModelParameters | None = None,
         _retry_count: int = 0,
+        _overflow_retry: int = 0,
         disconnected: Optional[Callable[[], Awaitable[bool]]] = None,
     ) -> AsyncIterator[Union[ChatResponse, ServerToolEvent]]:
         """Build a composer workflow and yield its events.
@@ -275,15 +276,31 @@ class CompletionService:
         and the workflow is retried with a fresh server. The number of retries
         is controlled by :data:`config.STALE_SERVER_RETRIES` (default: 1).
 
-        Non-stale errors propagate immediately without retry.
+        When llama.cpp rejects the prompt as larger than its context window
+        (``exceed_context_size_error`` — a slight token-count undercount), the
+        OLDER portion of the conversation is summarized (SummarizationMiddleware,
+        same model) and the run retried with ``[summary, *recent]`` — bounded by
+        :data:`config.OVERFLOW_SUMMARY_RETRIES`. Only when nothing has been
+        emitted yet (a clean prefill rejection), so we never duplicate a
+        partially-streamed turn.
+
+        Other (non-stale, non-overflow) errors propagate immediately.
         """
+        from config import OVERFLOW_SUMMARY_KEEP_PERCENT, OVERFLOW_SUMMARY_RETRIES
         from graph.errors import StaleServerError
+        from services.overflow_recovery import (
+            is_overflow_error,
+            summarize_older_history,
+        )
         from services.runner_client import runner_client
 
         max_retries = STALE_SERVER_RETRIES
         model_name = await _resolve_model(model_name, user_id)
         builder = None
         stale_err: StaleServerError | None = None
+        overflow_err: Exception | None = None
+        _server_url: str | None = None
+        yielded_any = False
 
         try:
             workflow, builder, _server_url = await CompletionService.build_workflow(
@@ -301,6 +318,7 @@ class CompletionService:
             async for event in CompletionService._run_workflow(
                 initial_state, workflow, workflow_type, disconnected=disconnected
             ):
+                yielded_any = True
                 yield event
         except asyncio.CancelledError:
             logger.info(
@@ -320,6 +338,21 @@ class CompletionService:
             # guarantees release fires on the stale path too, without
             # double-releasing.
             stale_err = e
+        except Exception as e:  # noqa: BLE001
+            # Reactive context-overflow recovery: llama.cpp rejected the prompt
+            # as larger than its KV window. Only recover when NOTHING has been
+            # emitted yet (a clean prefill rejection) and we have retry budget —
+            # otherwise we'd duplicate a partially-streamed turn or loop forever.
+            # Defer the summarize+retry until after the finally releases the
+            # handle (the warm server stays up for the summary call + re-acquire).
+            if (
+                is_overflow_error(e)
+                and not yielded_any
+                and _overflow_retry < OVERFLOW_SUMMARY_RETRIES
+            ):
+                overflow_err = e
+            else:
+                raise
         finally:
             # Always release the handle: success, error, or cancel.  The
             # underlying llama.cpp process is not killed — release is a
@@ -376,6 +409,46 @@ class CompletionService:
                 server_tool_names,
                 model_parameters,
                 _retry_count=_retry_count + 1,
+                _overflow_retry=_overflow_retry,
+                disconnected=disconnected,
+            ):
+                yield event
+
+        if overflow_err is not None:
+            model_num_ctx = await CompletionService._get_model_num_ctx(model_name)
+            new_messages = await summarize_older_history(
+                messages,
+                server_url=_server_url or "",
+                model_name=model_name,
+                conversation_id=conversation_id,
+                model_num_ctx=model_num_ctx,
+                keep_percent=OVERFLOW_SUMMARY_KEEP_PERCENT,
+            )
+            if new_messages is None:
+                # Couldn't summarize (no warm server / too few messages) — the
+                # original overflow is the honest outcome.
+                raise overflow_err
+            logger.warning(
+                "Context overflow — summarized older history, retrying",
+                extra={
+                    "model": model_name,
+                    "attempt": _overflow_retry + 1,
+                    "messages_before": len(messages),
+                    "messages_after": len(new_messages),
+                },
+            )
+            async for event in CompletionService._build_and_run(
+                user_id,
+                new_messages,
+                model_name,
+                workflow_type,
+                conversation_id,
+                client_tools,
+                tool_choice,
+                server_tool_names,
+                model_parameters,
+                _retry_count=_retry_count,
+                _overflow_retry=_overflow_retry + 1,
                 disconnected=disconnected,
             ):
                 yield event
