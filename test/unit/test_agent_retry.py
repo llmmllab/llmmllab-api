@@ -670,3 +670,37 @@ class TestAgentMaxAttemptsConfigurable:
         assert response.done is True
         # Use 5xx status (not APIConnectionError) as transient driver.
         assert mock_lc_agent.ainvoke.call_count == 3
+
+
+# ── Stale server detection ────────────────────────────────────────────────
+
+class TestStaleServerDetection:
+    """Verify _is_stale_server_error catches the patterns we expect."""
+
+    def test_detects_server_not_found(self):
+        agent = _make_base_agent()
+        assert agent._is_stale_server_error(Exception("Server abc123 not found")) is True
+
+    def test_detects_404_server(self):
+        agent = _make_base_agent()
+        assert agent._is_stale_server_error(Exception("404 Server abc123 gone")) is True
+
+    def test_detects_404_server_not_found(self):
+        agent = _make_base_agent()
+        assert agent._is_stale_server_error(Exception("404 Server abc123 not found")) is True
+
+    def test_detects_case_insensitive(self):
+        agent = _make_base_agent()
+        assert agent._is_stale_server_error(Exception("SERVER ABC123 NOT FOUND")) is True
+
+    def test_ignores_unrelated_404(self):
+        agent = _make_base_agent()
+        assert agent._is_stale_server_error(Exception("404 page not found")) is False
+
+    def test_ignores_unrelated_server_error(self):
+        agent = _make_base_agent()
+        assert agent._is_stale_server_error(Exception("Server error 500")) is False
+
+    def test_ignores_generic_not_found(self):
+        agent = _make_base_agent()
+        assert agent._is_stale_server_error(Exception("File not found")) is False
