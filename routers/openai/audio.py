@@ -13,7 +13,7 @@ from models.openai.audio_response_format import AudioResponseFormat
 from services.audio_service import AudioService, AudioServiceError
 from services.runner_client import runner_client
 
-router = APIRouter(prefix="/v1/audio", tags=["Audio"])
+router = APIRouter(prefix="/audio", tags=["Audio"])
 
 
 def get_audio_service() -> AudioService:
