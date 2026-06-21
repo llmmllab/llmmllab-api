@@ -1,7 +1,7 @@
 """Auto-generated router imports"""
 
 from .assistants import router as assistants_router
-# from .audio import router as audio_router  # requires whisper (GPU dep, belongs in runner)
+from .audio import router as audio_router  # proxied to runner-side whisper-server
 from .batches import router as batches_router
 from .chat import router as chat_router
 from .chatkit import router as chatkit_router
@@ -34,7 +34,7 @@ from .vector_stores import router as vector_stores_router
 
 ROUTERS = [
     assistants_router,
-    # audio_router,  # requires whisper (GPU dep)
+    audio_router,  # proxied to runner-side whisper-server
     batches_router,
     chat_router,
     chatkit_router,

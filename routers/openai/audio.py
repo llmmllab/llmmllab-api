@@ -1,137 +1,153 @@
-import os
-import tempfile
-from fastapi import APIRouter, File, UploadFile, HTTPException
+"""Audio transcription / translation — proxied to runner-side whisper-server.
+
+Replaces the local ``import whisper`` (GPU dependency, belongs in the
+runner) with the :class:`AudioService` which acquires a whisper-server
+subprocess on an available runner and proxies the request through.
+"""
+
+from fastapi import APIRouter, File, UploadFile, HTTPException, Form, Depends
 from fastapi.responses import JSONResponse
 from typing import Optional
-import whisper
 
 from models.openai.audio_response_format import AudioResponseFormat
+from services.audio_service import AudioService, AudioServiceError
+from services.runner_client import runner_client
 
 router = APIRouter(prefix="/v1/audio", tags=["Audio"])
 
-# Global Whisper model cache
-_whisper_model = None
-_whisper_model_name = None
+
+def get_audio_service() -> AudioService:
+    """Dependency: inject AudioService wired to the shared RunnerClient."""
+    return AudioService(runner_client)
 
 
-def get_whisper_model(model_name: str = "base"):
-    """Lazy load Whisper model with caching."""
-    global _whisper_model, _whisper_model_name
-    if _whisper_model is None or model_name != _whisper_model_name:
-        _whisper_model = whisper.load_model(model_name)
-        _whisper_model_name = model_name
-    return _whisper_model
+# -- helpers -----------------------------------------------------------
 
+_ALLOWED_EXTENSIONS = frozenset(
+    ["wav", "mp3", "flac", "m4a", "ogg", "webm", "mp4", "mpeg", "mpga"]
+)
+
+
+def _validate_file(filename: Optional[str]):
+    """Raise 400 if the file extension is not supported."""
+    if not filename:
+        raise HTTPException(
+            status_code=400, detail="Missing filename"
+        )
+    ext = filename.rsplit(".", 1)[-1].lower()
+    if ext not in _ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file format: {ext}. Allowed: {sorted(_ALLOWED_EXTENSIONS)}",
+        )
+
+
+def _format_response(
+    result,
+    response_format: Optional[AudioResponseFormat] = None,
+):
+    """Convert TranscriptionResult → OpenAI-compatible response."""
+    fmt = response_format or AudioResponseFormat.JSON
+
+    if fmt == AudioResponseFormat.TEXT:
+        return JSONResponse(content=result.text)
+
+    if fmt == AudioResponseFormat.VERBOSE_JSON:
+        return JSONResponse(
+            content={
+                "text": result.text,
+                "language": result.language,
+                "duration": result.duration,
+                "segments": result.segments,
+            }
+        )
+
+    # Default: json
+    return JSONResponse(content={"text": result.text})
+
+
+# -- endpoints ---------------------------------------------------------
 
 @router.post("/transcriptions")
 async def create_transcription(
     file: UploadFile = File(..., description="Audio file to transcribe"),
-    model: Optional[str] = None,
-    language: Optional[str] = None,
-    prompt: Optional[str] = None,
-    response_format: Optional[AudioResponseFormat] = None,
-    temperature: float = 0,
+    model: Optional[str] = Form(None),
+    language: Optional[str] = Form(None),
+    prompt: Optional[str] = Form(None),
+    response_format: Optional[AudioResponseFormat] = Form(None),
+    temperature: float = Form(0),
+    audio_service: AudioService = Depends(get_audio_service),
 ):
-    """
-    Transcribe audio to text using Whisper.
+    """Transcribe audio to text via runner-side whisper-server.
 
     Accepts audio files in wav, mp3, flac, m4a, ogg, webm, mp4, mpeg, mpga formats.
     Returns transcription in specified format (default: json).
     """
     try:
-        # Validate file type
-        allowed_extensions = ['wav', 'mp3', 'flac', 'm4a', 'ogg', 'webm', 'mp4', 'mpeg', 'mpga']
-        file_ext = file.filename.split('.')[-1].lower() if file.filename else ''
-        if file_ext not in allowed_extensions:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported file format: {file_ext}. Allowed: {allowed_extensions}"
-            )
+        _validate_file(file.filename)
 
-        # Read audio file to temp location
         contents = await file.read()
-        with tempfile.NamedTemporaryFile(suffix=f'.{file_ext}', delete=False) as tmp:
-            tmp.write(contents)
-            tmp_path = tmp.name
 
-        try:
-            # Load Whisper model and transcribe
-            whisper_model = get_whisper_model(model or "base")
-            result = whisper_model.transcribe(
-                tmp_path,
-                language=language,
-                temperature=temperature
-            )
+        result = await audio_service.transcribe(
+            file_content=contents,
+            filename=file.filename or "audio.wav",
+            model_id=model or "whisper-small-en",
+            language=language,
+            temperature=temperature,
+            translate=False,
+        )
 
-            # Build response
-            response_data = {
-                "text": result["text"],
-                "language": result["language"],
-                "duration": result.get("duration", 0)
-            }
-
-            # Add segments if verbose format requested
-            if response_format == AudioResponseFormat.VERBOSE_JSON:
-                response_data["segments"] = result.get("segments", [])
-
-            return response_data
-
-        finally:
-            # Clean up temp file
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
+        return _format_response(result, response_format)
 
     except HTTPException:
         raise
+    except AudioServiceError as e:
+        raise HTTPException(
+            status_code=e.status_code or 502,
+            detail=f"Transcription service error: {e}",
+        )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Transcription failed: {e}"
+        )
 
 
 @router.post("/translations")
 async def create_translation(
     file: UploadFile = File(..., description="Audio file to translate to English"),
-    model: Optional[str] = None,
-    response_format: Optional[AudioResponseFormat] = None,
-    temperature: float = 0,
+    model: Optional[str] = Form(None),
+    response_format: Optional[AudioResponseFormat] = Form(None),
+    temperature: float = Form(0),
+    audio_service: AudioService = Depends(get_audio_service),
 ):
-    """
-    Translate audio to English using Whisper.
+    """Translate audio to English via runner-side whisper-server.
 
     Accepts audio files in any supported format, returns English transcription.
     """
     try:
-        # Validate file type
-        allowed_extensions = ['wav', 'mp3', 'flac', 'm4a', 'ogg', 'webm', 'mp4', 'mpeg', 'mpga']
-        file_ext = file.filename.split('.')[-1].lower() if file.filename else ''
-        if file_ext not in allowed_extensions:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported file format: {file_ext}. Allowed: {allowed_extensions}"
-            )
+        _validate_file(file.filename)
 
-        # Read audio file to temp location
         contents = await file.read()
-        with tempfile.NamedTemporaryFile(suffix=f'.{file_ext}', delete=False) as tmp:
-            tmp.write(contents)
-            tmp_path = tmp.name
 
-        try:
-            # Load Whisper model and transcribe (transcription translates to English)
-            whisper_model = get_whisper_model(model or "base")
-            result = whisper_model.transcribe(tmp_path)
+        result = await audio_service.transcribe(
+            file_content=contents,
+            filename=file.filename or "audio.wav",
+            model_id=model or "whisper-small-en",
+            language=None,
+            temperature=temperature,
+            translate=True,
+        )
 
-            return {
-                "text": result["text"],
-                "language": result["language"],
-                "duration": result.get("duration", 0)
-            }
-
-        finally:
-            # Clean up temp file
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
+        return _format_response(result, response_format)
 
     except HTTPException:
         raise
+    except AudioServiceError as e:
+        raise HTTPException(
+            status_code=e.status_code or 502,
+            detail=f"Translation service error: {e}",
+        )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Translation failed: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Translation failed: {e}"
+        )

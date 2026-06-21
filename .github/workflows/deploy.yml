@@ -2,7 +2,7 @@ name: Deploy API
 
 on:
   push:
-    branches: [ main ]
+    branches: [main, feat/*]
 
 jobs:
   deploy:
