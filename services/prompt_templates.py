@@ -32,11 +32,16 @@ TRUNCATION_CONTINUATION_PROMPT = (
 SUMMARY_MARKER = "*-(o.o)-*"
 
 MISSING_SUMMARY_NUDGE = (
-    "Your response ended without a conclusion summary. "
-    "If you are finished, provide a brief summary of what you did and "
-    "any recommended next steps, formatted as:\n\n"
-    "\n\n*-(o.o)-*\n<date and time>\n<your summary here>\n\n"
-    "If you are not finished, continue your work."
+    "You ended your turn without the `*-(o.o)-*` completion marker. Per the "
+    "Task Completion Protocol, that means the task is NOT finished.\n\n"
+    "If work remains — a file to read or edit, a command to run, a result to "
+    "verify, or anything you said you would do — continue NOW: call the next "
+    "tool or take the next step. Do not stop again until the task is genuinely "
+    "complete.\n\n"
+    "Only if the task truly is fully complete, confirm it by ending with the "
+    "marker block:\n\n"
+    "*-(o.o)-*\n<date and time>\n<brief summary of what you did and any "
+    "recommended next steps>"
 )
 
 

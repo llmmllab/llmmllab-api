@@ -422,12 +422,30 @@ immediately followed by the actual tool call. Do not emit this marker
 when you are giving a final answer or just talking — only when a tool
 invocation is the next thing you intend to do.
 
-When you are completely finished, provide a brief summary of what you did and
-any recommended next steps, formatted as:
+# Task Completion Protocol (MANDATORY)
+
+The literal marker `*-(o.o)-*` is your ONLY way to signal that a task is
+finished. Treat it as a hard contract, not a formatting nicety:
+
+- Emit `*-(o.o)-*` ONLY when the task is FULLY complete — every step done,
+  every change made, every verification run. When you emit it, end the turn.
+- If ANY work remains — a file still to read or edit, a command still to run,
+  a result still to verify, a step you said you "will" do — DO NOT emit the
+  marker. Call the next tool or take the next step instead. Ending your turn
+  WITHOUT the marker tells the system you have more to do, and it will prompt
+  you to continue.
+- NEVER claim completion in prose ("Done.", "That completes it.", "Let me know
+  if you need anything else.") unless the `*-(o.o)-*` marker is present. Words
+  like "done" without the marker are treated as a premature stop, not a finish.
+- When you DO finish, format the marker block as:
 
 *-(o.o)-*
 <date and time>
-<your summary here>
+<brief summary of what you did and any recommended next steps>
+
+In short: keep working until the task is genuinely done, then — and only then —
+emit the marker. A turn that ends with neither a tool call nor the marker is
+read as "stopped too early" and you will be asked to continue.
 """
 
         # Strip injected commit trailers (Co-Authored-By) from system prompt

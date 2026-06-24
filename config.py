@@ -91,16 +91,21 @@ SEARX_HOST = os.environ.get("SEARX_HOST", "")
 ENABLE_TOOL_CONTINUATION = (
     os.environ.get("ENABLE_TOOL_CONTINUATION", "true").lower() == "true"
 )
-# Whenever the model sends finish_reason=stop in an agentic context, the api
-# verifies the response ends with the `*-(o.o)-*` summary marker. The marker is
-# the model's own signal that it deliberately concluded the turn; its absence
-# means the stop is suspect (the model may have bailed mid-task), so the api
-# nudges it to either summarize-and-conclude or keep working. This is a
-# correctness gate against premature endings, NOT the source of the "re-prefill
-# every turn" the operator saw earlier — that was a prefix cache-miss
-# (server_url=None on cache hit), fixed separately. The nudge's secondary pass
-# reuses the cached prefix, so its cost is a short generation, not a full
-# re-prefill. Default ON; set ENABLE_SUMMARY_NUDGE=false to disable.
+# The `*-(o.o)-*` marker is a COMPLETION CONTRACT: the agentic system prompt
+# (agents/base.py::_separate_system_prompt) instructs the model to emit it ONLY
+# when the task is fully finished, and to keep working (call the next tool) when
+# it is not. When the model finishes finish=stop with content but no marker, the
+# api treats the stop as premature and nudges the model to continue — this is the
+# guard against the model declaring "done" mid-task and ending the session early.
+#
+# This only behaves well because the model is explicitly taught the contract in
+# the system prompt; without that, the marker is absent on every turn and the
+# nudge becomes per-turn overhead (the "flailing" seen previously). Keep the
+# prompt-side instruction (agents/base.py) and this flag in sync: if you weaken
+# or remove the completion-contract instruction, set this OFF. The nudge's
+# secondary pass reuses the cached prefix, so a genuinely-done turn that merely
+# forgot the marker costs one short generation, not a full re-prefill.
+# Default ON; set ENABLE_SUMMARY_NUDGE=false to disable.
 ENABLE_SUMMARY_NUDGE = (
     os.environ.get("ENABLE_SUMMARY_NUDGE", "true").lower() == "true"
 )
