@@ -1,17 +1,18 @@
-"""Audio transcription / translation — proxied to runner-side whisper-server.
+"""Audio transcription / translation / speech synthesis.
 
-Replaces the local ``import whisper`` (GPU dependency, belongs in the
-runner) with the :class:`AudioService` which acquires a whisper-server
-subprocess on an available runner and proxies the request through.
+Transcription & translation are proxied to runner-side whisper-server.
+Speech synthesis (TTS) calls the Piper TTS service directly.
 """
 
 from fastapi import APIRouter, File, UploadFile, HTTPException, Form, Depends
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from typing import Optional
 
 from models.openai.audio_response_format import AudioResponseFormat
+from models.openai.create_speech_request import CreateSpeechRequest
 from services.audio_service import AudioService, AudioServiceError
 from services.runner_client import runner_client
+from services.tts_service import synthesize, TTSError
 
 router = APIRouter(prefix="/audio", tags=["Audio"])
 
@@ -150,4 +151,34 @@ async def create_translation(
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Translation failed: {e}"
+        )
+
+
+@router.post("/speech")
+async def create_speech(
+    request: CreateSpeechRequest,
+):
+    """Synthesize speech from text via Piper TTS.
+
+    OpenAI-compatible endpoint. Accepts text input, returns audio.
+    Piper outputs WAV format regardless of response_format request.
+    """
+    try:
+        audio_bytes = await synthesize(
+            text=request.input,
+            response_format=request.response_format or "wav",
+            speed=request.speed or 1.0,
+        )
+        return Response(
+            content=audio_bytes,
+            media_type="audio/wav",
+        )
+    except TTSError as e:
+        raise HTTPException(
+            status_code=e.status_code or 502,
+            detail=f"TTS service error: {e}",
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Speech synthesis failed: {e}"
         )

@@ -135,6 +135,12 @@ RUNNER_ENDPOINTS = os.environ.get("RUNNER_ENDPOINTS", "http://localhost:9000").s
 
 MODEL_CACHE_REFRESH_SEC = int(os.environ.get("MODEL_CACHE_REFRESH_SEC", "60"))
 
+# ── TTS (Piper) ─────────────────────────────────────────────────────
+PIPER_TTS_URL = os.environ.get(
+    "PIPER_TTS_URL",
+    "http://piper-tts.llmmllab.svc.cluster.local:5000",
+)
+
 # ── Server-side tool execution ─────────────────────────────────────────
 # Master switch for the server-side execution of "web_search" / "web_fetch"
 # style tools.  When false, the API leaves all tools to the client even if
