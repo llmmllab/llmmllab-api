@@ -2,6 +2,10 @@
 
 Calls the Piper TTS service directly (not through the runner pool).
 Piper is a standalone K8s deployment at PIPER_TTS_URL.
+
+Piper's HTTP server expects a JSON body:
+  {"text": "...", "voice": "optional", "language": "optional"}
+Returns raw WAV audio bytes.
 """
 
 from __future__ import annotations
@@ -39,7 +43,7 @@ async def synthesize(
     if not text.strip():
         raise TTSError("Text input is empty", status_code=400)
 
-    # Piper HTTP server accepts raw text body on POST /
+    # Piper HTTP server expects JSON body: {"text": "..."}
     url = PIPER_TTS_URL.rstrip("/") + "/"
     logger.debug(f"Synthesizing TTS via Piper at {url}")
 
@@ -47,8 +51,7 @@ async def synthesize(
         async with httpx.AsyncClient(timeout=30.0) as http:
             resp = await http.post(
                 url,
-                content=text.encode("utf-8"),
-                headers={"Content-Type": "text/plain; charset=utf-8"},
+                json={"text": text},
             )
 
         if resp.status_code != 200:
