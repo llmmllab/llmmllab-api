@@ -404,6 +404,37 @@ represented in history by the absence of a tool-result message;
 the marker text adds noise the model can pattern-match against."""
 
 
+def _merge_human_content(
+    prev: Union[str, List[Any]], cur: Union[str, List[Any]]
+) -> Union[str, List[Any]]:
+    """Combine the content of two consecutive HumanMessages without corruption.
+
+    Human content comes in two shapes (see
+    ``convert_message_content_to_langchain_format``): a plain ``str`` for
+    text-only turns, or a ``list`` of content blocks for multimodal turns
+    (``{"type": "text", ...}`` / ``{"type": "image", "base64": ...}`` / audio).
+
+    When both turns are plain strings we join with a blank line — the
+    long-standing behaviour. When either side is a structured block list we
+    normalise both to block lists and concatenate, so text/image/audio blocks
+    survive intact. The previous ``str(content)`` flattened a block list to its
+    Python repr, corrupting the text and silently dropping images.
+    """
+    # Fast path: both plain text — preserve the original blank-line join.
+    if isinstance(prev, str) and isinstance(cur, str):
+        return f"{prev}\n\n{cur}"
+
+    def _to_blocks(c: Union[str, List[Any]]) -> List[Any]:
+        if isinstance(c, str):
+            return [{"type": "text", "text": c}] if c else []
+        if isinstance(c, list):
+            return c
+        # Unknown shape — wrap defensively rather than drop content.
+        return [{"type": "text", "text": str(c)}]
+
+    return _to_blocks(prev) + _to_blocks(cur)
+
+
 def messages_to_lc_messages(
     messages: List[Message], use_llama_format: bool = False
 ) -> List[AnyMessage]:
@@ -460,22 +491,20 @@ def messages_to_lc_messages(
                 continue
 
         # Merge consecutive same-type messages (can happen after dropping
-        # empty AI messages: user → [empty AI dropped] → user).
+        # empty AI messages: user → [empty AI dropped] → user). The merge is
+        # load-bearing — strict chat templates (Qwen/llama.cpp) reject two
+        # consecutive user turns — so we keep it, but combine the CONTENT
+        # structurally via _merge_human_content. A plain str() over list
+        # content (text+image blocks) would serialize the blocks to a Python
+        # repr, corrupting the turn and silently dropping images.
         if (
             converted
             and type(lc_msg) is type(converted[-1])
             and isinstance(lc_msg, HumanMessage)
         ):
-            prev = converted[-1]
-            prev_text = (
-                prev.content if isinstance(prev.content, str) else str(prev.content)
+            converted[-1] = HumanMessage(
+                content=_merge_human_content(converted[-1].content, lc_msg.content)
             )
-            cur_text = (
-                lc_msg.content
-                if isinstance(lc_msg.content, str)
-                else str(lc_msg.content)
-            )
-            converted[-1] = HumanMessage(content=f"{prev_text}\n\n{cur_text}")
             logger.debug("Merged consecutive HumanMessages after empty AI removal")
             continue
 

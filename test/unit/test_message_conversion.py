@@ -528,3 +528,73 @@ class TestRedactOldToolImages:
         result = messages_to_lc_messages(msgs)
         ai = [m for m in result if isinstance(m, AIMessage)][0]
         assert big_b64 in ai.content
+
+
+class TestConsecutiveHumanMerge:
+    """When an empty AI message is dropped between two user turns, the two
+    HumanMessages are merged (strict chat templates reject consecutive user
+    turns). The merge must preserve structured/multimodal content rather than
+    flattening it to a Python repr.
+    """
+
+    def _empty_ai(self) -> Message:
+        return Message(role=MessageRole.ASSISTANT, content=[])
+
+    def _text_user(self, text: str) -> Message:
+        return Message(
+            role=MessageRole.USER,
+            content=[MessageContent(type=MessageContentType.TEXT, text=text, url=None)],
+        )
+
+    def _multimodal_user(self, text: str, b64: str) -> Message:
+        return Message(
+            role=MessageRole.USER,
+            content=[
+                MessageContent(type=MessageContentType.TEXT, text=text, url=None),
+                MessageContent(
+                    type=MessageContentType.IMAGE,
+                    text=None,
+                    url=f"data:image/png;base64,{b64}",
+                ),
+            ],
+        )
+
+    def test_text_only_merge_preserves_blank_line_join(self):
+        """Two plain-text user turns merge into one string with a blank line."""
+        msgs = [self._text_user("first"), self._empty_ai(), self._text_user("second")]
+
+        result = messages_to_lc_messages(msgs)
+        humans = [m for m in result if isinstance(m, HumanMessage)]
+        assert len(humans) == 1  # merged
+        assert humans[0].content == "first\n\nsecond"
+
+    def test_multimodal_merge_keeps_image_block(self):
+        """A merged multimodal turn keeps its image block intact — the old
+        str(content) path corrupted it into a Python repr and dropped the image.
+        """
+        b64 = "iVBORw0KGgoAAAANSUhEUg=="
+        msgs = [
+            self._multimodal_user("look at this", b64),
+            self._empty_ai(),
+            self._text_user("what is it?"),
+        ]
+
+        result = messages_to_lc_messages(msgs)
+        humans = [m for m in result if isinstance(m, HumanMessage)]
+        assert len(humans) == 1  # merged
+        content = humans[0].content
+        # Structured content survives as a block list, not a stringified repr.
+        assert isinstance(content, list)
+        image_blocks = [
+            b for b in content if isinstance(b, dict) and b.get("type") == "image"
+        ]
+        assert len(image_blocks) == 1
+        assert image_blocks[0].get("base64") == b64
+        # Both users' text is present and not flattened into a repr string.
+        texts = " ".join(
+            b.get("text", "")
+            for b in content
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
+        assert "look at this" in texts
+        assert "what is it?" in texts
