@@ -193,6 +193,78 @@ class BaseAgent:
             node_type=self.__class__.__name__,
         )
 
+    # ------------------------------------------------------------------
+    # Stale server handle detection & revalidation
+    # ------------------------------------------------------------------
+
+    _STALE_SERVER_RE = re.compile(r"\bserver\s+([a-f0-9]+)", re.IGNORECASE)
+
+    async def _maybe_raise_stale_server(self, error: Exception) -> None:
+        """Inspect *error* for a stale-handle 404 and raise ``StaleServerError``.
+
+        When the llama.cpp server was evicted from the runner, in-flight
+        requests get HTTP 404 "Server <id> not found" errors.  This method
+        detects that pattern, eagerly probes the runner to purge any cached
+        handles pointing at dead servers, then raises
+        :class:`graph.errors.StaleServerError` so upstream retry logic can
+        re-acquire a fresh handle.
+
+        If no stale-server signature is detected this method returns silently.
+
+        Args:
+            error: The caught exception during agent invocation.
+        """
+        if self._is_stale_server_error(error):
+            await self._revalidate_and_raise_stale(error)
+
+    def _is_stale_server_error(self, error: Exception) -> bool:
+        """Return ``True`` when *error* looks like a 404 stale server handle."""
+        body = str(error).lower()
+        return ("server" in body) and ("404" in body or "not found" in body)
+
+    async def _try_revalidate(self, server_id: str) -> int:
+        """Probe the runner to purge cached handles for an evicted server.
+
+        Uses ``runner_client.revalidate_runner_handles()`` which probes each
+        runner's startup epoch and purges handles pointing at restarted pods.
+        Returns the count of handles purged across all runners.
+
+        When a runner is unreachable this method logs at DEBUG level and
+        returns ``0`` — it never raises.  A return value of ``0`` means
+        either no stale handle was found or all runners were unreachable;
+        callers should still raise :class:`graph.errors.StaleServerError`.
+        """
+        from services.runner_client import runner_client
+
+        try:
+            return await runner_client.revalidate_runner_handles()
+        except Exception as probe_err:
+            self.logger.debug(
+                f"Runner client unavailable during revalidation of server {server_id}: "
+                f"{probe_err}",
+            )
+            return 0
+
+    async def _revalidate_and_raise_stale(self, original_error: Exception) -> None:  # type: ignore[return]
+        """Eagerly revalidate with the runner then raise ``StaleServerError``.
+
+        This method always raises after performing eager handle purging via :meth:`_try_revalidate`.
+        The WARNING log includes both the evicted server's id and the count of handles purged so
+        operators can correlate eviction events across runners.
+        """
+        match = self._STALE_SERVER_RE.search(str(original_error))
+        server_id = match.group(1) if match else "unknown"
+
+        purged = await self._try_revalidate(server_id)
+
+        self.logger.warning(
+            f"Purged {purged} stale handle(s); raising StaleServerError for evicted "
+            f"server {server_id}",
+        )
+
+        from graph.errors import StaleServerError
+        raise StaleServerError(server_id, original_error) from original_error
+
     def bind_node_metadata(self, metadata: NodeMetadata) -> Self:
         """
         Bind new node metadata to the agent for workflow tracking.
@@ -340,35 +412,6 @@ class BaseAgent:
             **context: Additional context for logging
         """
         self._log_operation_error(operation, error, **context)
-
-    @staticmethod
-    def _maybe_raise_stale_server(error: Exception) -> None:
-        """Convert a stale-handle 404 into a ``StaleServerError`` (raises).
-
-        A 404 "Server <id> not found" from a runner means the llama.cpp
-        server backing our current ``ServerHandle`` was evicted (TTL reap,
-        VRAM eviction, or — most commonly in production — the whole runner
-        pod was OOMKilled and restarted, dropping every in-memory handle).
-        LangChain's ``ChatOpenAI`` surfaces this as an ``openai.NotFoundError``
-        whose text contains "404" + "Server ... not found"; it is NOT a
-        connection error and NOT in the transient 5xx set, so without this
-        translation it propagates verbatim and the turn fails ("Chat Agent
-        failed").  Re-raising as ``StaleServerError`` lets the
-        CompletionService release the dead handle, refresh the model map, and
-        transparently re-acquire a fresh server.
-
-        Does nothing (returns) when *error* is not a stale-handle 404, so the
-        caller's own error handling proceeds unchanged.
-        """
-        error_body = str(error).lower()
-        if (
-            "404" in error_body or "not found" in error_body
-        ) and "server" in error_body:
-            m = re.search(r"server\s+([a-f0-9]+)", str(error), re.IGNORECASE)
-            server_id = m.group(1) if m else "unknown"
-            from graph.errors import StaleServerError
-
-            raise StaleServerError(server_id, error) from error
 
     _SYSTEM_PROMPT_STRIP_RE = re.compile(r"^[^*\n]*Co-Authored-By:.*$\n?", re.MULTILINE)
 
@@ -854,11 +897,10 @@ read as "stopped too early" and you will be asked to continue.
             if isinstance(e, (APITimeoutError, TimeoutError)):
                 raise
 
-            # Detect stale server handles: 404 "Server X not found" means
-            # the llama.cpp server was evicted from the runner.  Re-raise
-            # as StaleServerError so the CompletionService can re-acquire
-            # a fresh server and retry.
-            self._maybe_raise_stale_server(e)
+            # Detect stale server handles: 404 "Server X not found" means the
+            # llama.cpp server was evicted from the runner. Re-raise as
+            # StaleServerError so CompletionService can re-acquire a fresh handle.
+            await self._maybe_raise_stale_server(e)
 
             # Re-raise context-window overflow (exceed_context_size_error) so
             # the executor + CompletionService._build_and_run can summarize
@@ -1029,13 +1071,7 @@ read as "stopped too early" and you will be asked to continue.
                 e,
                 message_count=get_message_count(message_input),
             )
-            # Detect stale server handles the same way run() does: a 404
-            # "Server X not found" means the runner evicted (or was
-            # OOMKilled and restarted, dropping) the server our handle
-            # points at.  Without this the structured/grammar path wrapped
-            # every such 404 in a bare RuntimeError, so the stale handle was
-            # unrecoverable and the turn surfaced as "Chat Agent failed".
-            # Re-raise as StaleServerError so the CompletionService can
-            # re-acquire a fresh server and retry transparently.
-            self._maybe_raise_stale_server(e)
+            # Detect stale server handles before wrapping, so the runner's epoch
+            # map is purged and a fresh handle available for retry.
+            await self._maybe_raise_stale_server(e)
             raise RuntimeError(f"Structured agent execution failed: {e}") from e
