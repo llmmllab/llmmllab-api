@@ -201,13 +201,14 @@ def test_edit_image_targets_sdapi_img2img_with_ref_images():
     assert kwargs["path"] == "sdapi/v1/img2img"
     payload = kwargs["json"]
     assert payload["prompt"] == "make it autumn"
-    # Source image goes in BOTH fields: ``init_images`` for legacy
-    # img2img models (noise+denoise path) and ``extra_images`` so it
-    # populates sd-server's ``ref_images`` and triggers the
-    # QwenImageEditPlusPipeline on Qwen-Image-Edit-2511.
-    assert payload["init_images"] == ["aGVsbG8="]
+    # Qwen-Image-Edit uses ref-image conditioning (extra_images) only.
+    # init_images is no longer sent — sending both fields caused the
+    # init_latent to anchor the output to the input image, drowning
+    # out the edit.  denoising_strength is accepted for API compat but
+    # not forwarded to sd-server (no-op without init_image).
+    assert "init_images" not in payload
     assert payload["extra_images"] == ["aGVsbG8="]
-    assert payload["denoising_strength"] == 0.8
+    assert "denoising_strength" not in payload
 
 
 def test_edit_image_forwards_extra_reference_images():
@@ -226,10 +227,10 @@ def test_edit_image_forwards_extra_reference_images():
 
     _, kwargs = client.proxy_request.call_args
     payload = kwargs["json"]
-    # Primary stays in init_images; primary + extras flow through
-    # extra_images so QwenImageEditPlusPipeline sees them all as
-    # ref_images.
-    assert payload["init_images"] == ["cHJpbWFyeQ=="]
+    # Primary + extras flow through extra_images so
+    # QwenImageEditPlusPipeline sees them all as ref_images.
+    # init_images is no longer sent (see test above).
+    assert "init_images" not in payload
     assert payload["extra_images"] == [
         "cHJpbWFyeQ==", "c3R5bGU=", "c3ViamVjdA==",
     ]

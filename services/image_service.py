@@ -335,12 +335,14 @@ async def edit_image(
     Same resolution chain as :func:`generate_image`: explicit kwargs win,
     otherwise model-level defaults from the runner's ``.models.yaml``
     ``parameters`` block, otherwise the Qwen-Image-Edit-2511 tuned
-    fallbacks (40 steps, cfg 2.5, sampler ``euler``, 1024×1024,
-    denoising_strength 0.75).
+    fallbacks (40 steps, cfg 2.5, sampler ``euler``, 1024×1024).
 
-    ``denoising_strength`` controls how much the model deviates from
-    the input image: 0.0 reproduces the input, 1.0 ignores it.  0.65–0.8
-    is the useful range for prompt-guided edits.
+    Qwen-Image-Edit uses ref-image conditioning (``extra_images`` in the
+    sd-server API) rather than the legacy img2img noise-and-denoise path.
+    The ``denoising_strength`` parameter is accepted for backward
+    compatibility with the API router but is no longer forwarded to
+    sd-server — edit magnitude is controlled by ``cfg_scale`` and the
+    ref-image conditioning alone.
     """
     cli = client or _default_client
 
@@ -350,59 +352,34 @@ async def edit_image(
     resolved_sampler = sampler_name if sampler_name is not None else defaults.get("sampler_name", "euler")
     resolved_width = width if width is not None else defaults.get("width", 1024)
     resolved_height = height if height is not None else defaults.get("height", 1024)
-    resolved_denoise = denoising_strength if denoising_strength is not None else defaults.get("denoising_strength", 0.75)
+    # denoising_strength is accepted for API compat but no longer sent to
+    # sd-server — see payload comment below for why.
+    _ = denoising_strength  # suppress unused warning
 
     async with _queued(user_id, model_id):
         handle = await cli.acquire_server(model_id=model_id)
         try:
             payload: Dict[str, Any] = {
                 "prompt": prompt,
-                # sd-server's /sdapi/v1/img2img reads TWO different image
-                # fields off the body, and they wire to DIFFERENT internal
-                # attributes:
+                # Qwen-Image-Edit uses the ref-image conditioning path
+                # (``extra_images`` → ``gen_params.ref_images``) rather
+                # than the legacy img2img noise-and-denoise path
+                # (``init_images`` → ``gen_params.init_image``).
                 #
-                #   init_images:  legacy img2img noise-and-denoise path
-                #                 (populates ``gen_params.init_image``)
-                #   extra_images: QwenImageEditPlusPipeline ref-image
-                #                 conditioning (populates
-                #                 ``gen_params.ref_images``)
+                # Sending the image in BOTH fields breaks editing:
+                # when ``init_image`` is set sd-server encodes the
+                # input to latent space and applies ``denoising_strength``
+                # noise before starting the diffusion loop.  The
+                # ref-image conditioning then fights against this
+                # noised latent, producing either the unchanged input
+                # (low strength) or a random image (high strength).
                 #
-                # The Qwen-Image-Edit pipeline only fires when
-                # ``ref_images`` is non-empty (see
-                # ``src/conditioner.hpp`` —
-                # ``if (llm->enable_vision &&
-                # conditioner_params.ref_images != nullptr &&
-                # !conditioner_params.ref_images->empty())``); missing
-                # this is exactly why "remove the background" was
-                # producing wildly different images — sd-server was
-                # falling back to plain Qwen-Image txt2img on the prompt
-                # alone, with the source image only used as a noise
-                # seed.  We send the source image in BOTH fields so the
-                # same endpoint works for edit-aware models
-                # (Qwen-Image-Edit-2511, use ref_images path) and any
-                # legacy img2img model that falls through (uses
-                # init_image path).
-                # Build the multi-image list for sd-server's two
-                # ingestion paths.  ``image_b64`` is the primary
-                # (the one being edited); ``extra_images_b64`` adds
-                # reference images that condition the edit without
-                # being the noise seed.  For Qwen-Image-Edit-2511,
-                # multi-image conditioning lets you e.g. say "make
-                # this <image1> look like <image2>" or "blend the
-                # subject of <image1> with the style of <image2>".
-                #
-                # sd-server reads:
-                #   init_images[0]  → gen_params.init_image
-                #                    (img2img noise seed)
-                #   extra_images[]  → gen_params.ref_images
-                #                    (Qwen-Image-Edit visual context)
-                # The primary image goes into BOTH so legacy img2img
-                # models that don't read ref_images still see the
-                # source.  Additional refs are appended only to
-                # extra_images.
-                "init_images": [image_b64],
+                # The sd.cpp CLI for Qwen-Image-Edit uses ``-r``
+                # (ref_images only, no init_image).  Mirror that here.
+                # ``denoising_strength`` is a no-op when there is no
+                # init_image — the model controls edit magnitude
+                # through ref-image conditioning + cfg_scale alone.
                 "extra_images": [image_b64, *(extra_images_b64 or [])],
-                "denoising_strength": resolved_denoise,
                 "width": resolved_width,
                 "height": resolved_height,
                 "steps": resolved_steps,
